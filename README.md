@@ -43,8 +43,8 @@ algorithm details evident.
 The code should be quite portable, as it does not explicitly use any
 special hardware, and only relies on compiler (GCC) optimizations.\
 \
-ML algorithms involve working with arrays of real numbers. This code
-uses the C float type to store floating-point values that approximate
+These ML algorithms involve working with arrays of real numbers. This 
+code uses the C float type to store floating-point values that approximate
 real numbers. In C, there are a few ways to store arrays of numbers.
 This code stores two-dimensional arrays in continuous memory, in a
 row-major fashion. For example, an array A of 2 rows and 3 columns that
