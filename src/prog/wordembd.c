@@ -1,4 +1,4 @@
-/* Copyright (c) 2023-2024 Gilad Odinak */
+/* Copyright (c) 2026 Gilad Odinak */
 
 #include <stdio.h>
 #include <ctype.h>
@@ -9,8 +9,38 @@
 #include "array.h"
 #include "hash.h"
 #include "cossim.h"
+#include "wembio.h"
 
-const char* usage ="Usage: wordembd -i <word embedding file>\n";
+const char *usage =
+    "Usage: wordembd -i <word-embedding-file>\n"
+    "\n"
+    "Interactive word-embedding expression evaluator.\n"
+    "\n"
+    "Enter an expression, then enter '=' on a separate line to evaluate it.\n"
+    "Enter '.' on a separate line to exit.\n"
+    "Enter '?' to print this help message.\n"
+    "\n"
+    "Operators:\n"
+    "  +    Add two embeddings\n"
+    "  -    Subtract two embeddings\n"
+    "  *    Multiply embedding by a scalar\n"
+    "  /    Divide an embedding by a scalar\n"
+    "  @    Compute cosine similarity between two embeddings\n"
+    "  ()   Group expressions\n"
+    "\n"
+    "Operator precedence, highest to lowest:\n"
+    "  ()  unary + -  @  * /  + -\n"
+    "\n"
+    "Example:\n"
+    "  > boy - man + woman\n"
+    "  > =\n"
+    "  Result: girl\n";
+
+/* Maximum number of tokens in an expression. It also bounds the
+ * shunting-yard queue and stacks, and the temporaries pool, since
+ * none of them can hold more entries than there are tokens.
+ */
+#define MAXTKN 256
 
 /* Value type for evaluation */
 enum { VAL_VEC, VAL_SCALAR, VAL_OP };
@@ -28,40 +58,51 @@ int precedence(char op)
 {
     switch (op) {
         case '+': case '-': return 1;
-        case '/': return 2;
+        case '*': case '/': return 2;
         case '@': return 3;
+        case '#': case '~': return 4; /* Unary + , - */
     }
     return 0;
 }
 
+/* Unary operators are right associative. */
+int right_assoc(char op)
+{
+    return op == '#' || op == '~';
+}
+
 /* Evaluates an embedding expression and prints the result.
  *
- * The expression is given as a token array. Each token is either a vectori,
+ * The expression is given as a token array. Each token is either a vector,
  * a scalar, or an operator.
  *
  * Supported operators:
  *   '+'  vector addition
  *   '-'  vector subtraction
+ *   '*'  multiplication of embedding by scalar
  *   '/'  division of vector by scalar
  *   '@'  cosine similarity (scalar result)
  *   '(' ')' grouping
  *
- * Operator precedence:
- *   1.  Parentheses
- *   2. '+' and '-' (left associative)
- *   3. '/' (division by a scalar)
- *   4. '@' (cosine similarity)
+ * Operator precedence, highest to lowest:
+ *   Parentheses
+ *   Unary '+' and '-' (right associative)
+ *   '@' (cosine similarity)
+ *   '*' and '/' (left associative)
+ *   '+' and '-' (left associative)
  *
  * Type rules:
- *   - '+' and '-' operate on embeddings only
- *   - '/' operates on embedding and scalar and yields an embedding
- *   - '@' operates on two embeddings and yields a scalar
- *   - Once a scalar is produced, no further operations are allowed
+ * - '+' and '-' operate on embeddings only
+ * - '/' operates on embedding and scalar and yields an embedding
+ * - '*' operates on embedding and scalar in either order, yields an embeddinbg
+ * - '@' operates on two embeddings and yields a scalar
+ * - Once a scalar is produced, no further operations are allowed
  *
  * Grammar:
  * expression := term { ('+' | '-') term }
- * term       := factor { ('@' | '/') factor }
- * factor     := embedding | number | '(' expression ')'
+ * term       := similarity { ( '*' | '/') similarity }
+ * similarity := factor { '@' factor }
+ * factor     := { ('+' | '-') } (embedding | number | '(' expression ')')
  *
  * Behavior:
  *   - Prints the expression using vocabulary strings
@@ -75,72 +116,125 @@ int precedence(char op)
  * tkncnt        - number of tokens
  * hmap          - word <=> index hashmap
  * embeddings    - vocab_size x embedding_dim array
+ * tv            - temporaries pool MAXTKN x embedding_dim,
  * vocab_size    - number of embeddings
  * embedding_dim - embedding dimensionality
  */
 void eval_embd_expr(
     Val* tokens, int tkncnt,
-    HASHMAP* hmap, fArr2D embeddings,
+    HASHMAP* hmap, fArr2D embeddings, fArr2D tv_,
     int vocab_size, int embedding_dim)
 {
-    typedef float (*ArrWE)[embedding_dim];
-    ArrWE E = (ArrWE)embeddings;
+    typedef float (*ArrNE)[embedding_dim];
+    ArrNE E = (ArrNE) embeddings;
+    ArrNE tv = (ArrNE) tv_;
 
-    Val out[256]; int outn = 0;
-    Val ops[256]; int opsn = 0;
+    Val out[MAXTKN]; int outn = 0; /* Output queue    */
+    Val ops[MAXTKN]; int opsn = 0; /* Operators stack */
 
+    Val st[MAXTKN];
+    int sp = 0; 
+    int tp = 0;
+
+    int expect_operand = 1;
     for (int i = 0; i < tkncnt; i++) {
         Val t = tokens[i];
-        if (t.type != VAL_OP) {
-            out[outn++] = t;
+        if (t.type != VAL_OP) { /* Token is a "number"          */
+            out[outn++] = t;    /* Put it into the output queue */
+            expect_operand = 0;
             continue;
         }
 
         char op = t.op;
         if (op == '(') {
             ops[opsn++] = t;
+            expect_operand = 1;
             continue;
         }
         if (op == ')') {
+            /* While operator at top of the stack is not  left parenthesis */
             while (opsn > 0 && ops[opsn - 1].op != '(')
-                out[outn++] = ops[--opsn];
-            if (opsn > 0) 
-                opsn--; // pop '('
+                out[outn++] = ops[--opsn]; /* Pop it into the output queue */
+            if (opsn == 0) {
+                printf("Error: Missing '('\n");
+                return;
+            }
+            opsn--; /* Pop left parenthesis  */
+            expect_operand = 0;
             continue;
+        }
+
+        /* Distinguish unary operators from binary ones. */
+        if (expect_operand && (op == '-' || op == '+')) {
+            t.op = (op == '-') ? '~' : '#';
+            op = t.op;
         }
 
         while (opsn > 0) {
             char top = ops[opsn - 1].op;
-            if (top != '(' && precedence(top) >= precedence(op))
+            if (top != '(' &&
+                (precedence(top) > precedence(op) ||
+                 (precedence(top) == precedence(op) && !right_assoc(op))))
                 out[outn++] = ops[--opsn];
-            else 
+            else
                 break;
         }
         ops[opsn++] = t;
+        expect_operand = 1;
     }
-    while (opsn > 0)
+    /* Pop remaining operatos into output queue */
+    while (opsn > 0) {
+        if (ops[opsn - 1].op == '(') { /* Not matched above with a ')' */
+            printf("Error: Missing ')'\n");
+            return;
+        }
         out[outn++] = ops[--opsn];
+    }
 
-    Val st[256];
-    int sp = 0;
-    float tv[256][embedding_dim];
-    int tp = 0;
-
+    /* Evaluate the expression */
     for (int i = 0; i < outn; i++) {
         Val t = out[i];
-        if (t.type == VAL_VEC) {
-            st[sp++] = (Val){ VAL_VEC, .v = t.v };
+        if (t.type != VAL_OP) {
+            st[sp++] = t;
             continue;
         }
-        if (t.type == VAL_SCALAR) {
-            st[sp++] = (Val){ VAL_SCALAR, .s = t.s };
+        /* t.type == VAL_OP */
+        char op = t.op;
+        if (op == '~' || op == '#') {
+            if (sp < 1) {
+                printf("Error: missing operand\n");
+                return;
+            }
+            if (op == '~') {
+                if (st[sp - 1].type == VAL_VEC) {
+                    if (tp >= MAXTKN) {
+                        printf("Error: expression is too complex\n");
+                        return;
+                    }
+                    float *r = tv[tp++];
+                    for (int k = 0; k < embedding_dim; k++)
+                        r[k] = -st[sp - 1].v[k];
+                    st[sp - 1] = (Val){ VAL_VEC, .v = r };
+                }
+                else if (st[sp - 1].type == VAL_SCALAR) {
+                    st[sp - 1].s = -st[sp - 1].s;
+                }
+                else {
+                    printf("Type error: unary '-' requires an operand\n");
+                    return;
+                }
+            }
             continue;
         }
 
-        /* t.type == VAL_OP */
+        if (sp < 2) {
+            printf("Error: missing operand\n");
+            return;
+        }
+
+        /* Binary operator */
         Val b = st[--sp];
         Val a = st[--sp];
-        char op = t.op;
 
         if (op == '@') {
             if (a.type != VAL_VEC || b.type != VAL_VEC) {
@@ -148,23 +242,46 @@ void eval_embd_expr(
                 return;
             }
             float r = cosine_similarity(a.v, b.v, embedding_dim);
-            printf("= %f\n", r);
-            return;
+            st[sp++] = (Val){ VAL_SCALAR, .s = r };
+            continue;
         }
-        if (op == '/') {
+        if (op == '*' || op == '/') {
+            if (op == '*') {
+                if (!((a.type == VAL_VEC && b.type == VAL_SCALAR) ||
+                      (a.type == VAL_SCALAR && b.type == VAL_VEC))) {
+                    printf("Type error: '*' requires embedding and scalar\n");
+                    return;
+                }
+                if (a.type == VAL_SCALAR) {
+                    Val t = a; a = b; b = t;
+                }
+            }
+            else
             if (a.type != VAL_VEC || b.type != VAL_SCALAR) {
                 printf("Type error: '/' requires vector / scalar\n");
                 return;
             }
+            if (op == '/' && b.s == 0.0f) {
+                printf("Error: division by zero\n");
+                return;
+            }
+            if (tp >= MAXTKN) {
+                printf("Error: expression is too complex\n");
+                return;
+            }
             float* r = tv[tp++];
             for (int k = 0; k < embedding_dim; k++)
-                r[k] = a.v[k] / b.s;
+                r[k] = (op == '*') ? a.v[k] * b.s : a.v[k] / b.s;
             st[sp++] = (Val){ VAL_VEC, .v = r };
             continue;
         }
         if (op == '+' || op == '-') {
             if (a.type != VAL_VEC || b.type != VAL_VEC) {
                 printf("Type error: '+' and '-' require embeddings\n");
+                return;
+            }
+            if (tp >= MAXTKN) {
+                printf("Error: expression is too complex\n");
                 return;
             }
             float* r = tv[tp++];
@@ -176,12 +293,20 @@ void eval_embd_expr(
         }
     }
 
-    if (sp != 1 || st[0].type != VAL_VEC) {
+    if (sp != 1) {
+        printf("Invalid expression\n");
+        return;
+    }
+    if (st[0].type == VAL_SCALAR) {
+        printf("= %f\n", st[0].s);
+        return;
+    }
+    if (st[0].type != VAL_VEC) {
         printf("Invalid expression\n");
         return;
     }
 
-    /* find nearest word */
+    /* Find nearest word */
     int best = -1;
     float best_sim = -1e9f;
     for (int i = 0; i < vocab_size; i++) {
@@ -202,87 +327,27 @@ void eval_embd_expr(
 
 int main(int argc, char** argv)
 {
-    FILE* fp;
     char* embfile;
-    int vocab_size;
-    int embedding_dim;
-    float learning_rate;
-    float learning_rate_decay;
-    int epochs;
-    int cnt;
 
     if (argc < 3 || strcmp(argv[1],"-i") != 0 || strlen(argv[2]) == 0) {
         fprintf(stderr,usage);
         exit(1);
     }
     embfile = argv[2];
-    fp = fopen(embfile,"rb");
-    if (fp == NULL) {
-        fprintf(stderr,"Could not open file '%s' for read\n",embfile);
-        exit(1);
-    }
 
-    cnt = fscanf(fp,
-                 "#,vocab_size,%d,embedding_dim,%d,"
-                 "learning_rate,%f,learning_rate_decay,%f,epochs,%d",
-                 &vocab_size,&embedding_dim,
-                 &learning_rate,&learning_rate_decay,&epochs);
-    if (cnt != 5) {
-        fprintf(stderr,"'%s': Invalid file header format.\n", embfile);
-        fclose(fp);
+    HASHMAP* hmap;
+    fArr2D embeddings;
+    int vocab_size, embedding_dim;
+    if (!load_word_embeddings(embfile,&vocab_size,&embedding_dim,
+                              NULL,NULL,NULL,&hmap,&embeddings))
         exit(1);
-    }
-
-    HASHMAP* hmap = hashmap_create(vocab_size * 3,vocab_size * 15);
     typedef float (*ArrWE)[embedding_dim];
-    ArrWE word_embeddings = allocmem(vocab_size,embedding_dim,float);
+    ArrWE word_embeddings = (ArrWE) embeddings;
 
-    /* Read embeddings */
-    /* Note that file starts at line 1, and first embedding starts at line 2 */
-    int wcnt = 0;
-    for (int lineno = 2; ; lineno++) {
-        int wrdinx;
-        char word[256];
-        cnt = fscanf(fp,"%d,%255[^,],",&wrdinx,word);
-        if (cnt != 2) {
-            if (cnt == -1) /* End of file */
-                break;
-            fprintf(stderr,
-                "'%s': Invalid index, word format at line %d\n",
-                embfile,lineno);
-            hashmap_free(hmap);
-            freemem(word_embeddings);
-            fclose(fp);
-            exit(1);
-        }
-        hashmap_str2inx(hmap,word,1);
-
-        for (int j = 0; j < embedding_dim; j++) {
-            cnt = fscanf(fp,"%f%*[,]", &word_embeddings[wrdinx][j]);
-            if (cnt != 1) {
-                fprintf(stderr,
-                    "'%s': Invalid embedding value at line %d, value #%d\n",
-                    embfile,lineno,j + 1);
-                hashmap_free(hmap);
-                freemem(word_embeddings);
-                fclose(fp);
-                exit(1);
-            }
-        }
-        if (++wcnt > vocab_size) {
-            fprintf(stderr,
-                "'%s': Ignoring words beyond declared vocabulary size of %d\n",
-                embfile,vocab_size);
-            break;
-        }
-    }
-    fclose(fp);
-    if (wcnt < vocab_size)
-        vocab_size = wcnt;
-
-    int maxtkn = 256;
-    Val tokens[maxtkn];
+    Val tokens[MAXTKN];
     int tkninx = 0;
+
+    fArr2D tv = allocmem(MAXTKN,embedding_dim,float);
 
     for (;;) {
         char line[256];
@@ -300,33 +365,43 @@ int main(int argc, char** argv)
         p = line;
         if (strcmp(p,".") == 0)
             break;
+        if (strcmp(p,"?") == 0) {
+            puts(usage);
+            continue;
+        }
         if (strcmp(p,"=") == 0) {
-            eval_embd_expr(tokens,tkninx,hmap,(fArr2D) word_embeddings,vocab_size,embedding_dim);
+            eval_embd_expr(tokens,tkninx,hmap,
+                           (fArr2D) word_embeddings,tv,
+                           vocab_size,embedding_dim);
             printf("\n");
             tkninx = 0;
             continue;
         }
 
-        while (*p != '\0' && tkninx < maxtkn) {
+        while (*p != '\0' && tkninx < MAXTKN) {
             while (*p == ' ') p++;
             if (*p == '\0') break;
 
             switch (*p) {
-                case '+': case '-': case '/': case '@': case '(': case ')':
+                case '+': case '-': 
+                case '*': case '/': 
+                case '@': 
+                case '(': case ')':
                     tokens[tkninx++] = (Val){ VAL_OP, .op = *p++ };
-                    continue;
+                continue;
             }
 
-            if (isalpha(*p)) {
+            if (isalpha((unsigned char) *p) || *p == '\'') {
                 char word[256], *w = word;
-                while (*p != '\0' && isalpha(*p))
+                while (*p != '\0' && 
+                       (isalpha((unsigned char) *p) || *p == '\''))
                     if (w < word + sizeof(word) - 1)
-                        *w++ = *p++;
+                        *w++ = tolower(*p++);
                 *w = '\0';
 
                 int winx = hashmap_str2inx(hmap, word, 0);
                 if (winx < 0 || winx >= vocab_size)
-                    continue;
+                    winx = 0;
 
                 tokens[tkninx++] = (Val){ VAL_VEC, .v = word_embeddings[winx] };
 
@@ -335,13 +410,22 @@ int main(int argc, char** argv)
                     printf(" %.6f", word_embeddings[winx][i]);
                 if (embedding_dim > 4) printf(" ...");
                 printf("\n");
+                continue;
             } 
-            else 
-                p++;
+
+            char* e;
+            float scalar = strtof(p,&e);
+            if (p != e) {
+                tokens[tkninx++] = (Val){ VAL_SCALAR, .s = scalar };
+                p = e;
+                continue;
+            }
+            p++;
         }
     }
 
     hashmap_free(hmap);
     freemem(word_embeddings);
+    freemem(tv);
     return 0;
 }
