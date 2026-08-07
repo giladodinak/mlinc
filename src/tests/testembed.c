@@ -38,8 +38,8 @@ int failures = 0;
 /* Builds and initializes a fresh embedding layer with the test dimensions. */
 static EMBEDDING* make_embedding(void)
 {
-    EMBEDDING* l = embedding_create(EMBD, CTX, PAD);
-    embedding_init(l, VOCAB, BATCH);
+    EMBEDDING* l = embedding_create(EMBD,CTX,PAD);
+    embedding_init(l,VOCAB,BATCH,1);
     return l;
 }
 
@@ -52,7 +52,7 @@ static void fill_random_indices(fArr2D X_, int B, int M, int D)
     ArrBM X = (ArrBM) X_;
     for (int i = 0; i < B; i++)
         for (int j = 0; j < M; j++)
-            X[i][j] = (float)(int) urand(0.0, (double) D);
+            X[i][j] = (float)(int) urand(0.0,(float) D);
 }
 
 /* Scalar loss L = sum_{i,k} dy[i][k] * h[i][k], where h is the forward output.
@@ -540,7 +540,7 @@ int run_demo(void)
     /* Create and initialize layers */
     int vocab_size = hmap->map_used; /* Already includes pad (at index 0) */
     EMBEDDING* embedding = embedding_create(embedding_dim,cxt_size,0);
-    embedding_init(embedding,vocab_size,cxt_cnt);
+    embedding_init(embedding,vocab_size,cxt_cnt,1);
     DENSE* dense = dense_create(vocab_size,"softmax");
     dense_init(dense,embedding_dim,cxt_cnt);
 

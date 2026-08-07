@@ -1,6 +1,6 @@
 /* Copyright (c) 2023-2026 Gilad Odinak */
 
-/* This program implements vanilla word2vec based on mikolov's papers.
+/* This program implements word2vec based on mikolov's papers.
  * The input is a file containing a list of files. Each of these files
  * contains some text.
  *
@@ -26,6 +26,7 @@
 #include "activation.h"
 #include "embedding.h"
 #include "negsample.h"
+#include "wembio.h"
 
 const char* usage =
 "Usage: word2vec [options]\n"
@@ -35,7 +36,7 @@ const char* usage =
 "  -c <context_size>  Set context size (must be even, default 8)\n"
 "  -d <embedding_dim> Set embedding dimension (default 100)\n"
 "  -e <num_epochs>    Set number of epochs (default 10)\n"
-"  -i <train_file>    Set training files list (def. news/data/tr_files.lst)\n"
+"  -i <train_file>    Set training files list (def. news/data/all_files.lst)\n"
 "  -n <neg_samples>   Num of negative samples per positive target (def 10)\n"
 "  -o <output_file>   Set output embedding file (default word2vec.model)\n"
 "  -r <learning_rate> Set starting learning rate (default 0.005)\n"
@@ -150,9 +151,9 @@ void shuffle_list(char** list, int cnt)
 
 int main(int argc, char** argv)
 {
-    char* data_dir = "data/news/data"; /* Input */
-    char* tr_file = "data/news/tr_files.lst"; /* Input */
-    char* embedding_file = "word2vec.model"; /* Output */
+    char* data_dir = "data/news/data";         /* Input  */
+    char* tr_file = "data/news/all_files.lst"; /* Input  */
+    char* embedding_file = "word2vec.model";   /* Output */
     float vocab_coverage = 0.99; /* 99% */
     int vocab_size = 0; /* Default: size derived from vocab_coverage */
     int embedding_dim = 100;
@@ -359,7 +360,7 @@ int main(int argc, char** argv)
 
     /* Create and initialize layers */
     EMBEDDING* embedding = embedding_create(embedding_dim,cxt_size,0);
-    embedding_init(embedding,vocab_size,batch_size);
+    embedding_init(embedding,vocab_size,batch_size,1);
     NEGSAMPLE* output = negsample_create(vocab_size,neg_samples);
     negsample_init(output,embedding_dim,batch_size);
     negsample_set_dist(output,dist_table,dist_table_size);
@@ -469,29 +470,11 @@ int main(int argc, char** argv)
 
     printf("\n");
     printf("Saving word embeddings to %s\n",embedding_file);
-    FILE* fp = fopen(embedding_file,"wb");
-    if (fp != NULL) {
-        fprintf(fp,
-                "#,vocab_size,%d,embedding_dim,%d,"
-                "learning_rate,%f,learning_rate_decay,%f,epochs,%d\n",
-                vocab_size,embedding_dim,
-                initial_learning_rate,learning_rate_decay,num_epochs);
-
-        typedef float (*ArrDE)[embedding->E];
-        ArrDE Wx = (ArrDE) embedding->Wx;
-        for (int wrdinx = 0; wrdinx < vocab_size; wrdinx++) {
-            const char* word = hashmap_inx2str(hmap,wrdinx);
-            if (strlen(word) == 0)
-                word = "<unk>";
-            fprintf(fp,"%d,%s",wrdinx,word);
-            for (int j = 0; j < embedding_dim; j++)
-                fprintf(fp,",%10.8f",Wx[wrdinx][j]);
-            fprintf(fp,"\n");
-        }
-        fclose(fp);
-    }
-    else
-        fprintf(stderr,"Failed to open file '%s' for write\n",embedding_file);
+    if (!store_word_embeddings(embedding_file,vocab_size,embedding_dim,
+                               initial_learning_rate,learning_rate_decay,
+                               num_epochs,hmap,embedding->Wx))
+        fprintf(stderr,"Failed to save word embeddings to '%s'\n",
+                embedding_file);
     printf("\n");
     hashmap_free(hmap);
     embedding_free(embedding);

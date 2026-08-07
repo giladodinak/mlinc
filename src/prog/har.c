@@ -425,7 +425,7 @@ int main(int argc, char** argv)
         " -s: Store model in file at the end of training                \n"
         "\n";
 
-    int epochs = 9, bsize = 64, tbsize = 64;
+    int epochs = 7, bsize = 64, tbsize = 64;
     float lr = 0.0001, wd = 0.1;
     char *loadfile = NULL, *storefile = NULL;
     int lyrcnt = 2;

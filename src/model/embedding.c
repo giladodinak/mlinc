@@ -28,24 +28,29 @@ EMBEDDING* embedding_create(int embedding_dim, int context_len, int padinx)
     l->E = embedding_dim;
     l->M = context_len;
     l->padinx = padinx;
+    l->h = NULL;
+    l->Wx = NULL;
     return l;
 }
 
 /* Initializes an embedding layer created by embedding_create().
  *
  * Parameters:
- *   vocab_size - Number vocabulary tokens (including blank, if any)
+ *   vocab_size - Number of vocabulary tokens (including blank, if any)
  *   batch_size - Number of input contexts processed simultaneously
+ *   training   - 1: used for training, 0: container for embedding and weights
  *
  * Notes:
- *   The network's weights are initialized using uniform distribution
+ *   If training, the weights are initialized using uniform distribution
  */
-void embedding_init(EMBEDDING* l, int vocab_size, int batch_size)
+void embedding_init(EMBEDDING* l, int vocab_size, int batch_size, int training)
 {
     l->D = vocab_size;
     l->B = batch_size;
-    l->h = allocmem(l->B,l->E,float);
     l->Wx = allocmem(l->D,l->E,float);
+    if (!training)
+        return;
+    l->h = allocmem(l->B,l->E,float);
     typedef float (*ArrDE)[l->E];
     ArrDE Wx = (ArrDE) l->Wx;
 
@@ -64,8 +69,8 @@ void embedding_init(EMBEDDING* l, int vocab_size, int batch_size)
  */
 void embedding_free(EMBEDDING* l)
 {
-    freemem(l->h);
     freemem(l->Wx);
+    freemem(l->h);
     freemem(l);
 }
 

@@ -757,16 +757,16 @@ int test_transformer_retrieval(int heads, int model_dim, int ffn_dim,
               "final=1 verbose=2");
 
     float y[T][N];
-    float xv[T];
     model_predict(m,xVd,(fArr2D) y,T);
-    for (int t = 0; t < T; t++)
-        xv[t] = (float) t;
 
     printf("\n");
 
 #ifdef HAS_PLOT
     {
         #include "../plot/plot.h"
+        float xv[T];
+        for (int t = 0; t < T; t++)
+            xv[t] = (float) t;
         plot_graph(xv,(float*)y,yVdf,T,
                    epochs,losses,accuracies,v_losses,v_accuracies,title);
     }
