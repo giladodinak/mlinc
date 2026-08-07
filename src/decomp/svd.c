@@ -57,20 +57,42 @@ static void reorder_wide(int n,int m,
  * This implementation follows the algorithm contributed by Golub and Reinsch
  * to Handbook Series Linear Algebra Vol. 14, pg 403-420 (1970)
  */
-void SVD(const fArr2D A_, fArr2D U_, fVec S_, fArr2D Vt_, int m, int n)
+void SVD(fArr2D A_, fArr2D U_, fVec S_, fArr2D Vt_, int m, int n)
 {
-    if (A_ == NULL) return;
+    if (A_ == NULL || m <= 1 || n <= 1) return;
+
+    /* k is the larger dimension of A */
     int k = (m < n) ? m : n;
-    float b[(S_ != NULL) ? 1 : k];
-    fVec S = (S_ != NULL) ? S_ : b;
+    /* Size of temporary S in bytes, if used, otherwise 0 */
+    int bS = (S_ == NULL) * k * sizeof(float);
+    /* Size of temporary A in bytes, if used, otherwise 0 */
+    int bA = ((m >= n && U_ == NULL && Vt_ != NULL) || 
+              (m < n && Vt_ == NULL && U_ != NULL)) * m * n * sizeof(float);
+    /* Use stack based arrays if total size less than threshold */
+    int useStack = (bS + bA) <= 1000000;
+    /* Allocate stack based arrays if as needed, or dummy ones */
+    float vS[(useStack && bS > 0) ? k : 1];
+    float vA[(useStack && bA > 0) ? m * n : 1];
+
+    fVec S = S_;
+    if (bS) S = (fVec) ((useStack) ? vS : allocmem(k,1,float));
+
+    fArr2D A = A_;
+    if (bA) {
+      A = (fArr2D) ((useStack) ? vA : allocmem(m,n,float));
+      fltcpy(A,A_,m * n);
+    }
+
     if (m >= n) {
-        svd_tall(m,n,A_,S,U_,Vt_);
+        svd_tall(m,n,A,S,U_,Vt_);
         reorder_tall(m,n,S,U_,Vt_);
     }
     else {
-        svd_wide(n,m,A_,S,Vt_,U_);
+        svd_wide(n,m,A,S,Vt_,U_);
         reorder_wide(n,m,S,Vt_,U_);
     }
+    if (bS && !useStack) freemem(S);
+    if (bA && !useStack) freemem(A);
 }
 
 /* Computes the singular values and complete orthogonal decomposition

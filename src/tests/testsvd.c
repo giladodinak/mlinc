@@ -283,6 +283,75 @@ int full_test(int min_dim, int max_dim, int num_tests, int quiet, int precision)
     return pass;
 }
 
+int svd_test_null(fArr2D A_, int m, int n, int want_u, int want_s, int want_vt,
+                  int quiet, int precision, int index)
+{
+    float tol = 1 / pow(10,(precision-1));
+    int tall = (m >= n);
+    int ur = m,            uc = tall ? n : m; /* U  is m x n (tall) or m x m (wide) */
+    int ls = tall ? n : m;                    /* S  length                          */
+    int vr = tall ? n : m, vc = n;            /* Vt is n x n (tall) or m x n (wide)  */
+
+    /* reference full decomposition (on its own copy of A) */
+    fArr2D Aref  = allocmem(m,n,float);
+    fltcpy(Aref,A_,m * n);
+    fArr2D Uref  = allocmem(ur,uc,float);
+    fVec   Sref  = allocmem(1,ls,float);
+    fArr2D Vtref = allocmem(vr,vc,float);
+    SVD(Aref,Uref,Sref,Vtref,m,n);
+    freemem(Aref);
+
+    /* partial decomposition on a fresh copy of A, unrequested outputs NULL */
+    fArr2D Apart = allocmem(m,n,float);
+    fltcpy(Apart,A_,m * n);
+    fArr2D U  = want_u  ? allocmem(ur,uc,float) : NULL;
+    fVec   S  = want_s  ? allocmem(1,ls,float)  : NULL;
+    fArr2D Vt = want_vt ? allocmem(vr,vc,float) : NULL;
+    SVD(Apart,U,S,Vt,m,n);
+
+    int keptA = is_close(A_,Apart,m,n,tol);
+    int oku   = !want_u  || is_close(Uref,U,ur,uc,tol);
+    int oks   = !want_s  || is_close((fArr2D)Sref,(fArr2D)S,1,ls,tol);
+    int okvt  = !want_vt || is_close(Vtref,Vt,vr,vc,tol);
+
+    if (!quiet) {
+        char name[16], format[16];
+        snprintf(format,sizeof(format),"%%%d.%df",3+precision,precision);
+        snprintf(name,sizeof(name),"A%d",index);
+        print_array(A_,m,n,name,format,0);
+    }
+    if (!keptA)
+        printf("Test %d: input matrix A was modified by SVD\n",index);
+    if (!oku)
+        printf("Test %d: U does not match reference decomposition\n",index);
+    if (!oks)
+        printf("Test %d: S does not match reference decomposition\n",index);
+    if (!okvt)
+        printf("Test %d: Vt does not match reference decomposition\n",index);
+
+    freemem(Uref); freemem(Sref); freemem(Vtref);
+    if (U)  freemem(U);
+    if (S)  freemem(S);
+    if (Vt) freemem(Vt);
+    freemem(Apart);
+
+    return keptA && oku && oks && okvt;
+}
+
+int svd_test_null_rand(int m, int n, int want_u, int want_s, int want_vt,
+                       int precision, int index)
+{
+    fArr2D A = allocmem(m,n,float);
+    typedef float (*ArrMN)[n];
+    ArrMN a = (ArrMN) A;
+    for (int i = 0; i < m; i++)
+        for (int j = 0; j < n; j++)
+            a[i][j] = nrand(0,1) * 9.0;
+    int ok = svd_test_null(A,m,n,want_u,want_s,want_vt,1,precision,index);
+    freemem(A);
+    return ok;
+}
+
 int main()
 {
     printf("smoke test 4 x 4 %s\n",svd_test(A0,4,4,1,5,0) ? "ok" : "failed");
@@ -292,6 +361,23 @@ int main()
     printf("smoke test 4 x 4 %s\n",svd_test(A4,4,4,1,5,4) ? "ok" : "failed");
     printf("smoke test 4 x 3 U only %s\n",svd_test_U(A3,U3,0,4,3,1,5,5) ? "ok" : "failed");
     printf("smoke test 4 x 3 inplace U only %s\n",svd_test_U(A3,U3,1,4,3,1,5,6) ? "ok" : "failed");
+
+    /* Null-output tests, temporaries on the stack (VLA) */
+    printf("null test 4 x 3 tall, S=NULL (VLA)        %s\n",
+        svd_test_null(A3,4,3,1,0,1,1,5,7)  ? "ok" : "failed");
+    printf("null test 4 x 3 tall, U=S=NULL (VLA)      %s\n",
+        svd_test_null(A3,4,3,0,0,1,1,5,8)  ? "ok" : "failed");
+    printf("null test 2 x 3 wide, Vt=S=NULL (VLA)     %s\n",
+        svd_test_null(A2,2,3,1,0,0,1,5,9)  ? "ok" : "failed");
+    /* Null-output tests, temporaries on the heap (allocmem) */
+    printf("null test 512x512 tall, U=NULL (heap)     %s\n",
+        svd_test_null_rand(512,512,0,1,1,4,10) ? "ok" : "failed");
+    printf("null test 512x512 tall, U=S=NULL (heap)   %s\n",
+        svd_test_null_rand(512,512,0,0,1,4,11) ? "ok" : "failed");
+    printf("null test 512x600 wide, Vt=S=NULL (heap)  %s\n",
+        svd_test_null_rand(512,600,1,0,0,4,12) ? "ok" : "failed");
+
     printf("full test %s\n",full_test(2,512,100,1,4) ? "ok" : "failed");
+
     return 0;
 }

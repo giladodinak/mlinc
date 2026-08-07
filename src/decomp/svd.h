@@ -37,6 +37,6 @@
  *   If m < n then U may be NULL, in which case only Vt and S are returned;
  *   if both U and Vt are NULL, A is updated in place with the value of Vt.
  */
-void SVD(const fArr2D A_, fArr2D U_, fVec S_, fArr2D Vt_, int m, int n);
+void SVD(fArr2D A_, fArr2D U_, fVec S_, fArr2D Vt_, int m, int n);
 
 #endif
