@@ -41,7 +41,8 @@ INC_DIRS = -I$(SRC_DIR) -I$(NUM_DIR) -I$(DECOMP_DIR) \
            
 LIB_DIRS =
 
-PROGRAMS = sph2wav feat2audio word2vec wordembd har timitfeat timit timittest charlm
+PROGRAMS = sph2wav feat2audio word2vec wordembd simlex bats \
+           har timitfeat timit timittest charlm
 TESTS = testmem testarray testrandom testhash testannoy \
 		testhann testfilter testlpc testlsp \
 		testqr testsvd testpca \
