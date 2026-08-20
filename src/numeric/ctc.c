@@ -12,6 +12,13 @@
 #include "editdist.h"
 #include "ctc.h"
 
+/* CTC loss runs in log-space and depends on IEEE semantics that
+ * -ffast-math discards. This pragma restores these semantics.
+ */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("no-finite-math-only", "no-unsafe-math-optimizations")
+#endif
+
 /* Creates a Contectionist Temporal Classification loss calculator.
  * 
  * Parameters:

@@ -17,7 +17,7 @@ LFLAGS += $(CLANG_B) $(CLANG_L)
 
 endif
 
-CFLAGS += -Wno-format-security -Wno-vla-cxx-extension
+CFLAGS += -fno-finite-math-only -fno-unsafe-math-optimizations -Wno-format-security -Wno-vla-cxx-extension -Wno-vla-extension -Wno-literal-conversion
 
 CC = clang
 CPPC = clang++

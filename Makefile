@@ -6,6 +6,7 @@ PROFILE =   # Set to yes to enable profiling support (disables inlining)
 USEDOUBLE = # Set to yes to use double precision math
 MARCH =     # Set to target architecture, if not same as this machine
 NOPLOT =    # Set to yes to disable plotting, and use of python matplotlib
+USEBLAS=    # Set to yes to use openblas/cblas for matrix multiplications
 USECLANG=   # Set to yes to use clang instead of gcc
 USEGCCENV=  # Set to use gcc headers and libraries with clang
 
@@ -43,7 +44,7 @@ LIB_DIRS =
 
 PROGRAMS = sph2wav feat2audio word2vec wordembd simlex bats \
            har timitfeat timit timittest charlm
-TESTS = testmem testarray testrandom testhash testannoy \
+TESTS = testmem cblastest testarray testrandom testhash testannoy \
 		testhann testfilter testlpc testlsp \
 		testqr testsvd testpca \
 		testadamw testctc testnorm \
@@ -56,11 +57,11 @@ AOBJS= $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 OBJS = $(filter-out $(BUILD_DIR)/prog/%.o,$(filter-out \
                                               $(BUILD_DIR)/tests/%.o,$(AOBJS)))
 
+include Environ.mk # OS and processor depndencies
+
 ifneq ($(USECLANG),) # USECLANG is not blank - use clang instead of gcc
 include Clang.mk
 endif
-
-include Environ.mk # OS and processor depndencies
 
 ifeq ($(NOPLOT),)
 include Plot.mk   # plotting (matlibplot for C++) support, if available

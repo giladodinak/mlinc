@@ -10,6 +10,10 @@
 #include "grpnorm.h"
 #include "addnorm.h"
 
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC optimize("no-finite-math-only", "no-unsafe-math-optimizations")
+#endif
+
 #define EPS 1e-3
 #define TOL 1e-2
 

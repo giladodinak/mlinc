@@ -26,6 +26,19 @@ typedef int (*iArr2D)[];
 typedef float (*fVec);
 typedef float (*fArr2D)[];
 
+#ifdef USE_BLAS
+#ifdef __APPLE__
+#include <Accelerate/Accelerate.h>
+#else
+#include <cblas.h>
+#endif
+#ifdef USE_DOUBLE
+#define GEMM cblas_dgemm
+#else
+#define GEMM cblas_sgemm
+#endif
+#endif
+
 /* Multiplies matrix x by matrix y, and returns the result in matrix r.
  * r = x @ y
  * r: resulting matrix NxM
@@ -39,6 +52,8 @@ static inline void matmul(fArr2D restrict r_/*[N][M]*/,
                           const fArr2D restrict y_/*[d][M]*/,
                           int N, int d, int M)
 {
+    /* r[N][M] = x[N][d] @ y[d][M] */
+#ifndef USE_BLAS
     typedef float (*ArrNM)[M]; ArrNM r = (ArrNM) r_;
     typedef float (*ArrNd)[d]; const ArrNd x = (const ArrNd) x_;
     typedef float (*ArrdM)[M]; const ArrdM y = (const ArrdM) y_;
@@ -47,6 +62,13 @@ static inline void matmul(fArr2D restrict r_/*[N][M]*/,
         for (int k = 0; k < d; k++)
             for (int j = 0; j < M; j++)
                 r[i][j] += x[i][k] * y[k][j];
+#else
+    GEMM(CblasRowMajor,CblasNoTrans,CblasNoTrans,
+         N,M,d,
+         1.0,(const float*)x_,d,
+         (const float*) y_,M,
+         0.0, (float*) r_,M);
+#endif
 }
 
 /* Multiplies matrix x by the transpose of matrix y.
@@ -63,6 +85,7 @@ static inline void addMatmulT(fArr2D restrict r_/*[N][M]*/,
                                const fArr2D restrict y_/*[M][d]*/,
                                int N, int d, int M)
 {
+#ifndef USE_BLAS
     typedef float (*ArrNM)[M]; ArrNM r = (ArrNM) r_;
     typedef float (*ArrNd)[d]; const ArrNd x = (const ArrNd) x_;
     typedef float (*ArrMd)[d]; const ArrMd y = (const ArrMd) y_;
@@ -70,6 +93,13 @@ static inline void addMatmulT(fArr2D restrict r_/*[N][M]*/,
         for (int j = 0; j < M; j++)
             for (int k = 0; k < d; k++)
                 r[i][j] += x[i][k] * y[j][k];
+#else
+    GEMM(CblasRowMajor, CblasNoTrans, CblasTrans,
+          N,M,d,
+          1.0,(const float*) x_,d,
+          (const float*) y_,d,
+          1.0,(float*) r_,M);
+#endif
 }
 
 /* Multiplies matrix x by the transpose of matrix y.
@@ -86,8 +116,17 @@ static inline void matmulT(fArr2D restrict r_/*[N][M]*/,
                             const fArr2D restrict y_/*[M][d]*/,
                             int N, int d, int M)
 {
+    /* r[N][M] = x[N][d] @ y[M][d]^T */
+#ifndef USE_BLAS
     fltclr((float *) r_,N * M);
-    return addMatmulT(r_,x_,y_,N,d,M);
+    addMatmulT(r_,x_,y_,N,d,M);
+#else
+    GEMM(CblasRowMajor, CblasNoTrans, CblasTrans,
+          N,M,d,
+          1.0,(const float*) x_,d,
+          (const float*) y_,d,
+          0.0,(float*) r_,M);
+#endif
 }
 
 /* Multiplies the transpose of matrix x by matrix y.
@@ -104,6 +143,7 @@ static inline void Tmatmul(fArr2D restrict r_/*[N][M]*/,
                            const fArr2D restrict y_/*[d][M]*/,
                            int N, int d, int M)
 {
+#ifndef USE_BLAS
     typedef float (*ArrNM)[M]; ArrNM r = (ArrNM) r_;
     typedef float (*ArrdN)[N]; const ArrdN x = (const ArrdN) x_;
     typedef float (*ArrdM)[M]; const ArrdM y = (const ArrdM) y_;
@@ -112,6 +152,13 @@ static inline void Tmatmul(fArr2D restrict r_/*[N][M]*/,
         for (int i = 0; i < N; i++)
             for (int j = 0; j < M; j++)
                 r[i][j] += x[k][i] * y[k][j];
+#else
+    GEMM(CblasRowMajor, CblasTrans, CblasNoTrans,
+         N,M,d,
+         1.0,(const float*) x_,N,
+         (const float*) y_,M,
+         0.0,(float*) r_,M);
+#endif
 }
 
 /* Multiplies the vector v by the matrix m and
@@ -217,7 +264,6 @@ static inline void matdiag(const fArr2D restrict m_/*[N][M]*/,
     VecD v = (VecD) v_;
     for (int i = 0; i < D; i++)
         v[i] = m[i][i];
-
 }
 
 /* Returns a square matrix m whose diagonal contains the elements of

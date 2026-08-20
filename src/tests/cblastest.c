@@ -4,45 +4,47 @@
 #include <string.h>
 #include <math.h>
 
-#ifdef __linux__
-#include <cblas.h>
-#elif defined __APPLE__
+#ifdef USE_BLAS
+#ifdef __APPLE__
 #include <Accelerate/Accelerate.h>
+#else
+#include <cblas.h>
+#endif
+#ifdef USE_DOUBLE
+#define GEMM cblas_dgemm
+#else
+#define GEMM cblas_sgemm
+#endif
 #endif
 
-double nrand(double mean, double stddev) 
+#include "float.h"
+#include "etime.h"
+#include "random.h"
+
+#define ASIZE 512
+
+float a[ASIZE][ASIZE];
+float b[ASIZE][ASIZE];
+float c[ASIZE][ASIZE];
+
+
+int main (int argc, char **argv) 
 {
-    double u1 = rand() / ((double)RAND_MAX + 1);
-    double u2 = rand() / ((double)RAND_MAX + 1);
-    // Box-Muller transform
-    double z = sqrt(-2.0 * log(u1)) * sin(2.0 * M_PI * u2);
-    return mean + stddev * z; // Shift and scale
-}
-
-#define ASIZE 1024
-
-double a[ASIZE][ASIZE];
-double b[ASIZE][ASIZE];
-double c[ASIZE][ASIZE];
-
-
-void main (int argc, char **argv) 
-{
-    int cblas = 0;
+    int blas = 0;
     int iter = 0;
     if (argc == 1) {
-        fprintf(stderr,"syntax: cblastest [-cblas] [iterations]\n");
-        return;
+        fprintf(stderr,"syntax: cblastest [-blas] [iterations]\n");
+        return 1;
     }
     if (argc >= 2) {
         if (argc >= 3)
             iter = atoi(argv[2]);      
-        if (strcmp(argv[1],"-cblas") == 0)
-            cblas = 1;
+        if (strcmp(argv[1],"-blas") == 0)
+            blas = 1;
         else
             iter = atoi(argv[1]);
     }
-    printf("cblas %s iterations %d\n",(cblas)?"true":"false",iter);        
+    printf("matrix size %d X %d, blas %s iterations %d\n",ASIZE,ASIZE,(blas)?"true":"false",iter);        
             
     for (int i = 0; i < ASIZE; i++) {
         for (int j = 0; j < ASIZE; j++) {
@@ -51,13 +53,19 @@ void main (int argc, char **argv)
         }
     }    
 
+    float start_time = current_time();
     for (int i = 0; i < iter; i++) {
-        if (cblas) {
-            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                ASIZE, ASIZE, ASIZE,
-                1.0, (const double *) a, ASIZE,
-                (const double *) b, ASIZE,
-                1.0, (double *) c, ASIZE);
+        if (blas) {
+#ifdef USE_BLAS
+            GEMM(CblasRowMajor,CblasNoTrans,CblasNoTrans,
+                ASIZE,ASIZE,ASIZE,
+                1.0,(const float *) a,ASIZE,
+                (const float *) b,ASIZE,
+                1.0,(float *) c,ASIZE);
+#else
+            fprintf(stderr,"\nBLAS not supported\n");
+            return 1;
+#endif
         }
         else {    
             for (int i = 0; i < ASIZE; i++) {
@@ -68,5 +76,9 @@ void main (int argc, char **argv)
                 }
             }
         }
-    }        
+    }
+    float time_total = elapsed_time(start_time);
+    float time_iter_us = time_total * 1000000 / iter;
+    printf("Elapsed time %g seconds, time per iteration %.f microseconds\n",time_total,time_iter_us);
+    return 0;
 }

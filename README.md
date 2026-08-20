@@ -2,23 +2,25 @@
 
 ## Overview
 
-This project aims to provide a simple implementation of some Machine
-Learning (ML) basic building blocks, mostly linear neural networks
-(Multi Layer Perceptron), and multi-layer recurrent neural networks
-(specifically LSTM). These are implemented in simple C, making all
-algorithm details evident.
+This project aims to provide a simple implementation of some
+Machine Learning (ML) basic building blocks, linear neural networks
+(Multi Layer Perceptron), multi-layer recurrent neural networks
+(specifically LSTM), and Transformers. These are implemented in 
+simple C, making all algorithm details evident.
 
 #### ML algorithms and building blocks implemented
 
--   Neural networks
+-   Neural network layers
     -   Linear (Dense) fully connected neural network
-    -   LSTM - Long Short Term Memory neural network (Hochreiter -
-        Schmidhuber - Gers - Cummins)
-    -   Embedding (Mikolov)
+    -   LSTM - Long Short Term Memory neural network (Hochreiter et al)
+    -   Embedding (Mikolov et al)
+    -   MHA - Multi-Head Attention (Vaswani et al)
+    -   Transformer (decoder) (Vaswani et al)
     -   Multi-layer neural network model
 -   Activation functions and their derivatives
     -   Sigmoid
     -   ReLU - Rectified Linear Unit
+    -   GeLU - Gaussian Error Linear Unit
     -   Softmax
 -   Loss functions and their derivatives
     -   Mean Square Error - regression
@@ -91,6 +93,13 @@ The resulting programs will be in bin sub-directory. Try running
 the memory allocation test program to verify binary compatibility\
 `$ bin/testmem`
 
+### Using BLAS (Basic Linear Algebra Subprograms)
+
+When enabled, BLAS substitutes some of the matrix multiplications functions
+in [array.h](src/numeric/array.h) with highly optimized multi-core library
+routines, To enable BLAS, compile the code with the USEBLAS flag\
+`$ make USEBLAS=Yes`
+
 ### Plotting
 
 Some test programs use C bindings to Python matplotlib to display
@@ -111,7 +120,8 @@ In the project root directory, run these commands:\
 `$ bin/testmodel`\
 `$ bin/testembed`\
 `$ bin/har`\
-`$ bin/timit`
+`$ bin/timit`\
+`$ bin/word2vec`
 
 ### License
 
