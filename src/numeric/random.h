@@ -14,6 +14,8 @@
 extern int32_t lrng_seed;
 void init_lrng(int seed);
 
+static inline int get_lrng_seed(void) { return lrng_seed; }
+
 /* lrng returns a pseudo-random real number uniformly distributed 
  * between 0.0 and 1.0, exclusive on both ends.
  * Lehmer random number generator - Steve Park & Dave Geyer
