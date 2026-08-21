@@ -147,11 +147,12 @@ void negsample_reset(NEGSAMPLE* l)
 
 /* Computes the negative-sampling loss and its gradients for a batch.
  *
- * For each of the first 'cnt' rows, scores the target word plus n_neg
- * sampled negatives, accumulating the gradient into h (dh) and into the
- * output weights (gWo). Only the Wo rows actually scored are zeroed (on
- * first touch this batch) and recorded in l->touched / l->ntouched, so a
- * subsequent sparse update touches only those rows.
+ * Scores each target and sampled negatives, accumulating gradients into h
+ * and Wo. Records only touched Wo rows, enabling a subsequent sparse update.
+ *
+ * Negative Wo/gWo rows are scattered and cache-unfriendly. Draw and prefetch
+ * all negatives first, then process them while prefetching ahead. This changes
+ * only access order, not results.
  *
  * Parameters:
  *   l       - Pointer to the layer
@@ -175,6 +176,7 @@ float negsample_loss(NEGSAMPLE* restrict l,
 {
     const int E = l->E;
     const int K = l->K;
+    const int n_neg = l->n_neg;
 
     typedef float (*ArrBE)[E];
     typedef float (*ArrKE)[E];
@@ -191,26 +193,24 @@ float negsample_loss(NEGSAMPLE* restrict l,
         exit(-1);
     }
 
-    /* New batch: bump the stamp so prep_row() re-zeroes rows on first touch,
-     * and reset the touched list and the input-gradient buffer. 
-     */
     l->stamp++;
     l->ntouched = 0;
     fltclr(dh_,cnt * E);
 
-    float loss = 0.0f;
+    int negbuf[n_neg];
+    float loss = 0.0;
     for (int i = 0; i < cnt; i++) {
         int target = (int) labels[i];
         if (target <= 0 || target >= K) /* Index 0 reserved (PAD); skip */
             continue;
 
         /* Positive sample */
-        float dot = 0.0f;
+        float dot = 0.0;
         for (int j = 0; j < E; j++)
             dot += Wo[target][j] * h[i][j];
         float p = sigmoid1(dot);
-        loss -= logf(p + 1e-8f);
-        float grad = p - 1.0f; /* d loss / d dot */
+        loss -= logf(p + 1e-8);
+        float grad = p - 1.0; /* d loss / d dot */
 
         prep_row(l,gWo_,target);
         for (int j = 0; j < E; j++) {
@@ -221,11 +221,27 @@ float negsample_loss(NEGSAMPLE* restrict l,
         float pos_dot = dot;
         int beaten = 1; /* Positive scored above all its negatives */
 
-        /* Negative samples */
-        for (int k = 0; k < l->n_neg;) {
+        /* Draw all negatives up front and prefetch their rows     */
+        for (int k = 0; k < n_neg;) {
             int neg = l->dist[(int) urand(0,l->dist_size)];
             if (neg == target)
                 continue;
+            negbuf[k] = neg;
+            __builtin_prefetch(Wo[neg], 0, 1);
+            __builtin_prefetch(gWo[neg], 1, 1);
+            k++;
+        }
+
+        /* Process the negatives
+         * Prefetch the next row while computing on the current one
+         */
+        for (int k = 0; k < n_neg; k++) {
+            int neg = negbuf[k];
+            if (k + 1 < n_neg) {
+                int nxt = negbuf[k + 1];
+                __builtin_prefetch(Wo[nxt], 0, 1);
+                __builtin_prefetch(gWo[nxt], 1, 1);
+            }
 
             dot = 0.0f;
             for (int j = 0; j < E; j++)
@@ -241,7 +257,6 @@ float negsample_loss(NEGSAMPLE* restrict l,
             }
             if (dot >= pos_dot)
                 beaten = 0;
-            k++;
         }
         if (correct != NULL && beaten)
             (*correct)++;
@@ -289,8 +304,5 @@ void negsample_logits(NEGSAMPLE* restrict l,
                       fArr2D restrict logits/*[cnt][K]*/,
                       int cnt)
 {
-    /* matmulT(r[N][M], x[N][d], y[M][d]) = x @ y^T
-     * here N=cnt, d=E, M=K -> logits[cnt][K] = h[cnt][E] @ Wo[K][E]^T 
-     */
     matmulT(logits,h,l->Wo,cnt,l->E,l->K);
 }
