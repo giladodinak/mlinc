@@ -36,7 +36,7 @@ const char* usage =
 "  -c <context_size>  Set context size (must be even, default 8)\n"
 "  -d <embedding_dim> Set embedding dimension (default 100)\n"
 "  -e <num_epochs>    Set number of epochs (default 10)\n"
-"  -i <train_file>    Set training files list (def. news/data/all_files.lst)\n"
+"  -i <train_file>    Set training files list (def. data/news/all_files.lst)\n"
 "  -n <neg_samples>   Num of negative samples per positive target (def 10)\n"
 "  -o <output_file>   Set output embedding file (default word2vec.model)\n"
 "  -r <learning_rate> Set starting learning rate (default 0.005)\n"
@@ -163,8 +163,8 @@ int main(int argc, char** argv)
     float learning_rate = 0.005;
     float learning_rate_decay = 0.8;
     int print_vocab = 0;
-    int max_vocab = 3000000;   /* Set to 3 x expected number of unique words */
-    int hash_mem = 10000000;   /* hashmap will increase this value as needed */
+    int max_vocab = 30000000;  /* Set to 3 x expected number of unique words */
+    int hash_mem = 100000000;  /* hashmap will increase this value as needed */
     int max_file_words = 1000000; /* Maximum number of words per file        */
     int neg_samples = 10;      /* Negative samples per positive target       */
 
@@ -201,7 +201,7 @@ int main(int argc, char** argv)
             case '?':
             default:
             opterr:
-                fprintf(stderr,"word2vec: syntax error");
+                fprintf(stderr,"word2vec: syntax error\n");
                 printf(usage);
                 exit(-1);
         }
@@ -222,8 +222,8 @@ int main(int argc, char** argv)
            num_epochs,initial_learning_rate,learning_rate_decay);
     fflush(stdout);
 
-    int tot_file_cnt = 0; /* Total number of files    */
-    int tot_word_cnt = 0; /* Total number of words    */
+    int tot_file_cnt = 0;       /* Total number of files    */
+    long long tot_word_cnt = 0; /* Total number of words    */
 
     printf("Creating vocabulary from dataset\n");
     fflush(stdout);
@@ -242,9 +242,12 @@ int main(int argc, char** argv)
         tot_file_cnt++;
         tot_word_cnt += process_news_file(file_list[i],data_dir,
                                           hmap,1,max_vocab,word_freq,NULL,0);
+        printf("Processed file %d of %d, %lld words\r",
+                                          i + 1,num_files,tot_word_cnt);
+        fflush(stdout);
     }
 
-    printf("Dataset: %d files, %d words, ",tot_file_cnt,tot_word_cnt);
+    printf("\nDataset: %d files, %lld words, ",tot_file_cnt,tot_word_cnt);
     printf("%d unique words\n",hmap->map_used);
     printf("%d bytes of word storage memory used\n",hmap->mem_used);
     fflush(stdout);
@@ -262,13 +265,13 @@ int main(int argc, char** argv)
     word_freq[0].cnt = 0;
     word_freq[0].frq = 0.0f;
 
-    int word_cnt = 0;
+    long long word_cnt = 0;
     if (vocab_size == 0) {
         /* Calculate how many most frequent vocabulary words are needed
          * to represent vocab_coverage percent of all corpus words.
          * vocab_size includes PAD at index 0.
          */
-        int target_word_cnt = (int)(vocab_coverage * ((float)tot_word_cnt));
+        long long target_word_cnt = (long long)(vocab_coverage * ((float)tot_word_cnt));
         vocab_size = 1; /* Include PAD */
         for (int vocab_inx = 1; vocab_inx < hmap->map_used; vocab_inx++) {
             word_cnt += word_freq[vocab_inx].cnt;
@@ -289,7 +292,7 @@ int main(int argc, char** argv)
     }
     vocab_coverage = ((float) word_cnt) / tot_word_cnt;
     printf("Limit vocabulary to %d most frequent words\n",vocab_size);
-    printf("The vocabulary covers %d (%2.0f%%) of dataset words\n",
+    printf("The vocabulary covers %lld (%2.0f%%) of dataset words\n",
                                        word_cnt,100 * vocab_coverage);
 
     /* Create new vocabulary index of only the retained words,
@@ -313,7 +316,7 @@ int main(int argc, char** argv)
     hmap2 = NULL;
 
     printf("Calculating word frequencies\n");
-    word_freq[0].frq = 0.0f;
+    word_freq[0].frq = 0.0;
     for (int i = 1; i < vocab_size; i++)
         word_freq[i].frq = ((float) word_freq[i].cnt) / word_cnt;
 
@@ -448,7 +451,7 @@ int main(int argc, char** argv)
                  */
                 update(embedding->Wx,gWx[0],touched_in,ntouched_in,
                                                    embedding->E,learning_rate);
-                negsample_update(output,gWx[1],learning_rate,0.0f);
+                negsample_update(output,gWx[1],learning_rate,0.0);
 
                 word_cnt += wcnt;
                 int pct = (tot_file_cnt >= 1) ?
@@ -458,7 +461,7 @@ int main(int argc, char** argv)
                 int min = (seconds / 60) % 60;
                 int hours = seconds / 3600;
                 printf("epoch %2d lr %6.4f loss %6.4f %3d%% "
-                       "(file %d of %d, %d words) %d:%02d:%02d\r",
+                       "(file %d of %d, %lld words) %d:%02d:%02d\r",
                        epoch,learning_rate,loss / word_cnt,pct,
                        file_cnt,tot_file_cnt,word_cnt,hours,min,sec);
                 fflush(stdout);
