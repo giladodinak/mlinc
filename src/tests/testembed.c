@@ -464,7 +464,7 @@ int run_demo(void)
     int cxt_size = 4;
     int embedding_dim = 6;
     int num_epochs = 100;
-    float learning_rate = 0.1;
+    float learning_rate = 0.025;
 
     printf("Trains an embedding layer to create word embeddings using\n");
     printf("Continuous Bag of Words (CBOW) method\n");
