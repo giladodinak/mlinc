@@ -40,7 +40,7 @@ void QR(fArr2D M_/*[m][n]*/,
     int d = (m < n) ? m : n;
     typedef float (*ArrMM)[m];
     typedef float (*ArrMN)[n];
-    typedef float(*VecM);
+    typedef float (*VecM);
 
     ArrMM Q = allocmem(m,m,float);
     ArrMN R = allocmem(m,n,float);
@@ -73,25 +73,26 @@ void QR(fArr2D M_/*[m][n]*/,
             v[i] += x[i];
         /* Normalize it */
         float vn = vecnorm(v,m - k);
-        for (int i = 0; i < m - k; i++)
-            v[i] /= vn;
+        if (vn > 0)
+            for (int i = 0; i < m - k; i++)
+                v[i] /= vn;
 
         /* Apply Householder reflection to R (rows k:m, columns k:n) */
         for (int j = k; j < n; j++) {
-            float dot = 0.0f;
+            float dot = 0.0;
             for (int i = 0; i < m - k; i++)
                 dot += v[i] * R[k + i][j];
             for (int i = 0; i < m - k; i++)
-                R[k + i][j] -= 2.0f * v[i] * dot;
+                R[k + i][j] -= 2.0 * v[i] * dot;
         }
 
         /* Apply Householder reflection to Q (all rows, columns k:m) */
         for (int j = 0; j < m; j++) {
-            float dot = 0.0f;
+            float dot = 0.0;
             for (int i = 0; i < m - k; i++)
                 dot += v[i] * Q[j][k + i];
             for (int i = 0; i < m - k; i++)
-                Q[j][k + i] -= 2.0f * v[i] * dot;
+                Q[j][k + i] -= 2.0 * v[i] * dot;
         }
     }
 
@@ -109,8 +110,8 @@ void QR(fArr2D M_/*[m][n]*/,
         else
             fltcpy(Q_,Q,m * m);
     }
-    else /* Assume m == n, update M_ in place */
-        fltcpy(M_,Q,m * m);
+    else /* Assume d == m == n, update M_ in place */
+        fltcpy(M_,Q,d * d);
 
     freemem(Q);
     freemem(R);
