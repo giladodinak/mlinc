@@ -18,7 +18,7 @@
 static inline void rope_init(float* theta, int Dh)
 {
     for (int i = 0; i < Dh / 2; i++)
-        theta[i] = powf(10000.0f, -2.0f * i / (float) Dh);
+        theta[i] = powf(10000.0, -2.0 * i / (float) Dh);
 }
 
 /* Applies RoPE in-place to a single head slice of Q or K.
@@ -44,13 +44,14 @@ static inline void rope_apply(fArr2D x_/*[T][Dh]*/,
 {
     typedef float (*ArrTDh)[Dh];
     ArrTDh x = (ArrTDh) x_;
-    float sign = inverse ? -1.0f : 1.0f;
+    float sign = inverse ? -1.0 : 1.0;
     
     for (int t = 0; t < T; t++) {
         for (int i = 0; i < Dh / 2; i++) {
-            float angle = (offset + t) * theta[i];
-            float cos_a = cosf(angle);
-            float sin_a = sign * sinf(angle);
+            /* Calculate angle in double precision */
+            double angle = ((double)offset + t) * (double)theta[i];
+            float cos_a = (float)cos(angle);
+            float sin_a = sign * (float)sin(angle);
             float x0 = x[t][2 * i];
             float x1 = x[t][2 * i + 1];
             x[t][2 * i]     = x0 * cos_a - x1 * sin_a;
