@@ -11,7 +11,7 @@ typedef struct lm_s {
     int V;              /* Vocabulary size                        */
     int E;              /* Enbedding dimension (=model dimension) */
     int T;              /* Sequence length                        */
-    int B;              /* Batch suze (number of sequences)       */
+    int B;              /* Batch size (number of sequences)       */
     int N;              /* Number of transformer layers           */
     int BT;             /* B * T                                  */
     int n_neg;
@@ -22,7 +22,7 @@ typedef struct lm_s {
 
     /* Activations between layers: 
      * acts[0] = emb output, acts[k+1] = out * of transformer k. 
-     *Each is [BT][E]. acts[N] is the head input.
+     * Each is [BT][E]. acts[N] is the head input.
      */
     fArr2D* acts;       /* N+1 buffers                            */
     /* gradient buffers flowing back down the stack, [BT][E] each */
@@ -32,7 +32,7 @@ typedef struct lm_s {
 
     iVec pad_mask;      /* [BT]  1 real / 0 pad                   */
     fArr2D labels;      /* [BT][1] next-token targets (as floats) */
-    int* ids;           /* [BT]  input token ids                  */
+    iVec ids;           /* [BT]  input token ids                  */
 } LM;
 
 #endif

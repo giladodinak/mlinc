@@ -1,18 +1,18 @@
 /* Copyright (c) 2026 Gilad Odinak */
-/* Functions to load and store a full decoder-only language model.          */
-/*                                                                          */
-/* File layout:                                                             */
-/*   LM <header: dims + resumable training schedule + final flag>           */
-/*   HASHMAP <vocabulary: index/word lines>                                 */
-/*   DIST <unigram sampling table>            (omitted when final)          */
-/*   LMEMB <embedding weights>                (via lmembio)                 */
-/*   MODEL <N transformer layers + head>      (via modelio)                 */
-/*                                                                          */
-/* The transformer stack and the negative-sampling head are serialized      */
-/* through modelio's write_model()/read_model() by wrapping them in a        */
-/* borrow-shell MODEL (N transformer LAYERs of type 't' followed by one      */
-/* 'n' head LAYER). This reuses modelio's transformer AdamW-moment layout,   */
-/* so a resumed run restores the exact optimizer state of the stack.         */
+
+/* Functions to load and store a full decoder-only language model.
+ *
+ * File layout:
+ *   LM <header: dims + resumable training schedule + final flag>
+ *   HASHMAP <vocabulary: index/word lines>
+ *   DIST <sampling table, run-length encoded> (omitted if final)
+ *   LMEMB <embedding weights>                (via lmembio)
+ *   MODEL <N transformer layers + output>    (via modelio)
+ *
+ * The transformer stack and the negative-sampling output are serialized
+ * through modelio's write_model()/read_model() by wrapping them in a MODEL
+ * (N transformer LAYERs of type 't' followed by one 'n' output LAYER).
+ */
 #include <stdio.h>
 #include <string.h>
 #include "mem.h"
@@ -29,8 +29,6 @@
 #include "modelio.h"
 #include "lm.h"
 #include "lmio.h"
-
-/* ---- vocabulary (hashmap) ---------------------------------------------- */
 
 /* Index 0 is PAD (the empty word) and is reconstructed on read, so only
  * indices 1..map_used-1 (all non-empty tokens) are written. Tokens are
@@ -83,8 +81,6 @@ static HASHMAP* read_hashmap(FILE* fp)
     return h;
 }
 
-/* ---- unigram sampling table -------------------------------------------- */
-
 static int write_dist(const int* dist, int dist_size, FILE* fp)
 {
     int cnt = fprintf(fp,"DIST dist_size %d\n",dist_size);
@@ -92,16 +88,19 @@ static int write_dist(const int* dist, int dist_size, FILE* fp)
         fprintf(stderr,"In write_dist: failed to write the header\n");
         return 0;
     }
-    for (int j = 0; j < dist_size; j++) {
-        char sep = ((j % 20) == 19 || j == dist_size - 1) ? '\n' : ' ';
-        cnt = fprintf(fp,"%d%c",dist[j],sep);
+    /* Run-length encode: the table is built as contiguous runs 
+     * of each vocab index, so store (value, run_length) pairs,
+     * one per run, instead of every entry.
+     */
+    for (int a = 0, c = 0; a < dist_size; a += c) {
+        int v = dist[a];
+        for (c = 1; a + c < dist_size && dist[a + c] == v; c++);
+        cnt = fprintf(fp,"%d %d\n",v,c);
         if (cnt <= 0 || cnt == EOF) {
-            fprintf(stderr,"In write_dist: failed to write entry %d\n",j);
+            fprintf(stderr,"In write_dist: failed to write run at %d\n",a);
             return 0;
         }
     }
-    if (dist_size == 0)
-        fprintf(fp,"\n");
     return 1;
 }
 
@@ -109,60 +108,70 @@ static int read_dist(FILE* fp, int** dist_out, int* size_out)
 {
     int dist_size;
     int cnt = fscanf(fp," DIST dist_size %d",&dist_size);
-    if (cnt < 1 || cnt == EOF || dist_size < 0) {
+    if (cnt < 1 || cnt == EOF || dist_size <= 0) {
         fprintf(stderr,"In read_dist: failed to read the header\n");
         return 0;
     }
-    int* dist = (dist_size > 0) ? allocmem(dist_size,1,int) : NULL;
-    for (int j = 0; j < dist_size; j++) {
-        cnt = fscanf(fp," %d",&dist[j]);
-        if (cnt < 1 || cnt == EOF) {
-            fprintf(stderr,"In read_dist: failed to read entry %d\n",j);
+    int* dist = allocmem(dist_size,1,int);
+    /* Expand (value, run_length) pairs back into the flat table. The runs
+     * must sum exactly to dist_size, which doubles as the integrity check.
+     */
+    int j = 0;
+    while (j < dist_size) {
+        int v, c;
+        cnt = fscanf(fp," %d %d",&v,&c);
+        if (cnt < 2 || cnt == EOF || c <= 0 || j + c > dist_size) {
+            fprintf(stderr,"In read_dist: bad run at %d (v=%d run=%d)\n",j,v,c);
             freemem(dist);
             return 0;
         }
+        for (int k = 0; k < c; k++)
+            dist[j++] = v;
+    }
+    if (j != dist_size) {
+        fprintf(stderr,"In read_dist: total %d != dist_size %d\n",j,dist_size);
+        freemem(dist);
+        return 0;
     }
     *dist_out = dist;
     *size_out = dist_size;
     return 1;
 }
 
-/* ---- transformer stack + head (via modelio) ---------------------------- */
-
-/* Wrap the N transformer LAYERs and the head in a borrow-shell MODEL and
- * hand it to write_model(). The shell borrows m's pointers; write_model
- * frees nothing, so only the temporary LAYER array is freed here. */
+/* Wrap the N transformer LAYERs and the output layer in a MODEL 
+ * and pass it to write_model().
+ */
 static int write_lm_stack(const LM* m, int fin, const LMTRAIN* st, FILE* fp)
 {
     LAYER* layers = allocmem(1,m->N + 1,LAYER);
     for (int i = 0; i < m->N; i++)
-        layers[i] = m->tr[i];                 /* borrow transformer + grads */
+        layers[i] = m->tr[i];
     layers[m->N].type = 'n';
     layers[m->N].negsample = m->head;
     layers[m->N].grads = NULL;
     layers[m->N].num_grads = 0;               /* head uses sparse SGD        */
     layers[m->N].out = NULL;
 
-    MODEL shell;
-    memset(&shell,0,sizeof shell);
-    shell.num_layers = m->N + 1;
-    shell.batch_size = m->B;
-    shell.input_dim  = m->E;
-    shell.output_dim = m->E;
-    shell.target_dim = 1;
-    shell.add_bias   = 0;
-    shell.normalize  = 0;
-    shell.loss_func  = 'n';                    /* anything but 'C' (no ctc)   */
-    shell.optimizer  = st->optimizer;
-    shell.update_cnt = st->update_cnt;
-    shell.final      = fin;
-    shell.ctc        = NULL;
-    shell.mean       = NULL;
-    shell.sdev       = NULL;
-    shell.compiled   = 1;
-    shell.layer      = layers;
+    MODEL model;
+    memset(&model,0,sizeof(model));
+    model.num_layers = m->N + 1;
+    model.batch_size = m->B;
+    model.input_dim  = m->E;
+    model.output_dim = m->E;
+    model.target_dim = 1;
+    model.add_bias   = 0;
+    model.normalize  = 0;
+    model.loss_func  = 'n';
+    model.optimizer  = st->optimizer;
+    model.update_cnt = st->update_cnt;
+    model.final      = fin;
+    model.ctc        = NULL;
+    model.mean       = NULL;
+    model.sdev       = NULL;
+    model.compiled   = 1;
+    model.layer      = layers;
 
-    int ok = write_model(&shell,fin,fp);
+    int ok = write_model(&model,fin,fp);
     freemem(layers);
     if (!ok)
         fprintf(stderr,"In write_lm_stack: failed to write the stack\n");
@@ -170,57 +179,54 @@ static int write_lm_stack(const LM* m, int fin, const LMTRAIN* st, FILE* fp)
 }
 
 /* Read the stack MODEL and harvest its layers into an LM-owned tr[] array
- * plus the head. The harvested LAYER contents (transformer + grads) are moved
- * out of the shell before it is freed, so model_free() does not touch them. */
-static int read_lm_stack(FILE* fp, LAYER** tr_out, int* N_out,
-                         NEGSAMPLE** head_out)
+ * and the output. The LAYER contents (transformer + grads) are moved out
+ * of the model before it is freed, so model_free() does not touch them.
+ */
+static int read_lm_stack(FILE* fp, LAYER** ptr, int* pN, NEGSAMPLE** poutput)
 {
-    MODEL* shell = read_model(fp);
-    if (shell == NULL) {
+    MODEL* model = read_model(fp);
+    if (model == NULL) {
         fprintf(stderr,"In read_lm_stack: failed to read the stack\n");
         return 0;
     }
-    int nl = shell->num_layers;
-    if (nl < 1 || shell->layer[nl - 1].type != 'n') {
+    int nl = model->num_layers;
+    if (nl < 1 || model->layer[nl - 1].type != 'n') {
         fprintf(stderr,"In read_lm_stack: unexpected stack layout\n");
-        /* fall through to free the shell fully */
-        model_free(shell);
+        model_free(model);
         return 0;
     }
     int N = nl - 1;
     LAYER* tr = allocmem(N,1,LAYER);
     for (int i = 0; i < N; i++)
-        tr[i] = shell->layer[i];              /* move transformer + grads    */
-    NEGSAMPLE* head = shell->layer[N].negsample;
+        tr[i] = model->layer[i];
+    NEGSAMPLE* output = model->layer[N].negsample;
 
     /* Detach so model_free() frees only the shell, not the harvested layers. */
-    freemem(shell->layer);
-    shell->layer = NULL;
-    shell->num_layers = 0;
-    shell->ctc = NULL;
-    model_free(shell);
+    freemem(model->layer);
+    model->layer = NULL;
+    model->num_layers = 0;
+    model->ctc = NULL;
+    model_free(model);
 
-    *tr_out = tr;
-    *N_out = N;
-    *head_out = head;
+    *ptr = tr;
+    *pN = N;
+    *poutput = output;
     return 1;
 }
-
-/* ---- whole model ------------------------------------------------------- */
 
 int write_lm(const LM* m, int final, HASHMAP* hmap,
              const int* dist, int dist_size, const LMTRAIN* st, FILE* fp)
 {
-    int fin = final ? 1 : 0;
+    final = final ? 1 : 0;
 
     int cnt = fprintf(fp,"LM V %d E %d T %d B %d N %d n_neg %d "
-                         "optimizer '%c' weight_decay %.9g learning_rate %.9g "
-                         "lr_decay %.9g num_epochs %d epoch %d update_cnt %d "
-                         "lrng_seed %d final %d\n",
+                         "optimizer '%c' weight_decay %.6g learning_rate %.6g "
+                         "lr_decay %.6g num_epochs %d epoch %d update_cnt %d "
+                         "lrng_seed %d sample_frac %.6g final %d\n",
                       m->V,m->E,m->T,m->B,m->N,m->n_neg,
                       st->optimizer,st->weight_decay,st->learning_rate,
                       st->lr_decay,st->num_epochs,st->epoch,st->update_cnt,
-                      st->lrng_seed,fin);
+                      st->lrng_seed,st->sample_frac,final);
     if (cnt <= 0 || cnt == EOF) {
         fprintf(stderr,"In write_lm: failed to write the header\n");
         return 0;
@@ -229,47 +235,48 @@ int write_lm(const LM* m, int final, HASHMAP* hmap,
     if (!write_hashmap(hmap,fp))
         return 0;
 
-    if (!fin) {                                /* sampling table: training    */
+    if (!final) {
         if (!write_dist(dist,dist_size,fp))
             return 0;
     }
 
-    if (!write_lmemb(m->emb,fin,fp)) {
-        fprintf(stderr,"In write_lm: failed to write the embedding\n");
+    if (!write_lmemb(m->emb,final,fp))
         return 0;
-    }
 
-    if (!write_lm_stack(m,fin,st,fp))
+    if (!write_lm_stack(m,final,st,fp))
         return 0;
 
     return 1;
 }
 
-LM* read_lm(FILE* fp, HASHMAP** hmap_out, LMTRAIN* st)
+LM* read_lm(FILE* fp, HASHMAP** phmap, LMTRAIN* st)
 {
     int V, E, T, B, N, n_neg, num_epochs, epoch, update_cnt, lrng_seed, final;
     char optimizer;
-    float weight_decay, learning_rate, lr_decay;
+    float weight_decay, learning_rate, lr_decay, sample_frac;
     int cnt = fscanf(fp," LM V %d E %d T %d B %d N %d n_neg %d "
                         "optimizer '%c' weight_decay %g learning_rate %g "
                         "lr_decay %g num_epochs %d epoch %d update_cnt %d "
-                        "lrng_seed %d final %d\n",
+                        "lrng_seed %d sample_frac %g final %d\n",
                      &V,&E,&T,&B,&N,&n_neg,&optimizer,&weight_decay,
                      &learning_rate,&lr_decay,&num_epochs,&epoch,
-                     &update_cnt,&lrng_seed,&final);
-    if (cnt < 15 || cnt == EOF) {
+                     &update_cnt,&lrng_seed,&sample_frac,&final);
+    if (cnt < 16 || cnt == EOF) {
         fprintf(stderr,"In read_lm: failed to read the header\n");
         return NULL;
     }
 
     HASHMAP* hmap = read_hashmap(fp);
-    if (hmap == NULL)
+    if (hmap == NULL) {
+        fprintf(stderr,"In read_lm: failed to read the hashmap\n");
         return NULL;
+    }
 
     int* dist = NULL;
     int dist_size = 0;
     if (!final) {
         if (!read_dist(fp,&dist,&dist_size)) {
+            fprintf(stderr,"In read_lm: failed to read the distribution table\n");
             hashmap_free(hmap);
             return NULL;
         }
@@ -277,7 +284,7 @@ LM* read_lm(FILE* fp, HASHMAP** hmap_out, LMTRAIN* st)
 
     LMEMB* emb = read_lmemb(fp);
     if (emb == NULL) {
-        fprintf(stderr,"In read_lm: failed to read the embedding\n");
+        fprintf(stderr,"In read_lm: failed to read the embedding layer\n");
         freemem(dist);
         hashmap_free(hmap);
         return NULL;
@@ -287,6 +294,7 @@ LM* read_lm(FILE* fp, HASHMAP** hmap_out, LMTRAIN* st)
     NEGSAMPLE* head = NULL;
     int Nread = 0;
     if (!read_lm_stack(fp,&tr,&Nread,&head)) {
+        fprintf(stderr,"In read_lm: failed to read the transformer stack\n");
         lmemb_free(emb);
         freemem(dist);
         hashmap_free(hmap);
@@ -297,8 +305,6 @@ LM* read_lm(FILE* fp, HASHMAP** hmap_out, LMTRAIN* st)
                 N,Nread);
     N = Nread;
 
-    /* Assemble the model and (re)allocate the scratch buffers exactly as
-     * lm_create() does, so lm_free() stays balanced. */
     LM* m = allocmem(1,1,LM);
     m->V = V; m->E = E; m->T = T; m->B = B; m->N = N;
     m->BT = B * T; m->n_neg = n_neg;
@@ -318,16 +324,18 @@ LM* read_lm(FILE* fp, HASHMAP** hmap_out, LMTRAIN* st)
     m->labels   = allocmem(m->BT,1,float);
     m->ids      = allocmem(m->BT,1,int);
 
-    /* Re-attach the sampling table to the head (borrowed, caller frees it). */
+    /* Re-attach the sampling table to the output */
     if (dist != NULL)
         negsample_set_dist(head,dist,dist_size);
 
-    *hmap_out = hmap;
+    *phmap = hmap;
     if (st != NULL) {
         st->optimizer     = optimizer;
         st->update_cnt    = update_cnt;
         st->epoch         = epoch;
         st->num_epochs    = num_epochs;
+        st->sample_frac   = sample_frac;
+        st->final         = final;
         st->learning_rate = learning_rate;
         st->lr_decay      = lr_decay;
         st->weight_decay  = weight_decay;
@@ -349,8 +357,8 @@ LM* load_lm(const char* filename, HASHMAP** hmap, LMTRAIN* st)
     return m;
 }
 
-int store_lm(const char* filename, const LM* m, int final, HASHMAP* hmap,
-             const int* dist, int dist_size, const LMTRAIN* st)
+int store_lm(const char* filename, const LM* m, int final, 
+             HASHMAP* hmap, const int* dist, int dist_size, const LMTRAIN* st)
 {
     FILE* fp = fopen(filename,"wb");
     if (fp == NULL) {

@@ -1,6 +1,5 @@
 /* Copyright (c) 2026 Gilad Odinak */
-/* Functions to load and store a full decoder-only language model, so that
- * training can be checkpointed and resumed. */
+/* Functions to load and store a full decoder-only language model */
 #ifndef LMIO_H
 #define LMIO_H
 #include <stdio.h>
@@ -10,12 +9,15 @@
 /* Resumable training schedule / optimizer state carried alongside the model.
  * Everything here, together with the model weights, the AdamW moments (stored
  * with the transformer layers) and the restored vocabulary + sampling table,
- * is what a resumed run needs to continue as if never interrupted. */
+ * is what a resumed run needs to continue as if never interrupted.
+ */
 typedef struct {
     char  optimizer;      /* Optimizer code driving the transformer stack   */
     int   update_cnt;     /* AdamW step counter (for bias correction)       */
     int   epoch;          /* Last completed epoch (resume at epoch + 1)     */
     int   num_epochs;     /* Total epochs requested                         */
+    int   final;          /* If not zero, store inference-only              */
+    float sample_frac;    /* Fraction of dataset sampled each epoch         */
     float learning_rate;  /* Current learning rate (after prior decays)     */
     float lr_decay;       /* Per-epoch learning-rate decay                  */
     float weight_decay;   /* AdamW weight decay                             */

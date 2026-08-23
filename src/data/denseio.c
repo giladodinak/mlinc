@@ -27,7 +27,7 @@ DENSE* read_dense(FILE* fp)
         fprintf(stderr,"In read_dense: failed to read the header\n");
         return NULL;
     }
-    if (c != 'n' && c != 'r' && c != 's' && c != 'S') {
+    if (c != 'n' && c != 'r' && c != 'g' && c != 's' && c != 'S') {
         fprintf(stderr,"In read_dense: invalid activation code\n");
         return NULL;
     }
@@ -36,6 +36,7 @@ DENSE* read_dense(FILE* fp)
     d->D = D;
     d->B = B;
     d->activation = c;
+    if (c == 'g') d->z = allocmem(d->B,d->S,float);
     d->h = allocmem(d->B,d->S,float);
     d->Wx = allocmem(d->D,d->S,float);
     int ok = read_array(d->Wx,d->D,d->S,fp,0);
@@ -44,6 +45,7 @@ DENSE* read_dense(FILE* fp)
     /* error exit */
     fprintf(stderr,"In read_dense: failed to read weights\n");
     freemem(d->h);
+    freemem(d->z);
     freemem(d->Wx);
     freemem(d);
     return NULL;

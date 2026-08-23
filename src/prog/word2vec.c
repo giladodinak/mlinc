@@ -163,7 +163,7 @@ int main(int argc, char** argv)
     float learning_rate = 0.005;
     float learning_rate_decay = 0.8;
     int print_vocab = 0;
-    int max_vocab = 30000000;  /* Set to 3 x expected number of unique words */
+    int max_vocab = 10000000;  /* Set to 3 x expected number of unique words */
     int hash_mem = 100000000;  /* hashmap will increase this value as needed */
     int max_file_words = 1000000; /* Maximum number of words per file        */
     int neg_samples = 10;      /* Negative samples per positive target       */
