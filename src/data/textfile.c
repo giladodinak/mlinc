@@ -1,11 +1,11 @@
-/* Copyright (c) 2023-2024 Gilad Odinak */
-/* Read News Aggregator samples dataset file */
+/* Copyright (c) 2023-2026 Gilad Odinak */
+/* Reads and tokenizes text files       */
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include "mem.h"
 #include "hash.h"
-#include "newsfile.h"
+#include "textfile.h"
 
 #define ISALPHA(c) isalpha((unsigned char) (c))
 #define TOLOWER(c) tolower((unsigned char) (c))
@@ -24,8 +24,8 @@ static inline char* word_end(char* s)
     return s;
 }
 
-/* Processes a text file to create a word vocabulary, a word frequency table,
- * and/or an array of word tokens.
+/* Processes an ASCII text file to create a word vocabulary, a word frequency
+ * table, and/or an array of word tokens.
  *
  * Parameters:
  *   file_name  - Name of file to be processed.
@@ -54,7 +54,7 @@ static inline char* word_end(char* s)
  *  - Apostrophe in the middle of alphabetic character string, but not agt the 
  *    begining or end, is considered to be part of a word.
  */
-int process_news_file(const char* file_name,
+int process_text_file(const char* file_name,
                       const char* file_dir,
                       HASHMAP* hmap, int add_new,
                       int max_vocab, WRDFRQ* word_freq,
@@ -69,13 +69,13 @@ int process_news_file(const char* file_name,
     if (dir_len > 0 && file_dir[dir_len - 1] == '/')
         dir_len--;
     if (dir_len > maxpath) {
-        fprintf(stderr,"In process_news_file: "
+        fprintf(stderr,"In process_text_file: "
                 "file_dir too long: %d\n",dir_len);
         return -1;
     }
     int name_len = strlen(file_name);
     if (name_len > maxpath) {
-        fprintf(stderr,"In process_news_file: "
+        fprintf(stderr,"In process_text_file: "
                 "file_name too long: %d\n",name_len);
         return -1;
     }
@@ -84,7 +84,7 @@ int process_news_file(const char* file_name,
 
     FILE* fp = fopen(filepath,"rb");
     if (fp == NULL) {
-        fprintf(stderr,"In process_news_file: "
+        fprintf(stderr,"In process_text_file: "
                 "failed to open data file '%s' for read\n",file_name);
         return -1;
     }
@@ -163,11 +163,11 @@ int process_news_file(const char* file_name,
  *                valid files found.
  *
  * Returns an array of pointers to file names, or NULL on failure.
- * The returned array should be freed by calling free_news_file_list().
+ * The returned array should be freed by calling free_text_file_list().
  *
  * Note that the function only returns file names, not full file paths.
  */
-char** read_news_file_list(const char* list_file,
+char** read_text_file_list(const char* list_file,
                            const char* data_dir,
                            int* num_files)
 {
@@ -239,12 +239,12 @@ char** read_news_file_list(const char* list_file,
     return file_list;
 }
 
-/* Frees the memory allocated and returned by read_news_file_list()
+/* Frees the memory allocated and returned by read_text_file_list()
  *
  * file_list - An array of pointers to file names
  * num_files - The number of entries in file_list array
  */
-void free_news_file_list(char** file_list, int num_files)
+void free_text_file_list(char** file_list, int num_files)
 {
     for (int i = 0; i < num_files; i++)
         freemem(file_list[i]);

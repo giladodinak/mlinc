@@ -19,7 +19,7 @@
 #include "array.h"
 #include "random.h"
 #include "hash.h"
-#include "newsfile.h"
+#include "textfile.h"
 #include "activation.h"
 #include "lmemb.h"
 #include "transformer.h"
@@ -63,7 +63,7 @@ static const char* usage =
 ;
 
 static int qsort_compare_word_freq(const void* a, const void* b)
-{   /* WRDFRQ declared in newsfile.h */
+{   /* WRDFRQ declared in textfile.h */
     if (((WRDFRQ*)b)->cnt > ((WRDFRQ*)a)->cnt) return 1;
     if (((WRDFRQ*)b)->cnt < ((WRDFRQ*)a)->cnt) return -1;
     return 0;
@@ -415,7 +415,7 @@ static void validation(LM* m, HASHMAP* hmap, char** files, int nfiles,
     double last_report = val_start;
 
     for (int fi = 0; fi < nfiles; fi++) {
-        int fwcnt = process_news_file(files[fi],data_dir,
+        int fwcnt = process_text_file(files[fi],data_dir,
                         hmap,0,vocab_size,NULL,file_words,max_file_words);
         if (fwcnt <= 1)
             continue;
@@ -477,27 +477,13 @@ static void validation(LM* m, HASHMAP* hmap, char** files, int nfiles,
                     correct++;
                 positions++;
             }
-
-            if (current_time() - last_report >= 1.0) {
-                last_report = current_time();
-                int sec = (int) (current_time() - val_start);
-                double t1 = positions ?
-                            100.0 * (double) correct / (double) positions : 0.0;
-                double pp = positions ? exp(nll / (double) positions) : 0.0;
-                char buf[128]; /* Larger than needed, to pacify gcc */
-                snprintf(buf,sizeof(buf),
-                 "Validating: top-1 %4.1f%% ppl %8.2f (%d/%d files) %d:%02d:%02d",
-                 t1,pp,fi + 1,nfiles,sec/3600,(sec/60)%60,sec%60);
-                printf("\r%-79s\r",buf);
-                fflush(stdout);
-            }
             if (current_time() - last_report >= 1.0) {
                 last_report = current_time();
                 print_validation_status(correct,positions,nll,fi,nfiles,val_start);
             }
         }
     }
-    print_validation_status(correct,positions,nll,nfiles,nfiles,val_start);
+    print_validation_status(correct,positions,nll,nfiles - 1,nfiles,val_start);
     printf("\n");
     freemem(logits);
 
@@ -674,7 +660,7 @@ int main(int argc, char** argv)
     fflush(stdout);
     
     int num_files = 0;
-    char** file_list = read_news_file_list(tr_file,data_dir,&num_files);
+    char** file_list = read_text_file_list(tr_file,data_dir,&num_files);
     if (file_list == NULL || num_files == 0) {
         fprintf(stderr,"Failed to read data files list from '%s'\n",tr_file);
         return -1;
@@ -705,7 +691,7 @@ int main(int argc, char** argv)
 
         for (int i = 0; i < num_files; i++) {
             tot_file_cnt++;
-            tot_word_cnt += process_news_file(file_list[i],data_dir,hmap,
+            tot_word_cnt += process_text_file(file_list[i],data_dir,hmap,
                                               1,max_vocab,word_freq,NULL,0);
             printf("Processed file %d of %d, %lld words\r",
                                               i + 1,num_files,tot_word_cnt);
@@ -838,7 +824,7 @@ int main(int argc, char** argv)
             act_num_files = 1;
         double last_report = current_time();
         for (int fi = 0; fi < act_num_files; fi++) {
-            int fwcnt = process_news_file(file_list[fi],data_dir,
+            int fwcnt = process_text_file(file_list[fi],data_dir,
                             hmap,0,vocab_size,NULL,file_words,max_file_words);
             if (fwcnt <= 1)
                 continue;
@@ -905,7 +891,7 @@ int main(int argc, char** argv)
         }
         print_training_status(epoch,learning_rate,
                               ep_loss,ep_positions,
-                              act_num_files,act_num_files,start_time);
+                              act_num_files - 1,act_num_files,start_time);
         printf("\n");
         if (num_valid > 0) {
             printf("Validating...");
@@ -962,6 +948,6 @@ int main(int argc, char** argv)
     freemem(dist);
     freemem(word_freq);
     freemem(file_words);
-    free_news_file_list(file_list,num_files);
+    free_text_file_list(file_list,num_files);
     return 0;
 }

@@ -22,7 +22,7 @@
 #include "random.h"
 #include "array.h"
 #include "hash.h"
-#include "newsfile.h"
+#include "textfile.h"
 #include "activation.h"
 #include "embedding.h"
 #include "negsample.h"
@@ -132,7 +132,7 @@ float* word_embedding(EMBEDDING* embd, int wrdinx)
  * that is, most frequent word first.
  */
 int qsort_compare_word_freq(const void *a, const void *b)
-{   /* WRDFRQ declared in newsfile.h */
+{   /* WRDFRQ declared in textfile.h */
     if (((WRDFRQ *)b)->cnt > ((WRDFRQ *)a)->cnt) return 1;
     if (((WRDFRQ *)b)->cnt < ((WRDFRQ *)a)->cnt) return -1;
     return 0;
@@ -233,14 +233,14 @@ int main(int argc, char** argv)
     WRDFRQ* word_freq = allocmem(max_vocab,1,WRDFRQ);
 
     int num_files = 0;
-    char** file_list = read_news_file_list(tr_file,data_dir,&num_files);
+    char** file_list = read_text_file_list(tr_file,data_dir,&num_files);
     if (file_list == NULL || num_files == 0) {
         fprintf(stderr,"Failed to read data files list from '%s'\n",tr_file);
         return -1;
     }
     for (int i = 0; i < num_files; i++) {
         tot_file_cnt++;
-        tot_word_cnt += process_news_file(file_list[i],data_dir,
+        tot_word_cnt += process_text_file(file_list[i],data_dir,
                                           hmap,1,max_vocab,word_freq,NULL,0);
         printf("Processed file %d of %d, %lld words\r",
                                           i + 1,num_files,tot_word_cnt);
@@ -388,7 +388,7 @@ int main(int argc, char** argv)
         shuffle_list(file_list,num_files);
         for (int i = 0; i < num_files; i++) {
             file_cnt++;
-            int fwcnt = process_news_file(file_list[i],data_dir,
+            int fwcnt = process_text_file(file_list[i],data_dir,
                               hmap,0,max_vocab,NULL,file_words,max_file_words);
 
             /* Sub sample frequent words by removing some */
@@ -489,6 +489,6 @@ int main(int argc, char** argv)
     freemem(dist_table);
     freemem(word_freq);
     freemem(file_words);
-    free_news_file_list(file_list,num_files);
+    free_text_file_list(file_list,num_files);
     return 0;
 }
