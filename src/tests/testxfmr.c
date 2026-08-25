@@ -25,7 +25,7 @@ static float transformer_loss(TRANSFORMER* l,
 
     float Y[BT][D];
     fltclr(Y,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,(fArr2D) Y,0);
+    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y,0);
 
     float L = 0;
     for (int i = 0; i < BT; i++)
@@ -92,7 +92,7 @@ void test_transformer_zero_forward(TRANSFORMER* l)
     fltclr(l->ffn1->Wx,D * l->Dff);
     fltclr(l->ffn2->Wx,l->Dff * D);
 
-    transformer_forward(l,(fArr2D) X,NULL,(fArr2D) Y,0);
+    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y,0);
 
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
@@ -142,7 +142,7 @@ void test_transformer_finite_diff(TRANSFORMER* l)
     }
 
     fltclr(Y,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,(fArr2D) Y,0);
+    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y,0);
     transformer_backward(l,(fArr2D) dY,(fArr2D) X,(fArr2D) dX,0);
 
     /* Shadow instance for numerical gradient evaluation.
@@ -151,7 +151,7 @@ void test_transformer_finite_diff(TRANSFORMER* l)
      * during finite difference don't corrupt l's buffers.
      */
     TRANSFORMER* ls = transformer_create(H,T,D,Dff,0);
-    transformer_init(ls,B,0,0.0f);
+    transformer_init(ls,B,0,0.0);
 
     /* Point ls weights to l's weights so perturbations are shared */
     freemem(ls->mha->Wq);      ls->mha->Wq      = l->mha->Wq;
@@ -226,7 +226,7 @@ void test_transformer_causal_mask(TRANSFORMER* l)
             X[i][j] = urand(-1.0f,1.0f);
 
     fltclr(Y1,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,(fArr2D) Y1,0);
+    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y1,0);
 
     /* Perturb the last token of the first batch item */
     int last = T - 1;
@@ -234,7 +234,7 @@ void test_transformer_causal_mask(TRANSFORMER* l)
         X[last][j] += 1.0f;
 
     fltclr(Y2,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,(fArr2D) Y2,0);
+    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y2,0);
 
     /* Output at position 0 (past) must be unchanged */
     for (int j = 0; j < D; j++) {
@@ -280,9 +280,9 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
 
     /* Training: two passes should differ */
     fltclr(Y1,BT * D);
-    transformer_forward(l_train,(fArr2D) X,NULL,(fArr2D) Y1,0);
+    transformer_forward(l_train,(fArr2D) X,NULL,1,(fArr2D) Y1,0);
     fltclr(Y2,BT * D);
-    transformer_forward(l_train,(fArr2D) X,NULL,(fArr2D) Y2,0);
+    transformer_forward(l_train,(fArr2D) X,NULL,1,(fArr2D) Y2,0);
 
     float diff = 0;
     for (int i = 0; i < BT; i++)
@@ -296,9 +296,9 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
 
     /* Inference: two passes must be identical */
     fltclr(Y1,BT * D);
-    transformer_forward(l_infer,(fArr2D) X,NULL,(fArr2D) Y1,0);
+    transformer_forward(l_infer,(fArr2D) X,NULL,1,(fArr2D) Y1,0);
     fltclr(Y2,BT * D);
-    transformer_forward(l_infer,(fArr2D) X,NULL,(fArr2D) Y2,0);
+    transformer_forward(l_infer,(fArr2D) X,NULL,1,(fArr2D) Y2,0);
 
     diff = 0;
     for (int i = 0; i < BT; i++)
@@ -488,7 +488,7 @@ void training_test(void)
         /* Forward pass */
 
         for (int i = 0; i < NLYR; i++)
-            transformer_forward(layers[i],act[i],NULL,act[i + 1],0);
+            transformer_forward(layers[i],act[i],NULL,1,act[i + 1],0);
 
         fArr2D yp = dense_forward(out,act[NLYR],0);
 
@@ -527,9 +527,9 @@ void training_test(void)
     printf("\n");
 
     /* Evaluate: forward pass with final weights */
-    transformer_forward(layers[0],X,NULL,act[1],0);
+    transformer_forward(layers[0],X,NULL,1,act[1],0);
     for (int i = 1; i < NLYR; i++)
-        transformer_forward(layers[i],act[i],NULL,act[i+1],0);
+        transformer_forward(layers[i],act[i],NULL,1,act[i + 1],0);
     fArr2D yp = dense_forward(out,act[NLYR],0);
 
     float probs[BT][K];

@@ -102,8 +102,12 @@ void transformer_free(TRANSFORMER* l);
  *   l        - pointer to the TRANSFORMER layer
  *   X        - input  [B*T][D]
  *   pad_mask - optional padding mask [B*T]; 1 = real token, 0 = pad.
+ *   training - non zero if in training path, zero if in inference path
  *   Y        - output [B*T][D]
  *   lyr      - layer index (informational)
+ *
+ * Note: if the transformer was initialized not in training mode, the
+ * value of this training parameter is ignotred.
  *
  * Computation (Sec. 3.1, p.3 and Sec. 3.2, p.4):
  *
@@ -125,6 +129,7 @@ void transformer_free(TRANSFORMER* l);
 static inline void transformer_forward(TRANSFORMER* restrict l,
                                        const fArr2D restrict X  /*[BT][D]*/,
                                        const iVec restrict pad_mask /*[BT]*/,
+                                       int training,
                                        fArr2D Y /*[BT][D]*/,
                                        int lyr)
 {
@@ -142,9 +147,9 @@ static inline void transformer_forward(TRANSFORMER* restrict l,
      * mha_out = MaskedMHA(X)
      * mha_out = dropout(mha_out)
      */
-    mha_forward(l->mha, X, pad_mask,mha_out,/*offset=*/0,lyr);
-    if (l->training && l->dropout_rate > 0)
-      dropout(mha_out,drop_mask1,BT,D,l->dropout_rate);
+    mha_forward(l->mha, X, pad_mask,mha_out,0,lyr);
+    if (training && l->training && l->dropout_rate > 0)
+        dropout(mha_out,drop_mask1,BT,D,l->dropout_rate);
 
     /* Step 2 - First residual add + layer norm (Sec. 3.1):
      * norm1_out = LayerNorm(X + mha_out)
@@ -159,7 +164,7 @@ static inline void transformer_forward(TRANSFORMER* restrict l,
     fArr2D ffn1_out = dense_forward(l->ffn1,norm1_out,lyr);
     fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,lyr);
 
-    if (l->training && l->dropout_rate > 0)
+    if (training && l->training && l->dropout_rate > 0)
         dropout(ffn2_out,drop_mask2,BT,D,l->dropout_rate);
 
     /* Step 4 - Second residual add + layer norm (Sec. 3.1):

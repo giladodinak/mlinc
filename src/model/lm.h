@@ -5,6 +5,7 @@
 #include "array.h"
 #include "lmemb.h"
 #include "layer.h"
+#include "smsftmax.h"
 
 /* The trained model assembled by lmtrain             */
 typedef struct lm_s {
@@ -17,7 +18,7 @@ typedef struct lm_s {
     int n_neg;
     LMEMB* emb;
     LAYER* tr;          /* N transformer LAYERs */
-    NEGSAMPLE* head;
+    SMSFTMAX* head;
     fArr2D* gHead;      /* Head gradient buffer [1] of [K][E]     */
 
     /* Activations between layers: 
@@ -26,7 +27,7 @@ typedef struct lm_s {
      */
     fArr2D* acts;       /* N+1 buffers                            */
     /* gradient buffers flowing back down the stack, [BT][E] each */
-    fArr2D dtop;        /* grad at head input (dh from negsample) */
+    fArr2D dtop;        /* grad at head input (dh from smsftmax)  */
     fArr2D dcur;        /* scratch grad passed between layers     */
     fArr2D dnext;
 

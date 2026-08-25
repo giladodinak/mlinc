@@ -28,7 +28,7 @@ typedef struct {
  *
  * The file holds, in order: an LM header, the vocabulary hashmap, the unigram
  * sampling table (omitted when final), the embedding (lmembio), then the
- * transformer stack and negative-sampling head written as a MODEL (modelio).
+ * transformer stack (MODEL via modelio) then the sampled-softmax head.
  *
  * write_lm parameters:
  *   m         - The model to write
@@ -36,7 +36,7 @@ typedef struct {
  *               dropout and the sampling table are omitted; the file can be
  *               loaded to run but not to resume training. m is not modified.
  *   hmap      - Vocabulary (word <-> index), stored in full
- *   dist      - Unigram negative-sampling table (stored when not final)
+ *   dist      - Unigram sampling table (stored when not final)
  *   dist_size - Number of entries in dist
  *   st        - Training schedule / optimizer state (required)
  *
@@ -51,8 +51,8 @@ typedef struct {
  * Ownership notes for read_lm / load_lm:
  *   - The returned model is freed with lm_free().
  *   - The sampling table is allocated and attached to the head via
- *     negsample_set_dist(); as usual it is NOT freed by lm_free()/
- *     negsample_free(), so the caller frees m->head->dist when done.
+ *     smsftmax_set_dist(); as usual it is NOT freed by lm_free()/
+ *     smsftmax_free(), so the caller frees m->head->dist when done.
  *   - When the file was written final, no table is present and the head's
  *     dist is left NULL; the caller must rebuild/attach one before training.
  */

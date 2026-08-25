@@ -22,7 +22,8 @@
 #include "hash.h"
 #include "lmemb.h"
 #include "lmembio.h"
-#include "negsample.h"
+#include "smsftmax.h"
+#include "smsftmaxio.h"
 #include "transformer.h"
 #include "layer.h"
 #include "model.h"
@@ -143,18 +144,13 @@ static int read_dist(FILE* fp, int** dist_out, int* size_out)
  */
 static int write_lm_stack(const LM* m, int fin, const LMTRAIN* st, FILE* fp)
 {
-    LAYER* layers = allocmem(1,m->N + 1,LAYER);
+    LAYER* layers = allocmem(1,m->N,LAYER);
     for (int i = 0; i < m->N; i++)
         layers[i] = m->tr[i];
-    layers[m->N].type = 'n';
-    layers[m->N].negsample = m->head;
-    layers[m->N].grads = NULL;
-    layers[m->N].num_grads = 0;               /* head uses sparse SGD        */
-    layers[m->N].out = NULL;
 
     MODEL model;
     memset(&model,0,sizeof(model));
-    model.num_layers = m->N + 1;
+    model.num_layers = m->N;
     model.batch_size = m->B;
     model.input_dim  = m->E;
     model.output_dim = m->E;
@@ -182,24 +178,22 @@ static int write_lm_stack(const LM* m, int fin, const LMTRAIN* st, FILE* fp)
  * and the output. The LAYER contents (transformer + grads) are moved out
  * of the model before it is freed, so model_free() does not touch them.
  */
-static int read_lm_stack(FILE* fp, LAYER** ptr, int* pN, NEGSAMPLE** poutput)
+static int read_lm_stack(FILE* fp, LAYER** ptr, int* pN)
 {
     MODEL* model = read_model(fp);
     if (model == NULL) {
         fprintf(stderr,"In read_lm_stack: failed to read the stack\n");
         return 0;
     }
-    int nl = model->num_layers;
-    if (nl < 1 || model->layer[nl - 1].type != 'n') {
+    int N = model->num_layers;
+    if (N < 1) {
         fprintf(stderr,"In read_lm_stack: unexpected stack layout\n");
         model_free(model);
         return 0;
     }
-    int N = nl - 1;
     LAYER* tr = allocmem(N,1,LAYER);
     for (int i = 0; i < N; i++)
         tr[i] = model->layer[i];
-    NEGSAMPLE* output = model->layer[N].negsample;
 
     /* Detach so model_free() frees only the shell, not the harvested layers. */
     freemem(model->layer);
@@ -210,7 +204,6 @@ static int read_lm_stack(FILE* fp, LAYER** ptr, int* pN, NEGSAMPLE** poutput)
 
     *ptr = tr;
     *pN = N;
-    *poutput = output;
     return 1;
 }
 
@@ -245,6 +238,11 @@ int write_lm(const LM* m, int final, HASHMAP* hmap,
 
     if (!write_lm_stack(m,final,st,fp))
         return 0;
+
+    if (!write_smsftmax(m->head,fp)) {
+        fprintf(stderr,"In write_lm: failed to write the head\n");
+        return 0;
+    }
 
     return 1;
 }
@@ -291,10 +289,22 @@ LM* read_lm(FILE* fp, HASHMAP** phmap, LMTRAIN* st)
     }
 
     LAYER* tr = NULL;
-    NEGSAMPLE* head = NULL;
     int Nread = 0;
-    if (!read_lm_stack(fp,&tr,&Nread,&head)) {
+    if (!read_lm_stack(fp,&tr,&Nread)) {
         fprintf(stderr,"In read_lm: failed to read the transformer stack\n");
+        lmemb_free(emb);
+        freemem(dist);
+        hashmap_free(hmap);
+        return NULL;
+    }
+
+    SMSFTMAX* head = read_smsftmax(fp);
+    if (head == NULL) {
+        fprintf(stderr,"In read_lm: failed to read the head\n");
+        /* free harvested transformer layers */
+        for (int i = 0; i < Nread; i++)
+            layer_free(&tr[i]);
+        freemem(tr);
         lmemb_free(emb);
         freemem(dist);
         hashmap_free(hmap);
@@ -303,7 +313,6 @@ LM* read_lm(FILE* fp, HASHMAP** phmap, LMTRAIN* st)
     if (Nread != N)
         fprintf(stderr,"In read_lm: warning: header N %d != stack N %d\n",
                 N,Nread);
-    N = Nread;
 
     LM* m = allocmem(1,1,LM);
     m->V = V; m->E = E; m->T = T; m->B = B; m->N = N;
@@ -326,7 +335,7 @@ LM* read_lm(FILE* fp, HASHMAP** phmap, LMTRAIN* st)
 
     /* Re-attach the sampling table to the output */
     if (dist != NULL)
-        negsample_set_dist(head,dist,dist_size);
+        smsftmax_set_dist(head,dist,dist_size);
 
     *phmap = hmap;
     if (st != NULL) {

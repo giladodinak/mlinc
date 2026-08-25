@@ -43,13 +43,13 @@ INC_DIRS = -I$(SRC_DIR) -I$(NUM_DIR) -I$(DECOMP_DIR) \
 LIB_DIRS =
 
 PROGRAMS = sph2wav feat2audio word2vec wordembd simlex bats \
-           har timitfeat timit timittest charlm
+           har timitfeat timit timittest charlm lmtrain
 TESTS = testmem cblastest testarray testrandom testhash testannoy \
 		testhann testfilter testlpc testlsp \
 		testqr testsvd testpca \
 		testadamw testctc testnorm \
 		testdense testlstm testmodel \
-		testembed testmha testxfmr
+		testembed testlmemb testmha testxfmr testsmsftmax
 
 SRCS = $(shell find $(SRC_DIR) -name '*.c')
 HDRS = $(shell find $(SRC_DIR) -name '*.h')

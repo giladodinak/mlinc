@@ -10,18 +10,6 @@
  * model's output dimension equals its input dimension E. The word-scoring
  * weights Wo[K][E] are used only by negsample_loss(), which scores the true
  * next word plus a few sampled negatives.
- *
- * Because the loss needs the target word index, it is computed by
- * negsample_loss() (called from the model's loss step) rather than in the
- * layer's backward pass. The backward pass is the identity (dx = dy); the
- * gradient into h is produced by negsample_loss() and handed back as dy.
- *
- * For generation, negsample_logits() scores h against all K words so the
- * result can be softmaxed and sampled.
- *
- * Reference:
- *  Distributed Representations of Words and Phrases and their Compositionality
- *  https://arxiv.org/pdf/1310.4546
  */
 typedef struct negsample_s {
   int E;         /* Input vector dimension (= output dimension, identity) */

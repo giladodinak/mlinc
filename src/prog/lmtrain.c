@@ -23,7 +23,7 @@
 #include "activation.h"
 #include "lmemb.h"
 #include "transformer.h"
-#include "negsample.h"
+#include "smsftmax.h"
 #include "layer.h"
 #include "lm.h"
 #include "lmio.h"
@@ -56,6 +56,8 @@ static const char* usage =
 "  --prompt=\"<prompt>\"  Seed prompt for text generation\n"
 "                       (default 'according to the')\n"
 "  --gen-every=<n>      Sample a generation every n epochs (0=off, def. 1)\n"
+"  --validation-frac=<f>  Fraction of files held out for validation\n"
+"                         (default 0.01)\n"
 "  --print-vocab        Print vocabulary and exit\n"
 "  --cores=<list>       Specify cores for openblas use (def. 0,2,4,6)\n"
 ;
@@ -100,8 +102,8 @@ static LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     }
 
     /* Output layer */
-    m->head = negsample_create(vocab,n_neg);
-    negsample_init(m->head,model_dim,m->BT);
+    m->head = smsftmax_create(vocab,n_neg);
+    smsftmax_init(m->head,model_dim,m->BT);
     m->gHead = allocmem(1,1,fArr2D*);
     m->gHead[0] = allocmem(vocab,model_dim,float);
 
@@ -128,7 +130,7 @@ static void lm_free(LM* m)
         freemem(m->tr[i].grads);
     }
     freemem(m->tr);
-    negsample_free(m->head);
+    smsftmax_free(m->head);
     freemem(m->gHead[0]);
     freemem(m->gHead);
     for (int i = 0; i <= m->N; i++)
@@ -144,7 +146,7 @@ static void lm_free(LM* m)
 }
 
 /* Forward the whole stack. Returns head-input activations [BT][E] */
-static fArr2D lm_forward(LM* m)
+static fArr2D lm_forward(LM* m, int training)
 {
     /* Embedding gather: acts[0] = emb(ids). lmemb_forward writes into
      * its own l->h; copy into acts[0] so the stack owns a stable buffer.
@@ -154,7 +156,8 @@ static fArr2D lm_forward(LM* m)
 
     for (int i = 0; i < m->N; i++)
         transformer_forward(m->tr[i].transformer,
-                            m->acts[i],m->pad_mask,m->acts[i+1],i);
+                            m->acts[i],m->pad_mask,
+                            training,m->acts[i+1],i);
     return m->acts[m->N];
 }
 
@@ -184,10 +187,11 @@ static void lm_update(LM* m, char optimizer, float lr, float wd,
         layer_update(&m->tr[i],optimizer,lr,wd,update_cnt);
 
     /* Head: sparse SGD over touched rows (its own scheme). */
-    negsample_update(m->head,m->gHead[0],lr,wd);
+    smsftmax_update(m->head,m->gHead[0],lr,wd);
 
     /* Embedding: sparse row update over rows touched this batch. Weight
-     * decay omitted for embeddings (standard practice). */
+     * decay omitted for embeddings (standard practice).
+     */
     {
         typedef float (*ArrVE)[m->E];
         ArrVE Wx  = (ArrVE) m->emb->Wx;
@@ -257,10 +261,9 @@ static void lm_generate(LM* m, HASHMAP* hmap,
     for (int i = 0; i < n; i++)
         ctx[i] = seed[i];
 
-    printf("  gen: ");
+    printf("Generating: ");
     for (int i = 0; i < n; i++)
         printf("%s ",hashmap_inx2str(hmap,ctx[i]));
-    printf("- ");
 
     for (int s = 0; s < steps; s++) {
         for (int i = 0; i < n; i++)
@@ -273,9 +276,9 @@ static void lm_generate(LM* m, HASHMAP* hmap,
             m->pad_mask[i] = 0;
 
         typedef float (*ArrBTE)[E];
-        ArrBTE H = lm_forward(m);
+        ArrBTE H = lm_forward(m,0);
 
-        negsample_logits(m->head,(fArr2D) H[n - 1],(fArr2D) logits,1);
+        smsftmax_logits(m->head,(fArr2D) H[n - 1],(fArr2D) logits,1);
         int nxt = sample_from_logits(logits,K,temperature);
 
         printf("%s ",hashmap_inx2str(hmap,nxt));
@@ -362,6 +365,174 @@ static LM* load_checkpoint(int argc, char** argv, char** load_file,
     return m;
 }
 
+/* Prints one validation progress line.
+ *
+ * Parameters:
+ *   correct   - running count of correct top-1 predictions so far
+ *   positions - running count of scored positions so far
+ *   nll       - running summed negative log-likelihood so far
+ *   fi        - index of the file just processed (0-based)
+ *   nfiles    - total number of validation files
+ *   val_start - wall-clock time when validation began
+ */
+static void print_validation_status(long long correct, long long positions,
+                                    double nll, int fi, int nfiles,
+                                    double val_start)
+{
+    int sec = (int) (current_time() - val_start);
+    double t1 = positions ?
+                100.0 * (double) correct / (double) positions : 0.0;
+    double pp = positions ? exp(nll / (double) positions) : 0.0;
+    char buf[128]; /* Larger than needed, to pacify gcc */
+    snprintf(buf,sizeof(buf),
+        "Validating: top-1 %4.1f%% ppl %8.2f (%d/%d files) %d:%02d:%02d",
+        t1,pp,fi + 1,nfiles,sec/3600,(sec/60)%60,sec%60);
+    printf("\r%-79s\r",buf);
+    fflush(stdout);
+}
+/* Runs a full-vocabulary validation pass over the given files.
+ * For each valid position it computes logits over the whole vocabulary,
+ * takes the argmax for true top-1 accuracy, and accumulates cross-entropy
+ * (via log-softmax at the true target) for perplexity. Forward pass only;
+ * no gradients, no weight updates. Returns via out_top1 and out_ppl.
+ */
+static void validation(LM* m, HASHMAP* hmap, char** files, int nfiles,
+                       const char* data_dir, int vocab_size,
+                       int* file_words, int max_file_words,
+                       double* out_top1, double* out_ppl)
+{
+    const int BT = m->BT;
+    const int seq_len = m->T;
+    const int batch_size = m->B;
+    const int K = m->V;
+
+    fArr2D logits = allocmem(BT,K,float);   /* [BT][K] full-vocab scores */
+    long long correct = 0;
+    long long positions = 0;
+    double nll = 0.0;                       /* summed negative log-likelihood */
+
+    double val_start = current_time();
+    double last_report = val_start;
+
+    for (int fi = 0; fi < nfiles; fi++) {
+        int fwcnt = process_news_file(files[fi],data_dir,
+                        hmap,0,vocab_size,NULL,file_words,max_file_words);
+        if (fwcnt <= 1)
+            continue;
+
+        int stride = seq_len;
+        int pos = 0;
+        while (pos < fwcnt - 1) {
+            for (int i = 0; i < BT; i++) {
+                m->ids[i] = 0;
+                m->pad_mask[i] = 0;
+                ((float*) m->labels)[i] = 0.0;
+            }
+            int filled = 0;
+            for (int b = 0; b < batch_size; b++) {
+                int base = pos + b * stride;
+                if (base >= fwcnt - 1) break;
+                for (int t = 0; t < seq_len; t++) {
+                    int src = base + t;
+                    if (src >= fwcnt - 1) break;
+                    int row = b * seq_len + t;
+                    if (file_words[src] > 0) {
+                        m->ids[row] = file_words[src];
+                        m->pad_mask[row] = 1;
+                        ((float*) m->labels)[row] = (float) file_words[src+1];
+                        filled++;
+                    }
+                }
+            }
+            if (filled == 0)
+                break;
+            pos += batch_size * stride;
+
+            fArr2D hhead = lm_forward(m,0);
+
+            /* Full-vocabulary logits for every row in the batch. */
+            smsftmax_logits(m->head,hhead,logits,BT);
+
+            typedef float (*ArrBK)[K];
+            ArrBK lg = (ArrBK) logits;
+            const float* labels = (const float*) m->labels;
+
+            for (int row = 0; row < BT; row++) {
+                int target = (int) labels[row];
+                if (target <= 0 || target >= K)
+                    continue;                 /* PAD / OOV target: skip */
+
+                /* argmax and log-sum-exp over the full vocabulary */
+                int best = 1;
+                float maxl = lg[row][1];
+                for (int c = 2; c < K; c++)
+                    if (lg[row][c] > maxl) { maxl = lg[row][c]; best = c; }
+                float sum = 0.0f;
+                for (int c = 1; c < K; c++)
+                    sum += expf(lg[row][c] - maxl);
+                float logp = (lg[row][target] - maxl) - logf(sum);
+
+                nll -= (double) logp;
+                if (best == target)
+                    correct++;
+                positions++;
+            }
+
+            if (current_time() - last_report >= 1.0) {
+                last_report = current_time();
+                int sec = (int) (current_time() - val_start);
+                double t1 = positions ?
+                            100.0 * (double) correct / (double) positions : 0.0;
+                double pp = positions ? exp(nll / (double) positions) : 0.0;
+                char buf[128]; /* Larger than needed, to pacify gcc */
+                snprintf(buf,sizeof(buf),
+                 "Validating: top-1 %4.1f%% ppl %8.2f (%d/%d files) %d:%02d:%02d",
+                 t1,pp,fi + 1,nfiles,sec/3600,(sec/60)%60,sec%60);
+                printf("\r%-79s\r",buf);
+                fflush(stdout);
+            }
+            if (current_time() - last_report >= 1.0) {
+                last_report = current_time();
+                print_validation_status(correct,positions,nll,fi,nfiles,val_start);
+            }
+        }
+    }
+    print_validation_status(correct,positions,nll,nfiles,nfiles,val_start);
+    printf("\n");
+    freemem(logits);
+
+    *out_top1 = positions ? 100.0 * (double) correct / (double) positions : 0.0;
+    *out_ppl  = positions ? exp(nll / (double) positions) : 0.0;
+}
+
+
+/* Prints one training progress line.
+ *
+ * Parameters:
+ *   epoch         - current epoch number
+ *   learning_rate - current learning rate
+ *   ep_loss       - running summed loss this epoch
+ *   ep_positions  - running count of scored positions this epoch
+ *   fi            - index of the file just processed (0-based)
+ *   act_num_files - total training files this epoch
+ *   start_time    - wall-clock time when the epoch began
+ */
+static void print_training_status(int epoch, float learning_rate,
+                                  double ep_loss, long long ep_positions,
+                                  int fi, int act_num_files,
+                                  double start_time)
+{
+    int sec = (int) elapsed_time(start_time);
+    char buf[128]; /* Larger than needed, to pacify gcc */
+    snprintf(buf,sizeof(buf),
+        "Epoch %2d lr %7.5f loss %7.4f (file %d/%d) %d:%02d:%02d",
+        epoch,learning_rate,
+        ep_positions ? ep_loss/ep_positions : 0.0,
+        fi + 1,act_num_files,sec/3600,(sec/60)%60,sec%60);
+    printf("\r%-79s\r",buf);
+    fflush(stdout);
+}
+
 int main(int argc, char** argv)
 {
     int   batch_size     = 16;
@@ -372,6 +543,7 @@ int main(int argc, char** argv)
     int   ffn_dim        = 0; /* 0 -> 4*model_dim */
     int   num_epochs     = 5;
     float sample_frac    = 0.1;
+    float validation_frac = 0.01;
     int   neg_samples    = 10;
     float learning_rate  = 3e-4;
 
@@ -434,16 +606,17 @@ int main(int argc, char** argv)
             case 'l': load_file   = optarg; break;
             case 's': save_base   = optarg; break;
             case '-':
-                if      (!strncmp(optarg,"rate-decay=",11))     lr_decay = atof(optarg + 11);
-                else if (!strncmp(optarg,"weight-decay=",13))   weight_decay = atof(optarg + 13);
-                else if (!strncmp(optarg,"dropout-rate=",13)) { if (m == NULL) dropout = atof(optarg + 13); }
-                else if (!strncmp(optarg,"vocab-size=",11)) { if (m == NULL) vocab_size = atoi(optarg + 11); }
-                else if (!strncmp(optarg,"vocab-coverage=",15)) { if (m == NULL) vocab_coverage = atof(optarg + 15); }
-                else if (!strncmp(optarg,"data-dir=",9))        data_dir = optarg + 9;
-                else if (!strncmp(optarg,"prompt=",7))          prompt = optarg + 7;
-                else if (!strncmp(optarg,"gen-every=",10))      gen_every = atoi(optarg + 10);
-                else if (!strncmp(optarg,"print-vocab",11))     print_vocab = 1;
-                else if (!strncmp(optarg,"cores=",6))           blas_cores = (optarg + 6);
+                if      (!strncmp(optarg,"rate-decay=",11))      lr_decay = atof(optarg + 11);
+                else if (!strncmp(optarg,"weight-decay=",13))    weight_decay = atof(optarg + 13);
+                else if (!strncmp(optarg,"dropout-rate=",13))    { if (m == NULL) dropout = atof(optarg + 13); }
+                else if (!strncmp(optarg,"vocab-size=",11))      { if (m == NULL) vocab_size = atoi(optarg + 11); }
+                else if (!strncmp(optarg,"vocab-coverage=",15))  { if (m == NULL) vocab_coverage = atof(optarg + 15); }
+                else if (!strncmp(optarg,"data-dir=",9))         data_dir = optarg + 9;
+                else if (!strncmp(optarg,"prompt=",7))           prompt = optarg + 7;
+                else if (!strncmp(optarg,"gen-every=",10))       gen_every = atoi(optarg + 10);
+                else if (!strncmp(optarg,"validation-frac=",16)) validation_frac = atof(optarg + 16);
+                else if (!strncmp(optarg,"print-vocab",11))      print_vocab = 1;
+                else if (!strncmp(optarg,"cores=",6))            blas_cores = (optarg + 6);
                 else goto opterr;
             break;
             case 'h': printf("%s",usage); exit(0);
@@ -469,6 +642,11 @@ int main(int argc, char** argv)
         return -1;
     }
 
+    if (validation_frac < 0 || validation_frac >= 1.0) {
+        fprintf(stderr,"lmtrain: invalid validation_frac %g\n",validation_frac);
+        return -1;
+    }
+
     if (neg_samples < 1) {
         fprintf(stderr,"lmtrain: invalid neg_samples %d\n",neg_samples);
         return -1;
@@ -488,7 +666,7 @@ int main(int argc, char** argv)
     
     float initial_lr = learning_rate;
 
-    printf("\nDecoder-only LM trainer (negative-sampling head)\n");
+    printf("\nDecoder-only LM trainer\n");
     printf("D=%d heads=%d layers=%d ffn=%d T=%d batch=%d\n",
            model_dim,heads,layers,ffn_dim,seq_len,batch_size);
     printf("epochs=%d lr=%g rd=%g wd=%g dropout=%g neg=%d\n",
@@ -501,6 +679,20 @@ int main(int argc, char** argv)
         fprintf(stderr,"Failed to read data files list from '%s'\n",tr_file);
         return -1;
     }
+
+    shuffle_list(file_list,num_files);
+    
+    int num_valid = (int) (num_files * validation_frac);
+    int num_train = num_files - num_valid;
+    char** valid_list = file_list + num_train;
+    if (num_train < 1) {
+        fprintf(stderr,"lmtrain: validation_frac %g leaves no training files\n",
+                validation_frac);
+        return -1;
+    }
+    printf("Split: %d training files, %d validation files\n",
+           num_train,num_valid);
+    fflush(stdout);
 
     if (load_file == NULL) {
         printf("Creating vocabulary from dataset\n");
@@ -540,11 +732,14 @@ int main(int argc, char** argv)
             for (int i = 1; i < hmap->map_used; i++) {
                 word_cnt += word_freq[i].cnt;
                 vocab_size = i + 1;
-                if (word_cnt >= target) break;
+                if (word_cnt >= target)
+                    break;
             }
         } else {
-            if (vocab_size > hmap->map_used) vocab_size = hmap->map_used;
-            for (int i = 1; i < vocab_size; i++) word_cnt += word_freq[i].cnt;
+            if (vocab_size > hmap->map_used)
+                vocab_size = hmap->map_used;
+            for (int i = 1; i < vocab_size; i++)
+                word_cnt += word_freq[i].cnt;
         }
         vocab_coverage = (float) word_cnt / (float) tot_word_cnt;
         printf("Vocabulary limited to %d words, covering %2.0f%% of corpus\n",
@@ -564,8 +759,13 @@ int main(int argc, char** argv)
         for (int i = 1; i < vocab_size; i++)
             word_freq[i].frq = (float) word_freq[i].cnt / (float) word_cnt;
 
-        /* Unigram distribution table (freq^0.75), PAD excluded. */
-        const float dist_pow = 0.75f; const int dist_scale = 10;
+        /* Unigram distribution table (freq^0.75), PAD excluded
+         * Reference:
+         * Distributed Representations of Words and Phrases and their
+         *    Compositionality, Mikolov et al., 2013,
+         *    https://arxiv.org/pdf/1310.4546
+         */
+        const float dist_pow = 0.75; const int dist_scale = 10;
         dist_size = 0;
         for (int i = 1; i < vocab_size; i++)
             dist_size += (int)(powf(word_freq[i].cnt,dist_pow)/dist_scale)+1;
@@ -589,14 +789,13 @@ int main(int argc, char** argv)
 
         m = lm_create(vocab_size,model_dim,heads,seq_len,batch_size,
                       layers,ffn_dim,neg_samples,dropout,optimizer);
-        negsample_set_dist(m->head,dist,dist_size);
+        smsftmax_set_dist(m->head,dist,dist_size);
 
         st.optimizer    = optimizer;
         st.lr_decay     = lr_decay;
         st.weight_decay = weight_decay;
         st.num_epochs   = num_epochs;
     }
-    printf("ZZZZZ 3 hmap %p\n",hmap);
 
     int* file_words = allocmem(1,max_file_words,int);
     const int BT = m->BT;
@@ -622,19 +821,22 @@ int main(int argc, char** argv)
         }            
         token = strtok(NULL," ");
     }
-
-    printf("Training (Sampling %g of all files every epoch)\n",sample_frac);
+    printf("Training (sampling %g of %d training files each epoch)\n",
+           sample_frac,num_train);
     printf("\n\n");
     fflush(stdout);
     double start_time = current_time();
 
     int epoch;
     for (epoch = start_epoch; epoch <= num_epochs; epoch++) {
-        shuffle_list(file_list,num_files);
+        shuffle_list(file_list,num_train);
         float ep_loss = 0;
         long long ep_positions = 0;
         long long ep_correct = 0;
-        int act_num_files = (int) (num_files * sample_frac);
+        int act_num_files = (int) (num_train * sample_frac);
+        if (act_num_files < 1) 
+            act_num_files = 1;
+        double last_report = current_time();
         for (int fi = 0; fi < act_num_files; fi++) {
             int fwcnt = process_news_file(file_list[fi],data_dir,
                             hmap,0,vocab_size,NULL,file_words,max_file_words);
@@ -679,12 +881,12 @@ int main(int argc, char** argv)
                     break;
                 pos += batch_size * stride;
 
-                fArr2D hhead = lm_forward(m);
+                fArr2D hhead = lm_forward(m,1);
 
                 /* Loss + dh into m->dtop, sparse gWo into gHead[0]. */
                 int correct = 0;
-                float loss = negsample_loss(m->head,hhead,m->labels,
-                                            m->gHead[0],m->dtop,BT,&correct);
+                float loss = smsftmax_loss(m->head,hhead,m->labels,
+                                           m->gHead[0],m->dtop,BT,&correct);
 
                 lm_backward(m);
 
@@ -693,25 +895,28 @@ int main(int argc, char** argv)
 
                 ep_loss += loss; ep_positions += filled; ep_correct += correct;
 
-                if (update_cnt) {
-                    int sec = (int) elapsed_time(start_time);
-                    printf("epoch %2d lr %7.5f loss %7.4f acc %4.1f%% "
-                           "(file %d/%d) %d:%02d:%02d\r",
-                           epoch,learning_rate,
-                           ep_positions ? ep_loss/ep_positions : 0.0,
-                           ep_positions ? 100.0*ep_correct/ep_positions : 0.0,
-                           fi + 1,act_num_files,
-                           sec/3600,(sec/60)%60,sec%60);
-                    fflush(stdout);
+                if (current_time() - last_report >= 1.0) {
+                    last_report = current_time();
+                    print_training_status(epoch,learning_rate,
+                                          ep_loss,ep_positions,
+                                          fi,act_num_files,start_time);
                 }
             }
         }
-        printf("\nepoch %2d done: loss %7.4f  acc %4.1f%%\n",
-               epoch, ep_positions ? ep_loss/ep_positions : 0.0,
-               ep_positions ? 100.0*ep_correct/ep_positions : 0.0);
+        print_training_status(epoch,learning_rate,
+                              ep_loss,ep_positions,
+                              act_num_files,act_num_files,start_time);
+        printf("\n");
+        if (num_valid > 0) {
+            printf("Validating...");
+            fflush(stdout);
+            double val_top1 = 0.0, val_ppl = 0.0;
+            validation(m,hmap,valid_list,num_valid,data_dir,vocab_size,
+                           file_words,max_file_words,&val_top1,&val_ppl);
+        }
 
         if (gen_every > 0 && epoch % gen_every == 0)
-            lm_generate(m,hmap,prompt_tokens,prompt_token_count,20,0.8);
+            lm_generate(m,hmap,prompt_tokens,prompt_token_count,30,0.8);
 
         learning_rate *= lr_decay;
         fflush(stdout);

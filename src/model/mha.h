@@ -178,12 +178,14 @@ void mha_free(MHA* l);
  *     Out = Concat(Oh_0, ..., Oh_{H-1})
  *     Y   = Out @ Wo if Y != NULL
  *
- * Note: Padding is not allowed at the beginning of a sequence; only
- *       trailing (right-aligned) padding is supported.
- *
- * Note: Qh, Kh, Vh, and Att are stored per (b,h) pair for the whole
- *       batch, so that mha_backward can read back exactly what forward
- *       computed for each (b,h) without recomputing it.
+ * Notes: 
+ *  1. Padding is not allowed at the beginning of a sequence;
+ *     only trailing (right-aligned) padding is supported.
+ *  2. Offset is used when training overlapping windows:
+ *     each batch's start position advances by the window stride.
+ *  3. Qh, Kh, Vh, and Att are stored per (b,h) pair for the whole
+ *     batch, so that mha_backward can read back exactly what forward
+ *     computed for each (b,h) without recomputing it.
  *
  * Reference:
  *   - Vaswani et al., "Attention Is All You Need", 2017
@@ -487,7 +489,7 @@ static inline void mha_backward(MHA* restrict l,
         }
     }
 
-    /* Step 1 backward - linear projections (reverse of Q=X@Wq, K=X@Wk, V=X@Wv):
+    /* Step 1 backward - reverse Q=X@Wq, K=X@Wk, V=X@Wv:
      * gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
      * dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
      */

@@ -9,11 +9,30 @@
 #include "activation.h"
 #include "negsample.h"
 
+/* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
+ * vocabulary K is too large for a full softmax. Its forward pass is the
+ * identity: it passes the E-dimensional input h through unchanged, so the
+ * model's output dimension equals its input dimension E. The word-scoring
+ * weights Wo[K][E] are used only by negsample_loss(), which scores the true
+ * next word plus a few sampled negatives.
+ *
+ * Because the loss needs the target word index, it is computed by
+ * negsample_loss() (called from the model's loss step) rather than in the
+ * layer's backward pass. The backward pass is the identity (dx = dy); the
+ * gradient into h is produced by negsample_loss() and handed back as dy.
+ *
+ * For generation, negsample_logits() scores h against all K words so the
+ * result can be softmaxed and sampled.
+ *
+ * Reference:
+ *   Distributed Representations of Words and Phrases and their
+ *   Compositionality, Mikolov et al., 2013, https://arxiv.org/pdf/1310.4546
+ */
+
 /* Prepares a Wo gradient row for accumulation this batch.
  *
- * On the first touch of 'row' in the current batch (detected via the per-row
- * stamp), the row is zeroed and appended to l->touched. Subsequent touches in
- * the same batch are no-ops, so gradients accumulate correctly.
+ * On the first touch of 'row' in this batch (per-row stamp), the row is zeroed
+ * and appended to l->touched. Later touches are no-ops so gradients add up.
  */
 static inline void prep_row(NEGSAMPLE* l, fArr2D gWo_, int row)
 {

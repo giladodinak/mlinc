@@ -23,7 +23,7 @@
 #include "model.h"
 #include "modelio.h"
 
-static void model_batch_forward(MODEL* m, fArr2D x, fArr2D* yp);
+static void model_batch_forward(MODEL* m, fArr2D x, int training, fArr2D* yp);
 static void model_batch_backward(MODEL* m, fArr2D x, fArr2D* dy, fArr2D* yp);
 static void model_update(MODEL* m, float learning_rate, float weight_decay);
 static void print_status(int epoch, int nepochs, int progress, float etime,
@@ -392,7 +392,7 @@ void model_fit(MODEL* m,
                 break;
             if (m->normalize)
                 normalize(x,B,Db,mean,sdev,1);
-            model_batch_forward(m,x,yp);
+            model_batch_forward(m,x,1,yp);
             sample_cnt += cnt;
 
             /* Note that gradient calculation below is additive.
@@ -469,7 +469,7 @@ void model_fit(MODEL* m,
                     break;
                 if (m->normalize)
                     normalize(x,B,Db,mean,sdev,1); 
-                model_batch_forward(m,x,yp);
+                model_batch_forward(m,x,0,yp);
                 v_sample_cnt += cnt;
 
                 switch(m->loss_func) {
@@ -589,7 +589,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
             break;
         if (m->normalize)
             normalize(xb,B,Db,mean,sdev,1); 
-        model_batch_forward(m,xb,yp);
+        model_batch_forward(m,xb,0,yp);
         if (m->loss_func == 'N') {
             /* Full-vocabulary pass, then normalize to a distribution. */
             negsample_logits(m->layer[L - 1].negsample,yp[L - 1],
@@ -604,12 +604,12 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     batch_free(b);
 }
 
-static void model_batch_forward(MODEL* m, fArr2D x, fArr2D* yp)
+static void model_batch_forward(MODEL* m, fArr2D x, int training, fArr2D* yp)
 {
     int L = m->num_layers;
-    yp[0] = layer_forward(&m->layer[0],x,0);
+    yp[0] = layer_forward(&m->layer[0],x,training,0);
     for (int j = 1; j < L; j++)
-        yp[j] = layer_forward(&m->layer[j],yp[j - 1],j);
+        yp[j] = layer_forward(&m->layer[j],yp[j - 1],training,j);
 }
 
 static void model_batch_backward(MODEL* m, fArr2D x, fArr2D* dy, fArr2D* yp)
