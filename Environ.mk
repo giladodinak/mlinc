@@ -18,12 +18,16 @@ CFLAGS += -ggdb     # gdb support
 endif
 
 ifneq ($(USEBLAS),) # USEBLAS is not blank - use openblas/cblas
-CFLAGS += -DUSE_BLAS
-ifeq ($(OSTYPE),linux)
-LIBS += -lopenblas
-else ifeq ($(OSTYPE),macos)
-LIBS += -lcblass
-endif
+  CFLAGS += -DUSE_BLAS
+  ifeq ($(OSTYPE),linux)
+    ifneq ($(wildcard /opt/OpenBLAS/lib/libopenblas.so),) # Use latest OpenBLAS
+      CFLAGS  += -I/opt/OpenBLAS/include
+      LFLAGS += -L/opt/OpenBLAS/lib -Wl,-rpath,/opt/OpenBLAS/lib
+    endif
+    LIBS += -lopenblas
+  else ifeq ($(OSTYPE),macos)
+    LIBS += -lcblas
+  endif
 endif
 
 ifneq ($(MEMCHK),)  # MEMCHK is not blank - add memory error detector
