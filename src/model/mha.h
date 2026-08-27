@@ -151,6 +151,8 @@ void mha_free(MHA* l);
  *   Y         : Output 2D array of shape [B*T][D];
                  if NULL, output projection is skipped.
  *   offset    : Position index of the first token in the sequence
+ *   training  : Non-zero during training (applies attention dropout); 0
+ *               during inference/generation (no dropout, deterministic).
  *   lyr       : Layer index.
  *
  * Causal / lookahead masking is fixed per layer and taken from
@@ -195,6 +197,7 @@ static inline void mha_forward(MHA* restrict l,
                                const iVec restrict pad_mask/*[BT]*/,
                                fArr2D Y/*[BT][D]*/,
                                int offset,
+                               int training,
                                int lyr)
 {
     (void) lyr;
@@ -298,7 +301,7 @@ static inline void mha_forward(MHA* restrict l,
             /* Store this head's attention weights for backward */
             fltcpy(&Att[base], Scores, T * T);
 
-            if (l->training && l->dropout_rate > 0)
+            if (training && l->training && l->dropout_rate > 0)
                 dropout(&Att[base],&AttMask[base],T,T,l->dropout_rate);
 
             /* in Eq. 1: Attention @ V */

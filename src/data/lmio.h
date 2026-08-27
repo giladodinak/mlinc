@@ -6,11 +6,7 @@
 #include "hash.h"
 #include "lm.h"
 
-/* Resumable training schedule / optimizer state carried alongside the model.
- * Everything here, together with the model weights, the AdamW moments (stored
- * with the transformer layers) and the restored vocabulary + sampling table,
- * is what a resumed run needs to continue as if never interrupted.
- */
+/* Resumable training schedule / optimizer state carried alongside the model */
 typedef struct {
     char  optimizer;      /* Optimizer code driving the transformer stack   */
     int   update_cnt;     /* AdamW step counter (for bias correction)       */
@@ -51,8 +47,8 @@ typedef struct {
  * Ownership notes for read_lm / load_lm:
  *   - The returned model is freed with lm_free().
  *   - The sampling table is allocated and attached to the head via
- *     smsftmax_set_dist(); as usual it is NOT freed by lm_free()/
- *     smsftmax_free(), so the caller frees m->head->dist when done.
+ *     smsftmax_set_dist(); it is NOT freed by lm_free()/smsftmax_free(),
+ *     so the caller frees m->head->dist when done.
  *   - When the file was written final, no table is present and the head's
  *     dist is left NULL; the caller must rebuild/attach one before training.
  */

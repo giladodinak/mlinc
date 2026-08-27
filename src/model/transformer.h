@@ -147,7 +147,7 @@ static inline void transformer_forward(TRANSFORMER* restrict l,
      * mha_out = MaskedMHA(X)
      * mha_out = dropout(mha_out)
      */
-    mha_forward(l->mha, X, pad_mask,mha_out,0,lyr);
+    mha_forward(l->mha, X, pad_mask,mha_out,0,training,lyr);
     if (training && l->training && l->dropout_rate > 0)
         dropout(mha_out,drop_mask1,BT,D,l->dropout_rate);
 

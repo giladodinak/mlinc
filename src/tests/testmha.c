@@ -28,7 +28,7 @@ void test_mha_zero_forward(MHA* m)
     fltclr(m->Wv, D*D);
     fltclr(m->Wo, D*D);
 
-    mha_forward(m, X, NULL, Y, 0, 0);
+    mha_forward(m, X, NULL, Y, 0, 0, 0);
 
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
@@ -85,7 +85,7 @@ void test_mha_attention_active(MHA* m)
     }
 
     fltclr(Y, BT * D);
-    mha_forward(m, X, NULL, Y, 0, 0);
+    mha_forward(m, X, NULL, Y, 0, 0, 0);
 
     /* With identity weights and token 0 dominant, token 0's output
      * should be close to its own input value (self-attention dominates)
@@ -124,7 +124,7 @@ float mha_loss(MHA* m, fArr2D X)
     float Y[BT][D];
     fltclr(Y, BT * D);
 
-    mha_forward(m, X, NULL, Y, 0, 0);
+    mha_forward(m, X, NULL, Y, 0, 0, 0);
 
     float L = 0;
     for (int i = 0; i < BT; i++)
@@ -166,7 +166,7 @@ void test_mha_finite_diff(MHA* m)
         }
     }
 
-    mha_forward(m, X, NULL, Y, 0, 0);
+    mha_forward(m, X, NULL, Y, 0, 0, 0);
     mha_backward(m, dY, X, dX, 0);
 
     /* Check dX */
@@ -364,7 +364,7 @@ void test_mask(MHA* m) {
         Wk[i][i] = 1;
     }
 
-    mha_forward(m, X, NULL, Y, 0, 0);
+    mha_forward(m, X, NULL, Y, 0, 0, 0);
 
     ArrTT Scores = (ArrTT) m->Scores;
 
@@ -412,7 +412,7 @@ void test_padding_mask(MHA* m) {
     pad_mask[(B - 1) * T + (T - 2)] = 0;
     pad_mask[(B - 1) * T + (T - 1)] = 0;
 
-    mha_forward(m, X, pad_mask, Y, 0, 0);
+    mha_forward(m, X, pad_mask, Y, 0, 0, 0);
 
     typedef float (*ArrTT)[T];
     ArrTT Scores = (ArrTT)m->Scores;
@@ -458,7 +458,7 @@ void test_rope_relative_invariance(MHA* m)
 
     /* Forward with offset=0 */
     fltclr(Y1, BT * D);
-    mha_forward(m, X, NULL, Y1, 0, 0);
+    mha_forward(m, X, NULL, Y1, 0, 0, 0);
 
     /* Save Att from offset=0 run */
     float Att1[m->BHT][T];
@@ -467,7 +467,7 @@ void test_rope_relative_invariance(MHA* m)
     /* Forward with offset */
     int offset = (int) urand(0,1000000);
     fltclr(Y2, BT * D);
-    mha_forward(m, X, NULL, Y2, offset, 0);
+    mha_forward(m, X, NULL, Y2, offset, 0, 0);
 
     ArrBHTT Att2 = (ArrBHTT) m->Att;
 
