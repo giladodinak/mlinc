@@ -36,7 +36,7 @@ const char* usage =
 "  -c <context_size>  Set context size (must be even, default 8)\n"
 "  -d <embedding_dim> Set embedding dimension (default 100)\n"
 "  -e <num_epochs>    Set number of epochs (default 10)\n"
-"  -i <train_file>    Set training files list (def. data/news/all_files.lst)\n"
+"  -i <train_file>    Set training files list (def. data/news/selected_files.lst)\n"
 "  -n <neg_samples>   Num of negative samples per positive target (def 10)\n"
 "  -o <output_file>   Set output embedding file (default word2vec.model)\n"
 "  -r <learning_rate> Set starting learning rate (default 0.005)\n"
@@ -151,9 +151,9 @@ void shuffle_list(char** list, int cnt)
 
 int main(int argc, char** argv)
 {
-    char* data_dir = "data/news/data";         /* Input  */
-    char* tr_file = "data/news/all_files.lst"; /* Input  */
-    char* embedding_file = "word2vec.model";   /* Output */
+    char* data_dir = "data/news/data";              /* Input  */
+    char* tr_file = "data/news/selected_files.lst"; /* Input  */
+    char* embedding_file = "word2vec.model";        /* Output */
     float vocab_coverage = 0.99; /* 99% */
     int vocab_size = 0; /* Default: size derived from vocab_coverage */
     int embedding_dim = 100;
