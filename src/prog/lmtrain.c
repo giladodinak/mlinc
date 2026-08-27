@@ -42,7 +42,7 @@ static const char* usage =
 "  -F <sample_frac>     Fraction of files to train on each epoch (def. 0.1)\n"
 "  -n <neg_samples>     Negative samples per position (default 10)\n"
 "  -r <learning_rate>   Starting learning rate (default 3e-4)\n"
-"  -i <train_file>      File list (default data/news/all_files.lst)\n"
+"  -i <train_file>      File list (default data/news/selected_files.lst)\n"
 "  -o <output_file>     Output model file (default lmtrain.model)\n"
 "  -l <model_file>      Load a saved model and continue training\n"
 "  -s <base>            Base name for per-epoch saves <base>.<epoch>.model\n"
@@ -204,14 +204,22 @@ static void lm_update(LM* m, char optimizer, float lr, float wd,
     }
 }
 
-/* Samples a token from logits using temperature-scaled softmax.
+/* Samples a token from logits using temperature-scaled softmax, with optional
+ * top-k truncation and a repetition penalty over recently generated tokens.
  *
- * logits      - Array of K logits.
+ * logits      - Array of K logits (modified in place by the penalty).
  * K           - Number of logits.
- * temperature - Sampling temperature; <= 0 selects greedily.
+ * temperature - Sampling temperature; <= 0 selects greedily (argmax).
+ * top_k       - If > 0, sample only from the top_k highest-scoring tokens
+ *               (0 disables truncation, sampling from the full vocabulary).
+ * recent      - Array of the last 'nrecent' generated token ids, whose logits
+ *               are divided down by rep_penalty to discourage repetition
+ *               (NULL / 0 disables).
+ * nrecent     - Number of valid entries in recent[].
+ * rep_penalty - Divisor applied to recent tokens' logits when > 1.0 (a value
+ *               like 1.2-1.5 discourages loops; 1.0 disables).
  *
- * Note: logits[0] represents PAD and is excluded from both greedy
- * selection and probabilistic sampling.
+ * Note: logits[0] represents PAD and is excluded from selection.
  *
  * Reference:
  * Hinton, Vinyals, Dean (2015) Distilling the Knowledge in a Neural Network
@@ -219,43 +227,99 @@ static void lm_update(LM* m, char optimizer, float lr, float wd,
  *
  * Ackley, Hinton & Sejnowski (1985), A Learning Algorithm for Boltzmann Machines
  * https://onlinelibrary.wiley.com/doi/epdf/10.1207/s15516709cog0901_7
+ *
+ * Repetition penalty: Keskar et al. (2019), CTRL
+ * https://arxiv.org/abs/1909.05858
+ *
+ * Top-k sampling: Fan, Lewis, Dauphin (2018)
+ * https://arxiv.org/abs/1805.04833
  */
-static int sample_from_logits(float* logits, int K, float temperature)
+static int sample_from_logits(float* logits, int K, float temperature,
+                              int top_k, const int* recent, int nrecent,
+                              float rep_penalty)
 {
-    if (temperature > 0) {
-        float l[K];
-        for (int k = 1; k < K; k++)
-            l[k] = logits[k] / temperature;
-
-        typedef float (*Arr1K1)[K - 1];
-        softmax((Arr1K1) (l + 1),1,K - 1);
-        float r = urand(0,1);
-        float c = 0;
-        for (int k = 1; k < K; k++) { 
-            c += l[k]; 
-            if (r <= c)
-                return k;
+    /* Repetition penalty: push down the logits of recently emitted tokens.
+     * For a positive logit divide by the penalty, for a negative one multiply
+     * (both reduce the score), following the CTRL formulation.
+     */
+    if (recent != NULL && rep_penalty > 1) {
+        for (int i = 0; i < nrecent; i++) {
+            int t = recent[i];
+            if (t > 0 && t < K) {
+                if (logits[t] > 0)
+                    logits[t] /= rep_penalty;
+                else
+                    logits[t] *= rep_penalty;
+            }
         }
-        return K - 1;
     }
-    else {
-        int best; /* argmax */
+
+    if (temperature <= 0) {
+        int best;                              /* argmax (greedy) */
         float bv = logits[best = 1];
         for (int k = 2; k < K; k++)
-            if (logits[k] > bv) 
-                bv = logits[best = k]; 
+            if (logits[k] > bv)
+                bv = logits[best = k];
         return best;
     }
+
+    /* Temperature-scaled scores over indices 1..K-1 (0 = PAD excluded) */
+    float l[K];
+    for (int k = 1; k < K; k++)
+        l[k] = logits[k] / temperature;
+
+    /* Top-k truncation: find the k-th largest score and mask everything
+     * below it to -inf so it gets zero probability after softmax.
+     */
+    if (top_k > 0 && top_k < K - 1) {
+        /* Copy scores, partially select the top_k-th value as a threshold.
+         * K is modest here; a simple selection is adequate.
+         */
+        float tmp[K];
+        for (int k = 1; k < K; k++) tmp[k] = l[k];
+        /* Find the (top_k)-th largest via repeated max extraction */
+        float thresh = -1e30f;
+        for (int r = 0; r < top_k; r++) {
+            float mv = -1e30f; int mi = -1;
+            for (int k = 1; k < K; k++)
+                if (tmp[k] > mv) { mv = tmp[k]; mi = k; }
+            if (mi < 0) break;
+            thresh = mv;
+            tmp[mi] = -1e30f;                  /* remove so next r finds next */
+        }
+        for (int k = 1; k < K; k++)
+            if (l[k] < thresh) l[k] = -1e30f;  /* drop below the top-k cutoff */
+    }
+
+    typedef float (*Arr1K1)[K - 1];
+    softmax((Arr1K1) (l + 1),1,K - 1);
+    float r = urand(0,1);
+    float c = 0;
+    for (int k = 1; k < K; k++) {
+        c += l[k];
+        if (r <= c)
+            return k;
+    }
+    return K - 1;
 }
 
-/* Generate tokens continuing from a prompt, and print them */
-static void lm_generate(LM* m, HASHMAP* hmap, 
+/* Generate tokens continuing from a prompt, and print them.
+ * top_k and rep_penalty control anti-repetition decoding 
+ * (see sample_from_logits); pass top_k=0, rep_penalty=1.0 for plain sampling.
+ */
+static void lm_generate(LM* m, HASHMAP* hmap,
                         const int* seed, int seedlen,
-                        int steps, float temperature)
+                        int steps, float temperature,
+                        int top_k, float rep_penalty)
 {
     int T = m->T, K = m->V, E = m->E;
     int* ctx = allocmem(T,1,int);
     float* logits = allocmem(1,K,float);
+
+    /* Ring of recently generated tokens for the repetition penalty */
+    int rep_window = 32;
+    int* recent = allocmem(rep_window,1,int);
+    int nrecent = 0;
 
     int n = seedlen < T ? seedlen : T;
     for (int i = 0; i < n; i++)
@@ -279,20 +343,32 @@ static void lm_generate(LM* m, HASHMAP* hmap,
         ArrBTE H = lm_forward(m,0);
 
         smsftmax_logits(m->head,(fArr2D) H[n - 1],(fArr2D) logits,1);
-        int nxt = sample_from_logits(logits,K,temperature);
+        int nxt = sample_from_logits(logits,K,temperature,
+                                     top_k,recent,nrecent,rep_penalty);
 
         printf("%s ",hashmap_inx2str(hmap,nxt));
-        if (n < T) 
+
+        /* Record the emitted token in the repetition window */
+        if (nrecent < rep_window)
+            recent[nrecent++] = nxt;
+        else {
+            for (int i = 1; i < rep_window; i++)
+                recent[i - 1] = recent[i];
+            recent[rep_window - 1] = nxt;
+        }
+
+        if (n < T)
             ctx[n++] = nxt;
         else {
             for (int i = 1; i < T; i++)
-                ctx[i - 1] = ctx[i]; 
+                ctx[i - 1] = ctx[i];
             ctx[T - 1] = nxt;
         }
     }
     printf("\n");
     freemem(ctx);
     freemem(logits);
+    freemem(recent);
 }
 
 static LM* load_checkpoint(int argc, char** argv, char** load_file,
@@ -385,7 +461,7 @@ static void print_validation_status(long long correct, long long positions,
     double pp = positions ? exp(nll / (double) positions) : 0.0;
     char buf[128]; /* Larger than needed, to pacify gcc */
     snprintf(buf,sizeof(buf),
-        "Validating: top-1 %4.1f%% ppl %8.2f (%d/%d files) %d:%02d:%02d",
+        "Validating: top-1 %4.1f%% perplexity %8.2f (%d/%d files) %d:%02d:%02d",
         t1,pp,fi + 1,nfiles,sec/3600,(sec/60)%60,sec%60);
     printf("\r%-79s\r",buf);
     fflush(stdout);
@@ -511,7 +587,7 @@ static void print_training_status(int epoch, float learning_rate,
     int sec = (int) elapsed_time(start_time);
     char buf[128]; /* Larger than needed, to pacify gcc */
     snprintf(buf,sizeof(buf),
-        "Epoch %2d lr %7.5f loss %7.4f (file %d/%d) %d:%02d:%02d",
+        "Epoch %2d lr %8.6f loss %7.4f (file %d/%d) %d:%02d:%02d",
         epoch,learning_rate,
         ep_positions ? ep_loss/ep_positions : 0.0,
         fi + 1,act_num_files,sec/3600,(sec/60)%60,sec%60);
@@ -533,7 +609,7 @@ int main(int argc, char** argv)
     int   neg_samples    = 10;
     float learning_rate  = 3e-4;
 
-    char* tr_file        = "data/news/all_files.lst";
+    char* tr_file        = "data/news/selected_files.lst";
     char* output_file    = "lmtrain.model";
     char* load_file      = NULL;
     char* save_base      = "lmtrain";
@@ -563,8 +639,9 @@ int main(int argc, char** argv)
     int update_cnt = 0;
     int start_epoch = 1;
 
-    /* If '-l' option specified load saved training checkpoint;
-     * otherwise, do nothing.
+    /* If '-l' option specified load saved training checkpoint.
+     * Note that load_checkpoint handles the -l command line argument
+     * and updates load_file with a pointer to the file name if specified.
      */
     m = load_checkpoint(argc,argv,&load_file,&hmap,&st,
                         &optimizer,&update_cnt,&learning_rate,&lr_decay,
@@ -819,6 +896,9 @@ int main(int argc, char** argv)
         float ep_loss = 0;
         long long ep_positions = 0;
         long long ep_correct = 0;
+        /* Use a fraction of the dataset each epoch. Inspired by
+         * RS2: Okanovic et al. https://arxiv.org/pdf/2305.18424
+         */
         int act_num_files = (int) (num_train * sample_frac);
         if (act_num_files < 1) 
             act_num_files = 1;
@@ -902,7 +982,8 @@ int main(int argc, char** argv)
         }
 
         if (gen_every > 0 && epoch % gen_every == 0)
-            lm_generate(m,hmap,prompt_tokens,prompt_token_count,30,0.8);
+            lm_generate(m,hmap,prompt_tokens,prompt_token_count,
+                        30,0.8,40,1.3); /* top_k=40, rep_penalty=1.3 */
 
         learning_rate *= lr_decay;
         fflush(stdout);
