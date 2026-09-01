@@ -187,5 +187,8 @@ void mha_free(MHA* l)
     freemem(l->gWv);
     freemem(l->gWo);
 
+    freemem(l->Kh_cache);
+    freemem(l->Vh_cache);
+
     freemem(l);
 }

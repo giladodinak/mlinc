@@ -15,17 +15,17 @@
 
 typedef struct {
     /* dimensions */
-    int B;      /* batch size */
-    int T;      /* sequence length */
-    int D;      /* model dim */
-    int H;      /* heads */
-    int Dh;     /* D / H */
-    int BT;     /* B * T */
+    int B;      /* Batch size      */
+    int T;      /* Sequence length */
+    int D;      /* Model dimension */
+    int H;      /* Number of heads */
+    int Dh;     /* D / H     */
+    int BT;     /* B * T     */
     int BHT;    /* B * H * T */
 
-    int lookahead;      /* causal masking, set at create time below  */
+    int lookahead;      /* Causal masking, set at create time below  */
     int training;       /* 1 if training, 0 if inference             */
-    float dropout_rate; /* fraction of attention weights to zero out */
+    float dropout_rate; /* Fraction of attention weights to zero out */
 
     fArr2D Wq;  /* [D][D] */
     fArr2D Wk;  /* [D][D] */
@@ -74,6 +74,10 @@ typedef struct {
     fArr2D gWk;     /* [D][D] */
     fArr2D gWv;     /* [D][D] */
     fArr2D gWo;     /* [D][D] */
+
+    /* KV cache for single-token generation (mha_forward_step) */
+    fArr2D Kh_cache;     /* [H*T][Dh] rotated keys ring buffer */
+    fArr2D Vh_cache;     /* [H*T][Dh] values ring buffer       */
 
 } MHA;
 
@@ -236,6 +240,8 @@ static inline void mha_forward(MHA* restrict l,
 
     ArrBTD Out = (ArrBTD) l->Out;
 
+    float scale = 1.0 / sqrtf((float) Dh);
+
     /* Step 1 - Linear projections (in Eq. 1, Sec. 3.2.2):
      * Q = X @ Wq,  K = X @ Wk,  V = X @ Wv
      */
@@ -272,16 +278,16 @@ static inline void mha_forward(MHA* restrict l,
              */
             matmulT(Scores,&Qh[base],&Kh[base],T,Dh,T);
 
-            float s = 1.0f / sqrtf((float)Dh);
             for(int i = 0; i < T; i++)
                 for(int j = 0; j < T; j++)
-                    Scores[i][j] *= s;
+                    Scores[i][j] *= scale;
 
             /* Causal / lookahead masking (Sec. 3.2.3, Fig. 2 generalised).
              *   lookahead <  0 : skip - fully bidirectional attention
              *   lookahead == 0 : strictly causal (mask every future frame)
              *   lookahead == L : allow L future frames, mask beyond that
-             * Position i attends to j only where j <= i + lookahead. */
+             * Position i attends to j only where j <= i + lookahead
+             */
             if (lookahead >= 0) {
                 for (int i = 0; i < T; i++)
                     for (int j = i + lookahead + 1; j < T; j++)
@@ -321,6 +327,116 @@ static inline void mha_forward(MHA* restrict l,
      */
     if (Y != NULL)
         matmul(Y,Out,Wo,BT,D,D);
+}
+
+/* mha_forward_step - single-token cached forward (B=1, inference only).
+ *
+ * Processes one token at absolute position 'offset': projects Q/K/V, RoPE-
+ * rotates Q and K, appends the rotated K and V to per-head ring buffers
+ * (slot = offset % T), and attends the query over the last min(offset+1, T)
+ * cached keys, writing [1][D] to Y.
+ *
+ * Keys are cached already rotated, so attention over the ring is correct
+ * without re-rotating (RoPE depends only on position differences). offset 0
+ * starts a fresh sequence. Causal masking is implicit (cached keys are all at
+ * positions <= offset).
+ *
+ * Parameters:
+ *   l      - MHA layer
+ *   x      - the new token's input row [1][D]
+ *   Y      - output row [1][D]
+ *   offset - absolute position of this token (0-based)
+ *   lyr    - layer index (informational)
+ */
+static inline void mha_forward_step(MHA* restrict l,
+                                    const fArr2D restrict x/*[1][D]*/,
+                                    fArr2D Y/*[1][D]*/,
+                                    int offset,
+                                    int lyr)
+{
+    (void) lyr;
+    const int T = l->T;
+    const int D = l->D;
+    const int H = l->H;
+    const int Dh = l->Dh;
+
+    typedef float (*ArrDD)[D];
+    typedef float (*Arr1D)[D];
+    typedef float (*ArrHTDh)[Dh];
+
+    ArrDD Wq = (ArrDD) l->Wq;
+    ArrDD Wk = (ArrDD) l->Wk;
+    ArrDD Wv = (ArrDD) l->Wv;
+    ArrDD Wo = (ArrDD) l->Wo;
+    Arr1D Q  = (Arr1D) l->Q;
+    Arr1D K  = (Arr1D) l->K;
+    Arr1D V  = (Arr1D) l->V;
+    Arr1D Out = (Arr1D) l->Out;
+
+    if (l->Kh_cache == NULL) {
+        l->Kh_cache = allocmem(H * T,Dh,float);
+        l->Vh_cache = allocmem(H * T,Dh,float);
+    }
+    ArrHTDh Kc = (ArrHTDh) l->Kh_cache;
+    ArrHTDh Vc = (ArrHTDh) l->Vh_cache;
+
+    /* Project the single new token */
+    matmul(Q,x,Wq,1,D,D);
+    matmul(K,x,Wk,1,D,D);
+    matmul(V,x,Wv,1,D,D);
+
+    int slot = offset % T; /* Ring position of this token */
+    int n = offset + 1;    /* Valid keys so far           */
+    if (n > T) n = T;      /* Buffer is full              */
+
+    float scale = 1.0 / sqrtf((float) Dh);
+
+    for (int h = 0; h < H; h++) {
+        int hbase = h * T;
+        float qh[Dh], kh[Dh];
+        fltcpy(qh,&Q[0][h*Dh],Dh);
+        fltcpy(kh,&K[0][h*Dh],Dh);
+
+        /* RoPE-rotate the new token's Q and K at absolute position offset. */
+        rope_apply((fArr2D) qh,l->theta,0,offset,1,Dh);
+        rope_apply((fArr2D) kh,l->theta,0,offset,1,Dh);
+
+        /* Store rotated K and raw V into the ring at this slot. */
+        fltcpy(&Kc[hbase+slot][0],kh,Dh);
+        fltcpy(&Vc[hbase+slot][0],&V[0][h*Dh],Dh);
+
+        /* Attention of the new token over the n valid cached keys */
+        float sc[T];
+        float maxs = -1e30f;
+        for (int j = 0; j < n; j++) {
+            const float* kj = &Kc[hbase+j][0];
+            float dot = 0.0;
+            for (int d = 0; d < Dh; d++)
+                dot += qh[d] * kj[d];
+            dot *= scale;
+            sc[j] = dot;
+            if (dot > maxs) maxs = dot;
+        }
+        float sum = 0.0;
+        for (int j = 0; j < n; j++) {
+            sc[j] = expf(sc[j] - maxs);
+            sum += sc[j];
+        }
+        float inv = 1.0 / sum;
+
+        float oh[Dh];
+        for (int d = 0; d < Dh; d++) oh[d] = 0.0f;
+        for (int j = 0; j < n; j++) {
+            float w = sc[j] * inv;
+            const float* vj = &Vc[hbase+j][0];
+            for (int d = 0; d < Dh; d++)
+                oh[d] += w * vj[d];
+        }
+        fltcpy(&Out[0][h*Dh],oh,Dh);
+    }
+
+    if (Y != NULL)
+        matmul(Y,Out,Wo,1,D,D);
 }
 
 /*

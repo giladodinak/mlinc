@@ -107,7 +107,7 @@ void transformer_free(TRANSFORMER* l);
  *   lyr      - layer index (informational)
  *
  * Note: if the transformer was initialized not in training mode, the
- * value of this training parameter is ignotred.
+ * value of this training parameter is ignored.
  *
  * Computation (Sec. 3.1, p.3 and Sec. 3.2, p.4):
  *
@@ -170,6 +170,43 @@ static inline void transformer_forward(TRANSFORMER* restrict l,
     /* Step 4 - Second residual add + layer norm (Sec. 3.1):
      * Y = LayerNorm(norm1_out + ffn2_out)
      */
+    addnorm_forward(l->norm2,norm1_out,ffn2_out,Y);
+}
+
+/* transformer_forward_step - single-token cached forward for decoding.
+ *
+ * Modifed version of transformer_forward that processes one new token [1][D]
+ * at absolute position 'offset', using the MHA KV cache.
+ *
+ * Parameters:
+ *   l        - pointer to the TRANSFORMER layer
+ *   X        - input  [1][D]
+ *   offset - absolute position of this token (0-based)
+ *   Y        - output [1][D]
+ *   lyr      - layer index (informational)
+ */
+static inline void transformer_forward_step(TRANSFORMER* restrict l,
+                                            const fArr2D restrict X /*[1][D]*/,
+                                            int offset,
+                                            fArr2D Y /*[1][D]*/,
+                                            int lyr)
+{
+    const int D = l->D;
+    typedef float (*ArrBTD)[D];
+    ArrBTD mha_out = (ArrBTD) l->mha_out;
+    ArrBTD norm1_out = (ArrBTD) l->norm1_out;
+
+    /* Masked self-attention for the single token via the KV cache */
+    mha_forward_step(l->mha,X,mha_out,offset,lyr);
+
+    /* Residual + norm (one row; sub-layer B must be 1). */
+    addnorm_forward(l->norm1,X,mha_out,norm1_out);
+
+    /* FFN (one row). */
+    fArr2D ffn1_out = dense_forward(l->ffn1,norm1_out,lyr);
+    fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,lyr);
+
+    /* Residual + norm. */
     addnorm_forward(l->norm2,norm1_out,ffn2_out,Y);
 }
 

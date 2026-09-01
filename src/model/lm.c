@@ -134,6 +134,54 @@ void lm_update(LM* m, char optimizer, float lr, float wd, int update_cnt)
     }
 }
 
+/* Enables or disables single-token cached decoding.
+ *
+ * When enabled (on != 0), sets the row-processing sub-layers (FFN and the
+ * two AddNorms of every transformer) to a batch size of 1 so they process
+ * a single token per call, as required by transformer_forward_step and
+ * lm_forward_step. When disabled, restores them to the model's training
+ * row count m->BT.
+ *
+ * The MHA sub-layer is not switched here: its cached single-token path
+ * (mha_forward_step) does not use the batch size. The restore value is
+ * derived from m.
+ */
+void lm_use_cache(LM* m, int on)
+{
+    int rows = on ? 1 : m->BT;
+    for (int i = 0; i < m->N; i++) {
+        TRANSFORMER* t = m->tr[i].transformer;
+        t->ffn1->B  = rows;
+        t->ffn2->B  = rows;
+        t->norm1->B = rows;
+        t->norm2->B = rows;
+    }
+}
+
+/* Single-token cached forward. Embeds one token id and runs it through
+ * the stack using each layer's cached step at absolute position 'offset'.
+ * Returns the head-input activation row [1][E]. Requires lm_use_cache(m,1)
+ * first.
+ *
+ * Uses acts[i] row 0 as the inter-layer buffer (only one row).
+ */
+fArr2D lm_forward_step(LM* m, int token_id, int offset)
+{
+    int E = m->E;
+
+    /* Embed just the single token: copy its row from the embedding table.
+     * lmemb_forward would embeds all BT positions; here only one exists.
+     */
+    typedef float (*ArrVE)[E];
+    ArrVE Wx = (ArrVE) m->emb->Wx;
+    fltcpy(m->acts[0],&Wx[token_id][0],E);
+
+    for (int i = 0; i < m->N; i++)
+        transformer_forward_step(m->tr[i].transformer,
+                                 m->acts[i],offset,m->acts[i+1],i);
+    return m->acts[m->N];
+}
+
 /* Generates tokens continuing from a prompt.
  *
  * Parameters:
@@ -175,7 +223,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
                 float temperature, int top_k, 
                 int rep_win_len, float rep_penalty)
 {
-    int T = m->T, K = m->V, E = m->E;
+    int T = m->T, K = m->V;
 
     if (seed == NULL || seedlen <= 0 || seedlen > T) 
         return -1;
@@ -191,35 +239,31 @@ int lm_generate(LM* m, HASHMAP* hmap,
     int* recent = allocmem(rep_win_len,1,int);
     int nrecent = 0;
 
-    /* Initialize context with seed */
-    int* ctx = allocmem(T,1,int);
-    int ctxlen = seedlen; 
-    for (int i = 0; i < ctxlen; i++)
-        ctx[i] = seed[i];
-
-    /* Initialize output buffer with seed */
+    /* Output buffer starts with the seed tokens. */
     for (int i = 0; i < seedlen && buflen > 1; i++) {
-        bufext = snprintf(buffer,buflen,"%s ",hashmap_inx2str(hmap,ctx[i]));
+        bufext = snprintf(buffer,buflen,"%s ",hashmap_inx2str(hmap,seed[i]));
         if (bufext < 0 || bufext >= buflen)
             break;
         buffer += bufext;
         buflen -= bufext;
     }
 
+    /* Switch to single-row processing and use the MHA KV cache */
+    lm_use_cache(m,1);
+
+    /* Prefill: feed the prompt one token at a time (offset 0..seedlen-1),
+     * filling the KV cache. Keep the last token's head-input activation to
+     * produce the first generated token.
+     */
+    fArr2D H = NULL;
+    for (int i = 0; i < seedlen; i++)
+        H = lm_forward_step(m,seed[i],i);
+
+    int pos = seedlen; /* Absolute position of next token */
+
     for (s = 0; s < steps; s++) {
-        for (int i = 0; i < ctxlen; i++)
-            m->ids[i] = ctx[i];
-        for (int i = ctxlen; i < m->BT; i++)
-            m->ids[i] = 0;
-        for (int i = 0; i < ctxlen; i++)
-            m->pad_mask[i] = 1;
-        for (int i = ctxlen; i < m->BT; i++)
-            m->pad_mask[i] = 0;
 
-        typedef float (*ArrBTE)[E];
-        ArrBTE H = lm_forward(m,0);
-
-        smsftmax_logits(m->head,(fArr2D) H[ctxlen - 1],(fArr2D) logits,1);
+        smsftmax_logits(m->head,(fArr2D) H,(fArr2D) logits,1);
 
         /* log-softmax: log p_i = z_i - logsumexp(z)
          * (Ref. #4, gauge-fixing)
@@ -343,17 +387,12 @@ int lm_generate(LM* m, HASHMAP* hmap,
             }
         }
 
-        if (ctxlen < T)
-            ctx[ctxlen++] = nxt;
-        else {
-            for (int i = 1; i < T; i++)
-                ctx[i - 1] = ctx[i];
-            ctx[T - 1] = nxt;
-        }
+        H = lm_forward_step(m,nxt,pos);
+        pos++;
     }
     if (bufext > 1 && buffer[bufext - 1] == ' ')
         buffer[bufext - 1] = '\0';
-    freemem(ctx);
+    lm_use_cache(m,0); /* Restore batch row counts */
     freemem(logits);
     freemem(recent);
     return s; /* Actual number of words generated (excluding seed) */
