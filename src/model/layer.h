@@ -2,6 +2,7 @@
 /* Uniform wrappers over the per-layer-type    */
 #ifndef LAYER_H
 #define LAYER_H
+#include <stdio.h>
 #include "array.h"
 #include "dense.h"
 #include "lstm.h"

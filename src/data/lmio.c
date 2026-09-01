@@ -142,7 +142,7 @@ static int read_dist(FILE* fp, int** dist_out, int* size_out)
 /* Wrap the N transformer LAYERs and the output layer in a MODEL 
  * and pass it to write_model().
  */
-static int write_lm_stack(const LM* m, int fin, const LMTRAIN* st, FILE* fp)
+static int write_lm_stack(const LM* m, int fin, const LMPARAM* st, FILE* fp)
 {
     LAYER* layers = allocmem(1,m->N,LAYER);
     for (int i = 0; i < m->N; i++)
@@ -208,7 +208,7 @@ static int read_lm_stack(FILE* fp, LAYER** ptr, int* pN)
 }
 
 int write_lm(const LM* m, int final, HASHMAP* hmap,
-             const int* dist, int dist_size, const LMTRAIN* st, FILE* fp)
+             const int* dist, int dist_size, const LMPARAM* st, FILE* fp)
 {
     final = final ? 1 : 0;
 
@@ -247,7 +247,7 @@ int write_lm(const LM* m, int final, HASHMAP* hmap,
     return 1;
 }
 
-LM* read_lm(FILE* fp, HASHMAP** phmap, LMTRAIN* st)
+LM* read_lm(FILE* fp, HASHMAP** phmap, LMPARAM* st)
 {
     int V, E, T, B, N, n_neg, num_epochs, epoch, update_cnt, lrng_seed, final;
     char optimizer;
@@ -353,7 +353,7 @@ LM* read_lm(FILE* fp, HASHMAP** phmap, LMTRAIN* st)
     return m;
 }
 
-LM* load_lm(const char* filename, HASHMAP** hmap, LMTRAIN* st)
+LM* load_lm(const char* filename, HASHMAP** hmap, LMPARAM* st)
 {
     FILE* fp = fopen(filename,"rb");
     if (fp == NULL) {
@@ -367,7 +367,7 @@ LM* load_lm(const char* filename, HASHMAP** hmap, LMTRAIN* st)
 }
 
 int store_lm(const char* filename, const LM* m, int final, 
-             HASHMAP* hmap, const int* dist, int dist_size, const LMTRAIN* st)
+             HASHMAP* hmap, const int* dist, int dist_size, const LMPARAM* st)
 {
     FILE* fp = fopen(filename,"wb");
     if (fp == NULL) {

@@ -34,7 +34,7 @@ const char* usage =
 "  -h                 Show this help message, then exit\n"
 "  -b <batch_size>    Set batch size (default 16)\n"
 "  -c <context_size>  Set context size (must be even, default 8)\n"
-"  -d <embedding_dim> Set embedding dimension (default 100)\n"
+"  -d <embedding_dim> Set embedding dimension (default 200)\n"
 "  -e <num_epochs>    Set number of epochs (default 10)\n"
 "  -i <train_file>    Set training files list (def. data/news/selected_files.lst)\n"
 "  -n <neg_samples>   Num of negative samples per positive target (def 10)\n"
@@ -156,7 +156,7 @@ int main(int argc, char** argv)
     char* embedding_file = "word2vec.model";        /* Output */
     float vocab_coverage = 0.99; /* 99% */
     int vocab_size = 0; /* Default: size derived from vocab_coverage */
-    int embedding_dim = 100;
+    int embedding_dim = 200;
     int batch_size = 16;
     int cxt_size = 8;
     int num_epochs = 10;

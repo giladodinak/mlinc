@@ -10,3 +10,8 @@ void init_lrng(int seed)
     if (seed == 0 || seed == m) seed = 1;
     lrng_seed = seed;
 }
+
+int get_lrng_seed(void)
+{
+    return lrng_seed;
+}

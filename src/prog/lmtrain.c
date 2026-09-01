@@ -2,7 +2,7 @@
 
 /* This program implements standalone decoder-only language-model trainer.
  *
- * The input and output layers are structed similarily to word2vec.c
+ * The input and output layers are structured similarly to those in word2vec.c.
  *
  */
 #include <stdio.h>
@@ -33,14 +33,14 @@ static const char* usage =
 "Options:\n"
 "  -h                   Show this help message, then exit\n"
 "  -b <batch_size>      Sequences (windows) per batch (default 16)\n"
-"  -T <seq_len>         Sequence length / context window T (default 64)\n"
-"  -d <model_dim>       Model dimension D (default 256)\n"
+"  -T <seq_len>         Sequence length / context window T (default 128)\n"
+"  -d <model_dim>       Model dimension D (default 128)\n"
 "  -H <heads>           Attention heads (D must divide by heads) (default 8)\n"
 "  -L <layers>          Number of transformer layers (default 4)\n"
 "  -f <ffn_dim>         FFN hidden dim (default 4*D)\n"
-"  -e <num_epochs>      Number of epochs (default 5)\n"
-"  -F <sample_frac>     Fraction of files to train on each epoch (def. 0.1)\n"
-"  -n <neg_samples>     Negative samples per position (default 10)\n"
+"  -e <num_epochs>      Number of epochs (default 8)\n"
+"  -F <sample_frac>     Fraction of files to train on each epoch (def. 0.2)\n"
+"  -n <neg_samples>     Negative samples per position (default 40)\n"
 "  -r <learning_rate>   Starting learning rate (default 3e-4)\n"
 "  -i <train_file>      File list (default data/news/selected_files.lst)\n"
 "  -o <output_file>     Output model file (default lmtrain.model)\n"
@@ -55,7 +55,6 @@ static const char* usage =
 "  --data-dir=<dir>     Location of training data (default data/news/data)\n"
 "  --prompt=\"<prompt>\"  Seed prompt for text generation\n"
 "                       (default 'according to the')\n"
-"  --gen-every=<n>      Sample a generation every n epochs (0=off, def. 1)\n"
 "  --validation-frac=<f>  Fraction of files held out for validation\n"
 "                         (default 0.01)\n"
 "  --print-vocab        Print vocabulary and exit\n"
@@ -78,301 +77,8 @@ static void shuffle_list(char** list, int cnt)
     }
 }
 
-static LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
-                     int batch, int layers, int ffn_dim, int n_neg,
-                     float dropout, char optimizer)
-{
-    LM* m = allocmem(1,1,LM);
-    m->V = vocab; m->E = model_dim; m->T = seq_len; m->B = batch;
-    m->N = layers; m->BT = batch * seq_len; m->n_neg = n_neg;
-
-    /* Embedding: owns its weights (untied), training mode. */
-    m->emb = lmemb_create(model_dim,seq_len,/*padinx=*/0);
-    lmemb_init(m->emb,vocab,batch,/*training=*/1,/*tied=*/0);
-
-    /* Transformer stack, each wrapped in a LAYER */
-    m->tr = allocmem(layers,1,LAYER);
-    for (int i = 0; i < layers; i++) {
-        TRANSFORMER* t = transformer_create(heads,seq_len,model_dim,
-                                            ffn_dim,/*lookahead=*/0);
-        transformer_init(t,batch,/*training=*/1,dropout);
-        m->tr[i].type = 't';
-        m->tr[i].transformer = t;
-        layer_alloc_grads(&m->tr[i],optimizer);
-    }
-
-    /* Output layer */
-    m->head = smsftmax_create(vocab,n_neg);
-    smsftmax_init(m->head,model_dim,m->BT);
-    m->gHead = allocmem(1,1,fArr2D*);
-    m->gHead[0] = allocmem(vocab,model_dim,float);
-
-    m->acts = allocmem(layers + 1,1,fArr2D*);
-    for (int i = 0; i <= layers; i++)
-        m->acts[i] = allocmem(m->BT,model_dim,float);
-    m->dtop  = allocmem(m->BT,model_dim,float);
-    m->dcur  = allocmem(m->BT,model_dim,float);
-    m->dnext = allocmem(m->BT,model_dim,float);
-
-    m->pad_mask = allocmem(m->BT,1,int);
-    m->labels = allocmem(m->BT,1,float);
-    m->ids = allocmem(m->BT,1,int);
-    return m;
-}
-
-static void lm_free(LM* m)
-{
-    lmemb_free(m->emb);
-    for (int i = 0; i < m->N; i++) {
-        transformer_free(m->tr[i].transformer);
-        for (int j = 0; j < m->tr[i].num_grads; j++)
-            freemem(m->tr[i].grads[j]);
-        freemem(m->tr[i].grads);
-    }
-    freemem(m->tr);
-    smsftmax_free(m->head);
-    freemem(m->gHead[0]);
-    freemem(m->gHead);
-    for (int i = 0; i <= m->N; i++)
-        freemem(m->acts[i]);
-    freemem(m->acts);
-    freemem(m->dtop);
-    freemem(m->dcur);
-    freemem(m->dnext);
-    freemem(m->pad_mask);
-    freemem(m->labels);
-    freemem(m->ids);
-    freemem(m);
-}
-
-/* Forward the whole stack. Returns head-input activations [BT][E] */
-static fArr2D lm_forward(LM* m, int training)
-{
-    /* Embedding gather: acts[0] = emb(ids). lmemb_forward writes into
-     * its own l->h; copy into acts[0] so the stack owns a stable buffer.
-     */
-    fArr2D h = lmemb_forward(m->emb,m->ids,0);
-    fltcpy(m->acts[0],h,m->BT * m->E);
-
-    for (int i = 0; i < m->N; i++)
-        transformer_forward(m->tr[i].transformer,
-                            m->acts[i],m->pad_mask,
-                            training,m->acts[i+1],i);
-    return m->acts[m->N];
-}
-
-/* Backward the whole stack given dh at the head input (in m->dtop) */
-static void lm_backward(LM* m)
-{
-    /* Walk transformers in reverse. dcur holds grad w.r.t. layer i+1's
-     * output; dnext receives grad w.r.t. layer i's input.
-     */
-    fltcpy(m->dcur,m->dtop,m->BT * m->E);
-    for (int i = m->N - 1; i >= 0; i--) {
-        transformer_backward(m->tr[i].transformer,
-                             m->dcur,m->acts[i],m->dnext,i);
-        /* Swap dcur <-> dnext for next (lower) layer */
-        fArr2D tmp = m->dcur; m->dcur = m->dnext; m->dnext = tmp;
-    }
-    /* dcur now holds grad w.r.t. embedding output: scatter into gWx */
-    lmemb_backward(m->emb,m->dcur,0);
-}
-
-/* One optimizer step across all trainable layers */
-static void lm_update(LM* m, char optimizer, float lr, float wd,
-                      int update_cnt)
-{
-    /* Transformers via the LAYER machinery. */
-    for (int i = 0; i < m->N; i++)
-        layer_update(&m->tr[i],optimizer,lr,wd,update_cnt);
-
-    /* Head: sparse SGD over touched rows (its own scheme). */
-    smsftmax_update(m->head,m->gHead[0],lr,wd);
-
-    /* Embedding: sparse row update over rows touched this batch. Weight
-     * decay omitted for embeddings (standard practice).
-     */
-    {
-        typedef float (*ArrVE)[m->E];
-        ArrVE Wx  = (ArrVE) m->emb->Wx;
-        ArrVE gWx = (ArrVE) m->emb->gWx;
-        for (int r = 0; r < m->emb->ntouched; r++) {
-            int row = m->emb->touched[r];
-            for (int j = 0; j < m->E; j++)
-                Wx[row][j] -= lr * gWx[row][j];
-        }
-    }
-}
-
-/* Samples a token from logits using temperature-scaled softmax, with optional
- * top-k truncation and a repetition penalty over recently generated tokens.
- *
- * logits      - Array of K logits (modified in place by the penalty).
- * K           - Number of logits.
- * temperature - Sampling temperature; <= 0 selects greedily (argmax).
- * top_k       - If > 0, sample only from the top_k highest-scoring tokens
- *               (0 disables truncation, sampling from the full vocabulary).
- * recent      - Array of the last 'nrecent' generated token ids, whose logits
- *               are divided down by rep_penalty to discourage repetition
- *               (NULL / 0 disables).
- * nrecent     - Number of valid entries in recent[].
- * rep_penalty - Divisor applied to recent tokens' logits when > 1.0 (a value
- *               like 1.2-1.5 discourages loops; 1.0 disables).
- *
- * Note: logits[0] represents PAD and is excluded from selection.
- *
- * Reference:
- * Hinton, Vinyals, Dean (2015) Distilling the Knowledge in a Neural Network
- * https://arxiv.org/pdf/1503.02531
- *
- * Ackley, Hinton & Sejnowski (1985), A Learning Algorithm for Boltzmann Machines
- * https://onlinelibrary.wiley.com/doi/epdf/10.1207/s15516709cog0901_7
- *
- * Repetition penalty: Keskar et al. (2019), CTRL
- * https://arxiv.org/abs/1909.05858
- *
- * Top-k sampling: Fan, Lewis, Dauphin (2018)
- * https://arxiv.org/abs/1805.04833
- */
-static int sample_from_logits(float* logits, int K, float temperature,
-                              int top_k, const int* recent, int nrecent,
-                              float rep_penalty)
-{
-    /* Repetition penalty: push down the logits of recently emitted tokens.
-     * For a positive logit divide by the penalty, for a negative one multiply
-     * (both reduce the score), following the CTRL formulation.
-     */
-    if (recent != NULL && rep_penalty > 1) {
-        for (int i = 0; i < nrecent; i++) {
-            int t = recent[i];
-            if (t > 0 && t < K) {
-                if (logits[t] > 0)
-                    logits[t] /= rep_penalty;
-                else
-                    logits[t] *= rep_penalty;
-            }
-        }
-    }
-
-    if (temperature <= 0) {
-        int best;                              /* argmax (greedy) */
-        float bv = logits[best = 1];
-        for (int k = 2; k < K; k++)
-            if (logits[k] > bv)
-                bv = logits[best = k];
-        return best;
-    }
-
-    /* Temperature-scaled scores over indices 1..K-1 (0 = PAD excluded) */
-    float l[K];
-    for (int k = 1; k < K; k++)
-        l[k] = logits[k] / temperature;
-
-    /* Top-k truncation: find the k-th largest score and mask everything
-     * below it to -inf so it gets zero probability after softmax.
-     */
-    if (top_k > 0 && top_k < K - 1) {
-        /* Copy scores, partially select the top_k-th value as a threshold.
-         * K is modest here; a simple selection is adequate.
-         */
-        float tmp[K];
-        for (int k = 1; k < K; k++) tmp[k] = l[k];
-        /* Find the (top_k)-th largest via repeated max extraction */
-        float thresh = -1e30f;
-        for (int r = 0; r < top_k; r++) {
-            float mv = -1e30f; int mi = -1;
-            for (int k = 1; k < K; k++)
-                if (tmp[k] > mv) { mv = tmp[k]; mi = k; }
-            if (mi < 0) break;
-            thresh = mv;
-            tmp[mi] = -1e30f;                  /* remove so next r finds next */
-        }
-        for (int k = 1; k < K; k++)
-            if (l[k] < thresh) l[k] = -1e30f;  /* drop below the top-k cutoff */
-    }
-
-    typedef float (*Arr1K1)[K - 1];
-    softmax((Arr1K1) (l + 1),1,K - 1);
-    float r = urand(0,1);
-    float c = 0;
-    for (int k = 1; k < K; k++) {
-        c += l[k];
-        if (r <= c)
-            return k;
-    }
-    return K - 1;
-}
-
-/* Generate tokens continuing from a prompt, and print them.
- * top_k and rep_penalty control anti-repetition decoding 
- * (see sample_from_logits); pass top_k=0, rep_penalty=1.0 for plain sampling.
- */
-static void lm_generate(LM* m, HASHMAP* hmap,
-                        const int* seed, int seedlen,
-                        int steps, float temperature,
-                        int top_k, float rep_penalty)
-{
-    int T = m->T, K = m->V, E = m->E;
-    int* ctx = allocmem(T,1,int);
-    float* logits = allocmem(1,K,float);
-
-    /* Ring of recently generated tokens for the repetition penalty */
-    int rep_window = 32;
-    int* recent = allocmem(rep_window,1,int);
-    int nrecent = 0;
-
-    int n = seedlen < T ? seedlen : T;
-    for (int i = 0; i < n; i++)
-        ctx[i] = seed[i];
-
-    printf("Generating: ");
-    for (int i = 0; i < n; i++)
-        printf("%s ",hashmap_inx2str(hmap,ctx[i]));
-
-    for (int s = 0; s < steps; s++) {
-        for (int i = 0; i < n; i++)
-            m->ids[i] = ctx[i];
-        for (int i = n; i < m->BT; i++)
-            m->ids[i] = 0;
-        for (int i = 0; i < n; i++)
-            m->pad_mask[i] = 1;
-        for (int i = n; i < m->BT; i++)
-            m->pad_mask[i] = 0;
-
-        typedef float (*ArrBTE)[E];
-        ArrBTE H = lm_forward(m,0);
-
-        smsftmax_logits(m->head,(fArr2D) H[n - 1],(fArr2D) logits,1);
-        int nxt = sample_from_logits(logits,K,temperature,
-                                     top_k,recent,nrecent,rep_penalty);
-
-        printf("%s ",hashmap_inx2str(hmap,nxt));
-
-        /* Record the emitted token in the repetition window */
-        if (nrecent < rep_window)
-            recent[nrecent++] = nxt;
-        else {
-            for (int i = 1; i < rep_window; i++)
-                recent[i - 1] = recent[i];
-            recent[rep_window - 1] = nxt;
-        }
-
-        if (n < T)
-            ctx[n++] = nxt;
-        else {
-            for (int i = 1; i < T; i++)
-                ctx[i - 1] = ctx[i];
-            ctx[T - 1] = nxt;
-        }
-    }
-    printf("\n");
-    freemem(ctx);
-    freemem(logits);
-    freemem(recent);
-}
-
 static LM* load_checkpoint(int argc, char** argv, char** load_file,
-                           HASHMAP** phmap, LMTRAIN* st,
+                           HASHMAP** phmap, LMPARAM* st,
                            char* optimizer, int* update_cnt,
                            float* learning_rate, float* lr_decay,
                            float* weight_decay, int* num_epochs,
@@ -466,26 +172,27 @@ static void print_validation_status(long long correct, long long positions,
     printf("\r%-79s\r",buf);
     fflush(stdout);
 }
+
 /* Runs a full-vocabulary validation pass over the given files.
  * For each valid position it computes logits over the whole vocabulary,
  * takes the argmax for true top-1 accuracy, and accumulates cross-entropy
  * (via log-softmax at the true target) for perplexity. Forward pass only;
  * no gradients, no weight updates. Returns via out_top1 and out_ppl.
  */
-static void validation(LM* m, HASHMAP* hmap, char** files, int nfiles,
-                       const char* data_dir, int vocab_size,
-                       int* file_words, int max_file_words,
-                       double* out_top1, double* out_ppl)
+void validate(LM* m, HASHMAP* hmap, char** files, int nfiles,
+              const char* data_dir, int vocab_size,
+              int* file_words, int max_file_words,
+              double* out_top1, double* out_ppl)
 {
     const int BT = m->BT;
     const int seq_len = m->T;
     const int batch_size = m->B;
     const int K = m->V;
 
-    fArr2D logits = allocmem(BT,K,float);   /* [BT][K] full-vocab scores */
+    fArr2D logits = allocmem(BT,K,float); /* Full-vocab scores */
     long long correct = 0;
     long long positions = 0;
-    double nll = 0.0;                       /* summed negative log-likelihood */
+    double nll = 0.0; /* Summed negative log-likelihood */
 
     double val_start = current_time();
     double last_report = val_start;
@@ -526,7 +233,7 @@ static void validation(LM* m, HASHMAP* hmap, char** files, int nfiles,
 
             fArr2D hhead = lm_forward(m,0);
 
-            /* Full-vocabulary logits for every row in the batch. */
+            /* Full-vocabulary logits for every row in the batch */
             smsftmax_logits(m->head,hhead,logits,BT);
 
             typedef float (*ArrBK)[K];
@@ -536,7 +243,7 @@ static void validation(LM* m, HASHMAP* hmap, char** files, int nfiles,
             for (int row = 0; row < BT; row++) {
                 int target = (int) labels[row];
                 if (target <= 0 || target >= K)
-                    continue;                 /* PAD / OOV target: skip */
+                    continue; /* PAD / OOV target: skip */
 
                 /* argmax and log-sum-exp over the full vocabulary */
                 int best = 1;
@@ -566,6 +273,7 @@ static void validation(LM* m, HASHMAP* hmap, char** files, int nfiles,
     *out_top1 = positions ? 100.0 * (double) correct / (double) positions : 0.0;
     *out_ppl  = positions ? exp(nll / (double) positions) : 0.0;
 }
+
 
 
 /* Prints one training progress line.
@@ -598,15 +306,15 @@ static void print_training_status(int epoch, float learning_rate,
 int main(int argc, char** argv)
 {
     int   batch_size     = 16;
-    int   seq_len        = 64;
-    int   model_dim      = 256;
+    int   seq_len        = 128;
+    int   model_dim      = 128;
     int   heads          = 8;
     int   layers         = 4;
     int   ffn_dim        = 0; /* 0 -> 4*model_dim */
-    int   num_epochs     = 5;
-    float sample_frac    = 0.1;
+    int   num_epochs     = 8;
+    float sample_frac    = 0.2;
     float validation_frac = 0.01;
-    int   neg_samples    = 10;
+    int   neg_samples    = 40;
     float learning_rate  = 3e-4;
 
     char* tr_file        = "data/news/selected_files.lst";
@@ -621,7 +329,6 @@ int main(int argc, char** argv)
     float vocab_coverage = 0.99;
     char* data_dir       = "data/news/data";
     char* prompt         = "according to the";
-    int   gen_every      = 1;
     int   print_vocab    = 0;
     char* blas_cores     = "0,2,4,6";
 
@@ -635,7 +342,7 @@ int main(int argc, char** argv)
     int* dist = NULL;
     int dist_size = 0;
     WRDFRQ* word_freq = NULL;
-    LMTRAIN st;
+    LMPARAM st;
     int update_cnt = 0;
     int start_epoch = 1;
 
@@ -676,7 +383,6 @@ int main(int argc, char** argv)
                 else if (!strncmp(optarg,"vocab-coverage=",15))  { if (m == NULL) vocab_coverage = atof(optarg + 15); }
                 else if (!strncmp(optarg,"data-dir=",9))         data_dir = optarg + 9;
                 else if (!strncmp(optarg,"prompt=",7))           prompt = optarg + 7;
-                else if (!strncmp(optarg,"gen-every=",10))       gen_every = atoi(optarg + 10);
                 else if (!strncmp(optarg,"validation-frac=",16)) validation_frac = atof(optarg + 16);
                 else if (!strncmp(optarg,"print-vocab",11))      print_vocab = 1;
                 else if (!strncmp(optarg,"cores=",6))            blas_cores = (optarg + 6);
@@ -977,17 +683,17 @@ int main(int argc, char** argv)
             printf("Validating...");
             fflush(stdout);
             double val_top1 = 0.0, val_ppl = 0.0;
-            validation(m,hmap,valid_list,num_valid,data_dir,vocab_size,
-                           file_words,max_file_words,&val_top1,&val_ppl);
+            validate(m,hmap,valid_list,num_valid,data_dir,vocab_size,
+                     file_words,max_file_words,&val_top1,&val_ppl);
         }
 
-        if (gen_every > 0 && epoch % gen_every == 0)
-            lm_generate(m,hmap,prompt_tokens,prompt_token_count,
-                        30,0.8,40,1.3); /* top_k=40, rep_penalty=1.3 */
-
-        learning_rate *= lr_decay;
+        char output[1024];
+        lm_generate(m,hmap,prompt_tokens,prompt_token_count,
+                    20,output,sizeof(output),0.8,40,32,1.3);
+        printf("%s\n",output);
         fflush(stdout);
 
+        learning_rate *= lr_decay;
         {
             st.optimizer     = optimizer;
             st.update_cnt    = update_cnt;

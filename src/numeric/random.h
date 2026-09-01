@@ -9,12 +9,10 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-/* Initializes the random number generator
- */
+/* Initializes the random number generator */
 extern int32_t lrng_seed;
 void init_lrng(int seed);
-
-static inline int get_lrng_seed(void) { return lrng_seed; }
+int get_lrng_seed(void);
 
 /* lrng returns a pseudo-random real number uniformly distributed 
  * between 0.0 and 1.0, exclusive on both ends.
@@ -30,7 +28,7 @@ static inline float lrng(void)
     int32_t v = (t > 0) ? t : t + modulus;
     lrng_seed = v;
     float num = ((float) v / modulus);
-    if (num >= 1.0f) num = nextafterf(1.0f, 0.0f); // Avoid float rounding
+    if (num >= 1.0f) num = nextafterf(1.0f, 0.0f); /* Avoid float rounding */
     return num;
 }
 

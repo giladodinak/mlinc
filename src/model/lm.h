@@ -1,5 +1,5 @@
-/* Copyright (c) 2026 Gilad Odinak            */
-/* Decoder-only language model data structure */
+/* Copyright (c) 2026 Gilad Odinak */
+/* Decoder-only language model data structure and functions */
 #ifndef LM_H
 #define LM_H
 #include "array.h"
@@ -21,8 +21,8 @@ typedef struct lm_s {
     SMSFTMAX* head;
     fArr2D* gHead;      /* Head gradient buffer [1] of [K][E]     */
 
-    /* Activations between layers: 
-     * acts[0] = emb output, acts[k+1] = out * of transformer k. 
+    /* Activations between layers:
+     * acts[0] = emb output, acts[k+1] = out * of transformer k.
      * Each is [BT][E]. acts[N] is the head input.
      */
     fArr2D* acts;       /* N+1 buffers                            */
@@ -35,5 +35,23 @@ typedef struct lm_s {
     fArr2D labels;      /* [BT][1] next-token targets (as floats) */
     iVec ids;           /* [BT]  input token ids                  */
 } LM;
+
+LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
+              int batch, int layers, int ffn_dim, int n_neg,
+              float dropout, char optimizer);
+
+void lm_free(LM* m);
+
+fArr2D lm_forward(LM* m, int training);
+
+void lm_backward(LM* m);
+
+void lm_update(LM* m, char optimizer, float lr, float wd, int update_cnt);
+
+int lm_generate(LM* m, HASHMAP* hmap,
+                const int* seed, int seedlen,
+                int steps, char *buffer, int buflen,
+                float temperature, int top_k,
+                int rep_win_len, float rep_penalty);
 
 #endif

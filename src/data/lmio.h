@@ -6,19 +6,19 @@
 #include "hash.h"
 #include "lm.h"
 
-/* Resumable training schedule / optimizer state carried alongside the model */
+/* Laguage Model training schedule / optimizer state */
 typedef struct {
-    char  optimizer;      /* Optimizer code driving the transformer stack   */
-    int   update_cnt;     /* AdamW step counter (for bias correction)       */
-    int   epoch;          /* Last completed epoch (resume at epoch + 1)     */
-    int   num_epochs;     /* Total epochs requested                         */
-    int   final;          /* If not zero, store inference-only              */
-    float sample_frac;    /* Fraction of dataset sampled each epoch         */
-    float learning_rate;  /* Current learning rate (after prior decays)     */
-    float lr_decay;       /* Per-epoch learning-rate decay                  */
-    float weight_decay;   /* AdamW weight decay                             */
-    int   lrng_seed;      /* RNG state (random.h) for exact continuation    */
-} LMTRAIN;
+    char  optimizer;     /* Optimizer code ('a' -> AdamW 'a')          */
+    int   update_cnt;    /* AdamW step counter (for bias correction)   */
+    int   epoch;         /* Last completed epoch (resume at epoch + 1) */
+    int   num_epochs;    /* Total epochs requested                     */
+    int   final;         /* If not zero, store inference data only     */
+    float sample_frac;   /* Fraction of dataset sampled each epoch     */
+    float learning_rate; /* Current learning rate (after prior decays) */
+    float lr_decay;      /* Per-epoch learning-rate decay              */
+    float weight_decay;  /* AdamW weight decay                         */
+    int   lrng_seed;     /* RNG state for exact continuation           */
+} LMPARAM;
 
 /* write_lm / read_lm - Write / read a model to / from an open file.
  *
@@ -53,12 +53,12 @@ typedef struct {
  *     dist is left NULL; the caller must rebuild/attach one before training.
  */
 int write_lm(const LM* m, int final, HASHMAP* hmap,
-             const int* dist, int dist_size, const LMTRAIN* st, FILE* fp);
-LM*  read_lm(FILE* fp, HASHMAP** hmap, LMTRAIN* st);
+             const int* dist, int dist_size, const LMPARAM* st, FILE* fp);
+LM*  read_lm(FILE* fp, HASHMAP** hmap, LMPARAM* st);
 
 /* load_lm / store_lm - Open the named file and read / write a model. */
-LM*  load_lm(const char* filename, HASHMAP** hmap, LMTRAIN* st);
+LM*  load_lm(const char* filename, HASHMAP** hmap, LMPARAM* st);
 int  store_lm(const char* filename, const LM* m, int final, HASHMAP* hmap,
-              const int* dist, int dist_size, const LMTRAIN* st);
+              const int* dist, int dist_size, const LMPARAM* st);
 
 #endif
