@@ -30,6 +30,7 @@ HASHMAP* hashmap_create(int map_size, int mem_size)
  */
 void hashmap_free(HASHMAP* m)
 {
+    if (m == NULL) return;
     freemem(m->i2s);
     freemem(m->s2i);
     freemem(m->map);

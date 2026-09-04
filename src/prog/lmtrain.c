@@ -18,8 +18,8 @@
 #include "blascpu.h"
 #include "array.h"
 #include "random.h"
-#include "hash.h"
 #include "textfile.h"
+#include "vocab.h"
 #include "activation.h"
 #include "lmemb.h"
 #include "transformer.h"
@@ -61,13 +61,6 @@ static const char* usage =
 "  --cores=<list>       Specify cores for openblas use (def. 0,2,4,6)\n"
 ;
 
-static int qsort_compare_word_freq(const void* a, const void* b)
-{   /* WRDFRQ declared in textfile.h */
-    if (((WRDFRQ*)b)->cnt > ((WRDFRQ*)a)->cnt) return 1;
-    if (((WRDFRQ*)b)->cnt < ((WRDFRQ*)a)->cnt) return -1;
-    return 0;
-}
-
 static void shuffle_list(char** list, int cnt)
 {
     if (cnt <= 1) return;
@@ -78,15 +71,14 @@ static void shuffle_list(char** list, int cnt)
 }
 
 static LM* load_checkpoint(int argc, char** argv, char** load_file,
-                           HASHMAP** phmap, LMPARAM* st,
+                           VOCAB** pvocab, LMPARAM* st,
                            char* optimizer, int* update_cnt,
                            float* learning_rate, float* lr_decay,
                            float* weight_decay, int* num_epochs,
                            int* start_epoch, float* sample_frac,
                            int* vocab_size, int* model_dim, int* heads,
                            int* seq_len, int* batch_size, int* layers,
-                           int* ffn_dim, int* neg_samples, float* dropout,
-                           int** dist, int* dist_size)
+                           int* ffn_dim, int* neg_samples, float* dropout)
 {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"-l")) {
@@ -104,16 +96,21 @@ static LM* load_checkpoint(int argc, char** argv, char** load_file,
 
     printf("Loading model from '%s' to continue training\n",*load_file);
     fflush(stdout);
-    LM* m = load_lm(*load_file,phmap,st);
+    LM* m = load_lm(*load_file,pvocab,st);
     if (m == NULL) {
         fprintf(stderr,"Failed to load model from '%s'\n",*load_file);
         return NULL;
     }
     if (st->final) {
         fprintf(stderr,"Cannot continue from a final model '%s'\n",*load_file);
-        hashmap_free(*phmap);
-        freemem(m->head->dist);
         lm_free(m);
+        vocab_free(*pvocab);
+        return NULL;
+    }
+    if ((*pvocab)->dist == NULL || (*pvocab)->dist_size <= 0) {
+        fprintf(stderr,"Checkpoint '%s' has no sampling table\n",*load_file);
+        lm_free(m);
+        vocab_free(*pvocab);
         return NULL;
     }
 
@@ -138,9 +135,6 @@ static LM* load_checkpoint(int argc, char** argv, char** load_file,
         *ffn_dim = m->tr[0].transformer->Dff;
         *dropout = m->tr[0].transformer->dropout_rate;
     }
-    *dist = m->head->dist;
-    *dist_size = m->head->dist_size;
-
     printf("Resuming at epoch %d of %d, lr %g, seed %d\n",
            *start_epoch,*num_epochs,*learning_rate,st->lrng_seed);
     fflush(stdout);
@@ -179,7 +173,7 @@ static void print_validation_status(long long correct, long long positions,
  * (via log-softmax at the true target) for perplexity. Forward pass only;
  * no gradients, no weight updates. Returns via out_top1 and out_ppl.
  */
-void validate(LM* m, HASHMAP* hmap, char** files, int nfiles,
+void validate(LM* m, const VOCAB* vocab, char** files, int nfiles,
               const char* data_dir, int vocab_size,
               int* file_words, int max_file_words,
               double* out_top1, double* out_ppl)
@@ -199,7 +193,7 @@ void validate(LM* m, HASHMAP* hmap, char** files, int nfiles,
 
     for (int fi = 0; fi < nfiles; fi++) {
         int fwcnt = process_text_file(files[fi],data_dir,
-                        hmap,0,vocab_size,NULL,file_words,max_file_words);
+                  vocab->hmap,0,vocab_size,NULL,file_words,max_file_words);
         if (fwcnt <= 1)
             continue;
 
@@ -209,7 +203,7 @@ void validate(LM* m, HASHMAP* hmap, char** files, int nfiles,
             for (int i = 0; i < BT; i++) {
                 m->ids[i] = 0;
                 m->pad_mask[i] = 0;
-                ((float*) m->labels)[i] = 0.0;
+                ((fVec) m->labels)[i] = 0.0;
             }
             int filled = 0;
             for (int b = 0; b < batch_size; b++) {
@@ -217,12 +211,13 @@ void validate(LM* m, HASHMAP* hmap, char** files, int nfiles,
                 if (base >= fwcnt - 1) break;
                 for (int t = 0; t < seq_len; t++) {
                     int src = base + t;
-                    if (src >= fwcnt - 1) break;
+                    if (src >= fwcnt - 1)
+                        break;
                     int row = b * seq_len + t;
                     if (file_words[src] > 0) {
                         m->ids[row] = file_words[src];
                         m->pad_mask[row] = 1;
-                        ((float*) m->labels)[row] = (float) file_words[src+1];
+                        ((fVec) m->labels)[row] = (float) file_words[src + 1];
                         filled++;
                     }
                 }
@@ -248,9 +243,13 @@ void validate(LM* m, HASHMAP* hmap, char** files, int nfiles,
                 /* argmax and log-sum-exp over the full vocabulary */
                 int best = 1;
                 float maxl = lg[row][1];
-                for (int c = 2; c < K; c++)
-                    if (lg[row][c] > maxl) { maxl = lg[row][c]; best = c; }
-                float sum = 0.0f;
+                for (int c = 2; c < K; c++) {
+                    if (lg[row][c] > maxl) {
+                        maxl = lg[row][c];
+                        best = c;
+                    }
+                }
+                float sum = 0.0;
                 for (int c = 1; c < K; c++)
                     sum += expf(lg[row][c] - maxl);
                 float logp = (lg[row][target] - maxl) - logf(sum);
@@ -333,15 +332,11 @@ int main(int argc, char** argv)
     char* blas_cores     = "0,2,4,6";
 
     const int max_vocab  =    10000000; /* Can be represented in a float */
-    const int hash_mem   =   100000000;
     const int max_file_words = 1000000;
     char optimizer       = 'a'; /* AdamW for the transformer stack */
 
-    HASHMAP* hmap = NULL;
+    VOCAB* vocab = NULL;
     LM* m = NULL;
-    int* dist = NULL;
-    int dist_size = 0;
-    WRDFRQ* word_freq = NULL;
     LMPARAM st;
     int update_cnt = 0;
     int start_epoch = 1;
@@ -350,11 +345,11 @@ int main(int argc, char** argv)
      * Note that load_checkpoint handles the -l command line argument
      * and updates load_file with a pointer to the file name if specified.
      */
-    m = load_checkpoint(argc,argv,&load_file,&hmap,&st,
+    m = load_checkpoint(argc,argv,&load_file,&vocab,&st,
                         &optimizer,&update_cnt,&learning_rate,&lr_decay,
                         &weight_decay,&num_epochs,&start_epoch,&sample_frac,
                         &vocab_size,&model_dim,&heads,&seq_len,&batch_size,
-                        &layers,&ffn_dim,&neg_samples,&dropout,&dist,&dist_size);
+                        &layers,&ffn_dim,&neg_samples,&dropout);
     if (load_file != NULL && m == NULL)
         return -1;
 
@@ -466,99 +461,29 @@ int main(int argc, char** argv)
     if (load_file == NULL) {
         printf("Creating vocabulary from dataset\n");
         fflush(stdout);
-        hmap = hashmap_create(max_vocab,hash_mem);
-        hashmap_str2inx(hmap,"",1);           /* index 0 = PAD */
-        int tot_file_cnt = 0;       /* Total number of files    */
-        long long tot_word_cnt = 1; /* Total number of words    */
-        word_freq = allocmem(max_vocab,1,WRDFRQ);
-
-        for (int i = 0; i < num_files; i++) {
-            tot_file_cnt++;
-            tot_word_cnt += process_text_file(file_list[i],data_dir,hmap,
-                                              1,max_vocab,word_freq,NULL,0);
-            printf("Processed file %d of %d, %lld words\r",
-                                              i + 1,num_files,tot_word_cnt);
-            fflush(stdout);
+        vocab = vocab_build(file_list,num_files,data_dir,
+                            vocab_size,vocab_coverage,max_vocab,1,1,1);
+        if (vocab == NULL) {
+            fprintf(stderr,"Failed to create vocabulary\n");
+            free_text_file_list(file_list,num_files);
+            return -1;
         }
-
-        printf("\nDataset: %d files, %lld words, %d unique\n",
-                                     tot_file_cnt,tot_word_cnt,hmap->map_used);
-        fflush(stdout);
-
-        qsort(word_freq,hmap->map_used,sizeof(WRDFRQ),qsort_compare_word_freq);
-
-        /* Shift so index 0 is PAD, index i describes vocab word i. */
-        for (int i = hmap->map_used - 1; i > 0; i--)
-            word_freq[i] = word_freq[i-1];
-        word_freq[0].inx = 0;
-        word_freq[0].cnt = 0;
-        word_freq[0].frq = 0.0;
-
-        long long word_cnt = 0;
-        if (vocab_size == 0) {
-            long long target = (long long)(vocab_coverage * tot_word_cnt);
-            vocab_size = 1;
-            for (int i = 1; i < hmap->map_used; i++) {
-                word_cnt += word_freq[i].cnt;
-                vocab_size = i + 1;
-                if (word_cnt >= target)
-                    break;
-            }
-        } else {
-            if (vocab_size > hmap->map_used)
-                vocab_size = hmap->map_used;
-            for (int i = 1; i < vocab_size; i++)
-                word_cnt += word_freq[i].cnt;
-        }
-        vocab_coverage = (float) word_cnt / (float) tot_word_cnt;
-        printf("Vocabulary limited to %d words, covering %2.0f%% of corpus\n",
-               vocab_size,100 * vocab_coverage);
-
-        /* Re-index retained words into a compact hashmap. */
-        HASHMAP* hmap2 = hashmap_create(vocab_size * 3,hmap->mem_used);
-        hashmap_str2inx(hmap2,"",1);          /* PAD at 0 */
-        for (int i = 1; i < vocab_size; i++) {
-            const char* w = hashmap_inx2str(hmap,word_freq[i].inx);
-            if (strlen(w) == 0) continue;
-            word_freq[i].inx = hashmap_str2inx(hmap2,w,1);
-        }
-        hashmap_free(hmap);
-        hmap = hmap2;
-
-        for (int i = 1; i < vocab_size; i++)
-            word_freq[i].frq = (float) word_freq[i].cnt / (float) word_cnt;
-
-        /* Unigram distribution table (freq^0.75), PAD excluded
-         * Reference:
-         * Distributed Representations of Words and Phrases and their
-         *    Compositionality, Mikolov et al., 2013,
-         *    https://arxiv.org/pdf/1310.4546
-         */
-        const float dist_pow = 0.75; const int dist_scale = 10;
-        dist_size = 0;
-        for (int i = 1; i < vocab_size; i++)
-            dist_size += (int)(powf(word_freq[i].cnt,dist_pow)/dist_scale)+1;
-        dist = allocmem(dist_size,1,int);
-        for (int i = 1, j = 0; i < vocab_size; i++) {
-            int rpt = (int)(powf(word_freq[i].cnt,dist_pow)/dist_scale)+1;
-            for (int k = 0; j < dist_size && k < rpt; k++)
-                dist[j++] = word_freq[i].inx;
-        }
-        printf("Distribution table size %d\n",dist_size); fflush(stdout);
+        vocab_size = vocab->size;
+        vocab_coverage = vocab->coverage;
 
         if (print_vocab) {
-            printf("ord   index count word\n");
+            printf("index frequency word\n");
             for (int i = 0; i < vocab_size; i++)
-                printf("%5d %5d %6d %-16s\n",
-                       i,word_freq[i].inx,word_freq[i].cnt,
-                       hashmap_inx2str(hmap,word_freq[i].inx));
-            hashmap_free(hmap);
+                printf("%5d %9.7f %-16s\n",
+                       i,vocab_freq(vocab,i),vocab_word(vocab,i));
+            vocab_free(vocab);
+            free_text_file_list(file_list,num_files);
             return 0;
         }
 
         m = lm_create(vocab_size,model_dim,heads,seq_len,batch_size,
                       layers,ffn_dim,neg_samples,dropout,optimizer);
-        smsftmax_set_dist(m->head,dist,dist_size);
+        smsftmax_set_dist(m->head,vocab->dist,vocab->dist_size);
 
         st.optimizer    = optimizer;
         st.lr_decay     = lr_decay;
@@ -579,13 +504,14 @@ int main(int argc, char** argv)
         char *p = token;
         for (; *p != '\0'; p++)
             *p = tolower((unsigned char) *p);
-        int id = hashmap_str2inx(hmap,token,0);
+        int id = vocab_lookup(vocab,token);
         if (id > 0)
             prompt_tokens[prompt_token_count++] = id;
         else {
             fprintf(stderr,"'%s' is not in the vocabulary - exiting\n",token);
-            hashmap_free(hmap);
             lm_free(m);
+            vocab_free(vocab);
+            free_text_file_list(file_list,num_files);
             return 1;
         }            
         token = strtok(NULL," ");
@@ -611,7 +537,7 @@ int main(int argc, char** argv)
         double last_report = current_time();
         for (int fi = 0; fi < act_num_files; fi++) {
             int fwcnt = process_text_file(file_list[fi],data_dir,
-                            hmap,0,vocab_size,NULL,file_words,max_file_words);
+                     vocab->hmap,0,vocab_size,NULL,file_words,max_file_words);
             if (fwcnt <= 1)
                 continue;
 
@@ -683,13 +609,13 @@ int main(int argc, char** argv)
             printf("Validating...");
             fflush(stdout);
             double val_top1 = 0.0, val_ppl = 0.0;
-            validate(m,hmap,valid_list,num_valid,data_dir,vocab_size,
+            validate(m,vocab,valid_list,num_valid,data_dir,vocab_size,
                      file_words,max_file_words,&val_top1,&val_ppl);
         }
 
         char output[1024];
-        lm_generate(m,hmap,prompt_tokens,prompt_token_count,
-                    20,output,sizeof(output),0.8,40,32,1.3);
+        lm_generate(m,vocab->hmap,prompt_tokens,prompt_token_count,
+                    20,output,sizeof(output),0.8,40,32,3.7);
         printf("%s\n",output);
         fflush(stdout);
 
@@ -706,7 +632,7 @@ int main(int argc, char** argv)
             st.lrng_seed     = get_lrng_seed();
             char fname[1024];
             snprintf(fname,sizeof fname,"%s.%d.model",save_base,epoch);
-            if (store_lm(fname,m,0,hmap,dist,dist_size,&st))
+            if (store_lm(fname,m,0,vocab,&st))
                 printf("Saved checkpoint '%s'\n",fname);
             else
                 fprintf(stderr,"Failed to save checkpoint '%s'\n",fname);
@@ -723,7 +649,7 @@ int main(int argc, char** argv)
         st.lr_decay      = lr_decay;
         st.weight_decay  = weight_decay;
         st.lrng_seed     = get_lrng_seed();
-        if (store_lm(output_file,m,0,hmap,dist,dist_size,&st))
+        if (store_lm(output_file,m,0,vocab,&st))
             printf("Saved final model '%s'\n",output_file);
         else
             fprintf(stderr,"Failed to save final model '%s'\n",output_file);
@@ -731,9 +657,7 @@ int main(int argc, char** argv)
     printf("\nTraining complete\n");
 
     lm_free(m);
-    hashmap_free(hmap);
-    freemem(dist);
-    freemem(word_freq);
+    vocab_free(vocab);
     freemem(file_words);
     free_text_file_list(file_list,num_files);
     return 0;

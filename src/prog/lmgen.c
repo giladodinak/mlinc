@@ -16,7 +16,6 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
 #include <string.h>
 #include <math.h>
 #include <getopt.h>
@@ -27,8 +26,7 @@
 #include "blascpu.h"
 #include "array.h"
 #include "random.h"
-#include "hash.h"
-#include "textfile.h"
+#include "vocab.h"
 #include "activation.h"
 #include "lmemb.h"
 #include "transformer.h"
@@ -62,45 +60,14 @@ static const char* usage =
 "  --cores=<list>\n"
 ;
 
-/* Split text on whitespace, lowercase each word, and map it to a vocabulary
- * index. Out-of-vocabulary words are warned about and skipped (there is no
- * <unk> token). Fills out[] with up to max ids and returns the count.
- */
-static int tokenize_prompt(HASHMAP* hmap, const char* text, int* out, int max)
-{
-    char buf[4096];
-    snprintf(buf,sizeof(buf),"%s",text);
-
-    int cnt = 0;
-    char* save = NULL;
-    char* tok = strtok_r(buf," \t\r\n",&save);
-    while (tok != NULL) {
-        for (char* q = tok; *q != '\0'; q++)
-            *q = (char) tolower((unsigned char) *q);
-        int id = hashmap_str2inx(hmap,tok,0); /* 0 = do not add */
-        if (id > 0) {
-            if (cnt < max) {
-                out[cnt++] = id;
-            } else {
-                fprintf(stderr,"(prompt truncated to %d tokens)\n",max);
-                break;
-            }
-        } else {
-            fprintf(stderr,"warning: '%s' not in vocabulary - skipping\n",tok);
-        }
-        tok = strtok_r(NULL," \t\r\n",&save);
-    }
-    return cnt;
-}
-
 /* Generate a continuation for the given prompt tokens and print it.
  * Argument order matches lm_generate() as called in lmtrain.c:
- *   (m, hmap, tokens, n_tokens, max_new_tokens, out, out_size,
+ *   (m, vocab->hmap, tokens, n_tokens, max_new_tokens, out, out_size,
  *    temperature, top_k, repeat_window, repeat_penalty)
  * The 'repeat_window' argument (the int between top_k and the float penalty)
  * is inferred positionally from lmtrain.c; rename here if the header differs.
  */
-static void generate_and_print(LM* m, HASHMAP* hmap, int* toks, int n,
+static void generate_and_print(LM* m, const VOCAB* vocab, int* toks, int n,
                                int max_new, float temperature, int top_k,
                                int repeat_window, float repeat_penalty)
 {
@@ -110,7 +77,7 @@ static void generate_and_print(LM* m, HASHMAP* hmap, int* toks, int n,
     }
     int out_size = (n + max_new + 8) * 32;
     char* out = allocmem(1,out_size,char);
-    lm_generate(m,hmap,toks,n,max_new,out,out_size,
+    lm_generate(m,vocab->hmap,toks,n,max_new,out,out_size,
                 temperature,top_k,repeat_window,repeat_penalty);
     printf("%s\n",out);
     fflush(stdout);
@@ -121,10 +88,10 @@ int main(int argc, char** argv)
 {
     char* model_file     = "lmtrain.model";
     int   max_new_tokens = 20;
-    float temperature    = 0.8f;
+    float temperature    = 0.8;
     int   top_k          = 40;
     int   repeat_window  = 32;
-    float repeat_penalty = 1.3f;
+    float repeat_penalty = 3.7;
     int   seed           = 0;     /* 0 -> derive from clock */
     int   seed_set       = 0;
     char* blas_cores     = "0,2,4,6";
@@ -178,9 +145,9 @@ int main(int argc, char** argv)
     openblas_use_cpus(cores,core_cnt);
 
     /* Load the trained model and its vocabulary. */
-    HASHMAP* hmap = NULL;
+    VOCAB* vocab = NULL;
     LMPARAM st;
-    LM* m = load_lm(model_file,&hmap,&st);
+    LM* m = load_lm(model_file,&vocab,&st);
     if (m == NULL) {
         fprintf(stderr,"lmgen: failed to load model from '%s'\n",model_file);
         return -1;
@@ -209,8 +176,8 @@ int main(int argc, char** argv)
                 prompt[len++] = ' ';
             len += snprintf(prompt + len,sizeof(prompt) - len,"%s",argv[i]);
         }
-        int n = tokenize_prompt(hmap,prompt,prompt_tokens,max_prompt_tokens);
-        generate_and_print(m,hmap,prompt_tokens,n,max_new_tokens,
+        int n = vocab_tokenize(vocab,prompt,prompt_tokens,max_prompt_tokens);
+        generate_and_print(m,vocab,prompt_tokens,n,max_new_tokens,
                            temperature,top_k,repeat_window,repeat_penalty);
     } else {
         /* Interactive mode: read a prompt, print a continuation, repeat. */
@@ -222,16 +189,16 @@ int main(int argc, char** argv)
                 printf("\nBye\n");
                 break;
             }
-            int n = tokenize_prompt(hmap,line,prompt_tokens,max_prompt_tokens);
+            int n = vocab_tokenize(vocab,line,prompt_tokens,max_prompt_tokens);
             if (n <= 0)
                 continue; /* blank line or all-OOV: prompt again */
-            generate_and_print(m,hmap,prompt_tokens,n,max_new_tokens,
+            generate_and_print(m,vocab,prompt_tokens,n,max_new_tokens,
                                temperature,top_k,repeat_window,repeat_penalty);
         }
     }
 
     freemem(prompt_tokens);
     lm_free(m);
-    hashmap_free(hmap);
+    vocab_free(vocab);
     return 0;
 }

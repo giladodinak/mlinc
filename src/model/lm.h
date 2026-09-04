@@ -7,7 +7,6 @@
 #include "layer.h"
 #include "smsftmax.h"
 
-/* The trained model assembled by lmtrain             */
 typedef struct lm_s {
     int V;              /* Vocabulary size                        */
     int E;              /* Enbedding dimension (=model dimension) */

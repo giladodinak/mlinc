@@ -33,7 +33,7 @@ static inline char* word_end(char* s)
  *   hmap       - Hashmap that stores the word vocabulary (optional).
  *   add_new    - If non-zero, new words are added to the hashmap.
  *   max_vocab  - Maximum number of words to include in the vocabulary.
- *   word_freq  - An output array of size max_vocab, where each entry is 
+ *   word_cnt   - An output array of size max_vocab, where each entry is 
  *                incremented by the number of times the corresponding word
  *                appears in the text file (optional, requires hmap).
  *   file_words - An output array of size max_words, which stores the hashmap
@@ -47,7 +47,6 @@ static inline char* word_end(char* s)
  *  - Returns -1 on error.
  *
  * Notes:
- *  - The frq field of word_freq array elements is not updated by this funciton
  *  - Only consider alphabetic character sequences (and apostrophe), delimited
  *    by non-alphabetic characters, as words.
  *  - Convert all alphabetic characters to lowercase before further processing.
@@ -57,7 +56,7 @@ static inline char* word_end(char* s)
 int process_text_file(const char* file_name,
                       const char* file_dir,
                       HASHMAP* hmap, int add_new,
-                      int max_vocab, WRDFRQ* word_freq,
+                      int max_vocab, WRDCNT* word_cnt,
                       int *file_words, int max_words)
 {
     int maxpath = 512;
@@ -119,9 +118,9 @@ int process_text_file(const char* file_name,
                 if (hmap != NULL) {
                     int inx = hashmap_str2inx(hmap,w,add_new);
                     if (inx >= 0 && inx < max_vocab) {
-                        if (word_freq != NULL) {
-                            word_freq[inx].inx = inx;
-                            word_freq[inx].cnt++;
+                        if (word_cnt != NULL) {
+                            word_cnt[inx].inx = inx;
+                            word_cnt[inx].cnt++;
                         }
                         if (file_words != NULL) {
                             if (file_word_cnt < max_words)

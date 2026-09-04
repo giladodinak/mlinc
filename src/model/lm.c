@@ -3,6 +3,7 @@
 #include "mem.h"
 #include "array.h"
 #include "hash.h"
+#include "vocab.h"
 #include "lmemb.h"
 #include "transformer.h"
 #include "smsftmax.h"
@@ -146,7 +147,7 @@ void lm_update(LM* m, char optimizer, float lr, float wd, int update_cnt)
  * (mha_forward_step) does not use the batch size. The restore value is
  * derived from m.
  */
-void lm_use_cache(LM* m, int on)
+static void lm_use_cache(LM* m, int on)
 {
     int rows = on ? 1 : m->BT;
     for (int i = 0; i < m->N; i++) {
@@ -200,22 +201,22 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
  * References:
  * [1] Hinton, Vinyals & Dean (2015), Distilling the Knowledge in a
  *     Neural Network. Eq. (1): temperature-scaled softmax.
- *     https://arxiv.org/abs/1503.02531
+ *     https://arxiv.org/pdf/1503.02531
  *
  * [2] Keskar et al. (2019), CTRL: A Conditional Transformer Language
  *     Model for Controllable Generation. Sec. 4.1: temperature sampling,
  *     greedy decoding, top-k sampling, and repetition penalties.
- *     https://arxiv.org/abs/1909.05858
+ *     https://arxiv.org/pdf/1909.05858
  *
  * [3] Fan, Lewis & Dauphin (2018), Hierarchical Neural Story Generation.
  *     Sec. 5.4: top-k random sampling.
- *     https://arxiv.org/abs/1805.04833
+ *     https://arxiv.org/pdf/1805.04833
  *
  * [4] Hollows (2026), Gauge Dependence and Structured-Output Corruption
  *     in Sign-Branched Repetition Penalties. Repetition penalty applied
  *     to normalized log-probabilities to remove dependence on the
  *     arbitrary additive offset of raw logits.
- *     https://arxiv.org/abs/2607.09791
+ *     https://arxiv.org/pdf/2607.09791
  */
 int lm_generate(LM* m, HASHMAP* hmap, 
                 const int* seed, int seedlen,
@@ -283,7 +284,6 @@ int lm_generate(LM* m, HASHMAP* hmap,
 
         /* Repetition penalty applied once per unique recent token
          * (Ref. #2 Sec. 4.1, Ref. #4).
-         * log p <= 0, so multiplying by rep_penalty > 1 lowers the score.
          */
         if (rep_penalty > 1) {
             for (int i = 0; i < nrecent; i++) {

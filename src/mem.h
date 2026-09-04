@@ -26,9 +26,8 @@ void* allocmem_int(size_t M, size_t N, int S, char* typ,
  * 
  * Notice:
  *   If the representation of float zero (or double) is not binary zero, 
- *   the memory will be correctly initialized to all zeros only if T is 
- *   float (or double).
- *
+ *   the memory will be correctly initialized to all floating point zeros
+ *   only if T is float (or double).
  */
 
 #define allocmem(M,N,T) \

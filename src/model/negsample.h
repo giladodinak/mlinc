@@ -18,7 +18,7 @@ typedef struct negsample_s {
   int n_neg;     /* Number of negative samples drawn per position         */
   fArr2D Wo;     /* Output weight matrix [K][E]                           */
   fArr2D h;      /* Identity output passthrough [B][E]                    */
-  int* dist;     /* Unigram negative-sampling table (not owned)           */
+  const int* dist; /* Unigram negative-sampling table (not owned)         */
   int dist_size; /* Number of entries in dist[]                           */
   int* touched;  /* Distinct Wo rows updated by the last negsample_loss() */
   int ntouched;  /* Number of valid entries in touched[]                  */
@@ -54,7 +54,7 @@ NEGSAMPLE* negsample_create(int vocab_size, int num_negatives);
 void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size);
 
 /* Provides the unigram negative-sampling table (referenced, not owned). */
-void negsample_set_dist(NEGSAMPLE* l, int* dist_table, int dist_table_size);
+void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size);
 
 /* Sets a new batch size.
  *

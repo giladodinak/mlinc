@@ -5,11 +5,10 @@
 #include "hash.h"
 
 /* Stores frequency of a word in the dataset */
-typedef struct wrdfrq_s {
+typedef struct wrdcnt_s {
     int inx;   /* Word index in hashmap                            */
-    int cnt;   /* Number of times word was encountered in the txt  */
-    float frq; /* Frequency of word - not computed or updated here */
-} WRDFRQ;
+    int cnt;   /* Number of times word was encountered in the txet */
+} WRDCNT;
 
 /* Processes an ASCII text file to create a word vocabulary, a word frequency
  * table, and/or an array of word tokens.
@@ -20,7 +19,7 @@ typedef struct wrdfrq_s {
  *   hmap       - Hashmap that stores the word vocabulary (optional).
  *   add_new    - If non-zero, new words are added to the hashmap.
  *   max_vocab  - Maximum number of words to include in the vocabulary.
- *   word_freq  - An output array of size max_vocab, where each entry is 
+ *   word_cnt   - An output array of size max_vocab, where each entry is 
  *                incremented by the number of times the corresponding word
  *                appears in the text file (optional, requires hmap).
  *   file_words - An output array of size max_words, which stores the hashmap
@@ -34,7 +33,6 @@ typedef struct wrdfrq_s {
  *  - Returns -1 on error.
  *
  * Notes:
- *  - The frq field of word_freq array elements is not updated by this funciton
  *  - Only consider alphabetic character sequences (and apostrophe), delimited
  *    by non-alphabetic characters, as words.
  *  - Convert all alphabetic characters to lowercase before further processing.
@@ -44,7 +42,7 @@ typedef struct wrdfrq_s {
 int process_text_file(const char* file_name,
                       const char* file_dir,
                       HASHMAP* hmap, int add_new,
-                      int max_vocab, WRDFRQ* word_freq,
+                      int max_vocab, WRDCNT* word_cnt,
                       int *file_words, int max_words);
 
 /* Reads a list file containing file names (one per line), filters to include

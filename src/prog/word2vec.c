@@ -23,6 +23,7 @@
 #include "array.h"
 #include "hash.h"
 #include "textfile.h"
+#include "vocab.h"
 #include "activation.h"
 #include "embedding.h"
 #include "negsample.h"
@@ -127,17 +128,6 @@ float* word_embedding(EMBEDDING* embd, int wrdinx)
 
 
 
-/* Compare two word frequency values - used with qsort to order
- * words based on their frequency in descending order,
- * that is, most frequent word first.
- */
-int qsort_compare_word_freq(const void *a, const void *b)
-{   /* WRDFRQ declared in textfile.h */
-    if (((WRDFRQ *)b)->cnt > ((WRDFRQ *)a)->cnt) return 1;
-    if (((WRDFRQ *)b)->cnt < ((WRDFRQ *)a)->cnt) return -1;
-    return 0;
-}
-
 void shuffle_list(char** list, int cnt)
 {
     if (cnt <= 1) return;
@@ -164,7 +154,6 @@ int main(int argc, char** argv)
     float learning_rate_decay = 0.8;
     int print_vocab = 0;
     int max_vocab = 10000000;  /* Set to 3 x expected number of unique words */
-    int hash_mem = 100000000;  /* hashmap will increase this value as needed */
     int max_file_words = 1000000; /* Maximum number of words per file        */
     int neg_samples = 10;      /* Negative samples per positive target       */
 
@@ -221,138 +210,35 @@ int main(int argc, char** argv)
            cxt_size,embedding_dim,batch_size,
            num_epochs,initial_learning_rate,learning_rate_decay);
     fflush(stdout);
-
-    int tot_file_cnt = 0;       /* Total number of files    */
-    long long tot_word_cnt = 0; /* Total number of words    */
-
-    printf("Creating vocabulary from dataset\n");
-    fflush(stdout);
-    HASHMAP* hmap = hashmap_create(max_vocab,hash_mem);
-    hashmap_str2inx(hmap,"",1);
-    tot_word_cnt++;
-    WRDFRQ* word_freq = allocmem(max_vocab,1,WRDFRQ);
-
+    
     int num_files = 0;
     char** file_list = read_text_file_list(tr_file,data_dir,&num_files);
     if (file_list == NULL || num_files == 0) {
         fprintf(stderr,"Failed to read data files list from '%s'\n",tr_file);
         return -1;
     }
-    for (int i = 0; i < num_files; i++) {
-        tot_file_cnt++;
-        tot_word_cnt += process_text_file(file_list[i],data_dir,
-                                          hmap,1,max_vocab,word_freq,NULL,0);
-        printf("Processed file %d of %d, %lld words\r",
-                                          i + 1,num_files,tot_word_cnt);
-        fflush(stdout);
-    }
-
-    printf("\nDataset: %d files, %lld words, ",tot_file_cnt,tot_word_cnt);
-    printf("%d unique words\n",hmap->map_used);
-    printf("%d bytes of word storage memory used\n",hmap->mem_used);
+    printf("Creating vocabulary from dataset\n");
     fflush(stdout);
-
-    /* Sort vocabulary words by frequency, descending */
-    qsort(word_freq,hmap->map_used,sizeof(WRDFRQ),qsort_compare_word_freq);
-
-    /* Reserve word_freq[0] for PAD, matching hashmap index 0.
-     * After this, word_freq[i] describes vocabulary index i.
-     * The last sorted entry is dropped if the table was completely full.
-     */
-    for (int i = hmap->map_used - 1; i > 0; i--)
-        word_freq[i] = word_freq[i - 1];
-    word_freq[0].inx = 0;
-    word_freq[0].cnt = 0;
-    word_freq[0].frq = 0.0f;
-
-    long long word_cnt = 0;
-    if (vocab_size == 0) {
-        /* Calculate how many most frequent vocabulary words are needed
-         * to represent vocab_coverage percent of all corpus words.
-         * vocab_size includes PAD at index 0.
-         */
-        long long target_word_cnt = (long long)(vocab_coverage * ((float)tot_word_cnt));
-        vocab_size = 1; /* Include PAD */
-        for (int vocab_inx = 1; vocab_inx < hmap->map_used; vocab_inx++) {
-            word_cnt += word_freq[vocab_inx].cnt;
-            vocab_size = vocab_inx + 1;
-            if (word_cnt >= target_word_cnt)
-                break;
-        }
+    VOCAB* vocab = vocab_build(file_list,num_files,data_dir,
+                               vocab_size,vocab_coverage,max_vocab,1,1,1);
+    if (vocab == NULL) {
+        fprintf(stderr,"Failed to create vocabulary\n");
+        free_text_file_list(file_list,num_files);
+        return -1;
     }
-    else {
-        /* Calculate what percentage of all corpus words can be
-         * represented by the vocab_size most frequent vocabulary entries.
-         * vocab_size includes PAD at index 0, which is not counted.
-         */
-        if (vocab_size > hmap->map_used)
-            vocab_size = hmap->map_used;
-        for (int vocab_inx = 1; vocab_inx < vocab_size; vocab_inx++)
-            word_cnt += word_freq[vocab_inx].cnt;
-    }
-    vocab_coverage = ((float) word_cnt) / tot_word_cnt;
-    printf("Limit vocabulary to %d most frequent words\n",vocab_size);
-    printf("The vocabulary covers %lld (%2.0f%%) of dataset words\n",
-                                       word_cnt,100 * vocab_coverage);
-
-    /* Create new vocabulary index of only the retained words,
-     * in order of their frequency in the dataset.
-     */
-    printf("Creating vocabulary of %d words\n",vocab_size);
-    fflush(stdout);
-    HASHMAP* hmap2 = hashmap_create(vocab_size * 3,hmap->mem_used);
-    hashmap_str2inx(hmap2,"",1); /* Reserve first entry (index 0) for pad */
-
-    /* Add words up to vocabulary size. PAD already occupies index 0. */
-    for (int i = 1; i < vocab_size; i++) {
-        const char* wrd = hashmap_inx2str(hmap,word_freq[i].inx);
-        if (strlen(wrd) == 0)
-            continue;
-        int inx = hashmap_str2inx(hmap2,wrd,1);
-        word_freq[i].inx = inx;
-    }
-    hashmap_free(hmap);
-    hmap = hmap2;
-    hmap2 = NULL;
-
-    printf("Calculating word frequencies\n");
-    word_freq[0].frq = 0.0;
-    for (int i = 1; i < vocab_size; i++)
-        word_freq[i].frq = ((float) word_freq[i].cnt) / word_cnt;
-
-    printf("Creating vocabulary distribution table\n");
-    fflush(stdout);
-    float dist_compress = 0.75;
-    int dist_scale = 10;
-    int dist_table_size = 0;
-    /* Calculate requried size for all tokens (excluding pad) */
-    for (int i = 1; i < vocab_size; i++) {
-        int freq = word_freq[i].cnt;
-        dist_table_size += (int)(pow(freq,dist_compress)/dist_scale) + 1;
-    }
-    int* dist_table = allocmem(dist_table_size,1,int);
-    printf("Distribution table size %d\n",dist_table_size);
-
-    /* Populate table, note pad (i == 0) is excluded */
-    for (int i = 1, j = 0; i < vocab_size; i++) {
-        int inx = word_freq[i].inx;
-        int freq = word_freq[i].cnt;
-        int rpt = (int)(pow(freq,dist_compress)/dist_scale) + 1;
-        for (int k = 0; j < dist_table_size && k < rpt; k++)
-            dist_table[j++] = inx;
-    }
+    vocab_size = vocab->size;
+    vocab_coverage = vocab->coverage;
+    int dist_table_size;
+    const int* dist_table = vocab_dist(vocab,&dist_table_size);
 
     if (print_vocab) {
-        printf("ord   index count word\n");
+        printf("index frequency word\n");
         for (int i = 0; i < vocab_size; i++) {
-            const char* wrdstr = hashmap_inx2str(hmap,word_freq[i].inx);
-            printf("%5d %5d %5d %-16s\n",i,word_freq[i].inx,word_freq[i].cnt,wrdstr);
+            printf("%5d %9.7f %-16s\n",
+                   i,vocab_freq(vocab,i),vocab_word(vocab,i));
         }
-        printf("ord   index word\n");
-        for (int i = 0; i < dist_table_size; i++) {
-            const char* wrdstr = hashmap_inx2str(hmap,dist_table[i]);
-            printf("%5d %5d %-16s\n",i,dist_table[i],wrdstr);
-        }
+        vocab_free(vocab);
+        free_text_file_list(file_list,num_files);
         return 0;
     }
 
@@ -380,6 +266,7 @@ int main(int argc, char** argv)
 
     int* file_words = allocmem(1,max_file_words,int);
     int file_cnt;
+    long long word_cnt;
 
     for (int epoch = 1; epoch <= num_epochs; epoch++ ) {
         word_cnt = 0;
@@ -389,7 +276,7 @@ int main(int argc, char** argv)
         for (int i = 0; i < num_files; i++) {
             file_cnt++;
             int fwcnt = process_text_file(file_list[i],data_dir,
-                              hmap,0,max_vocab,NULL,file_words,max_file_words);
+                        vocab->hmap,0,max_vocab,NULL,file_words,max_file_words);
 
             /* Sub sample frequent words by removing some */
             int cnt = 0;
@@ -399,7 +286,7 @@ int main(int argc, char** argv)
                     continue;
                 float r = urand(0,1.0);
                 float t = 1e-5;
-                float f = word_freq[wrdinx].frq;
+                float f = vocab_freq(vocab,wrdinx);
                 if (f <= 0.0f)
                     continue;
                 float p = (sqrt(f / t) + 1.0) * (t / f);
@@ -454,8 +341,8 @@ int main(int argc, char** argv)
                 negsample_update(output,gWx[1],learning_rate,0.0);
 
                 word_cnt += wcnt;
-                int pct = (tot_file_cnt >= 1) ?
-                                (((float)file_cnt / tot_file_cnt) * 100) : 100;
+                int pct = (num_files >= 1) ?
+                                (((float)file_cnt / num_files) * 100) : 100;
                 int seconds = (int) elapsed_time(start_time);
                 int sec = seconds % 60;
                 int min = (seconds / 60) % 60;
@@ -463,7 +350,7 @@ int main(int argc, char** argv)
                 printf("epoch %2d lr %6.4f loss %6.4f %3d%% "
                        "(file %d of %d, %lld words) %d:%02d:%02d\r",
                        epoch,learning_rate,loss / word_cnt,pct,
-                       file_cnt,tot_file_cnt,word_cnt,hours,min,sec);
+                       file_cnt,num_files,word_cnt,hours,min,sec);
                 fflush(stdout);
             }
         }
@@ -475,19 +362,17 @@ int main(int argc, char** argv)
     printf("Saving word embeddings to %s\n",embedding_file);
     if (!store_word_embeddings(embedding_file,vocab_size,embedding_dim,
                                initial_learning_rate,learning_rate_decay,
-                               num_epochs,hmap,embedding->Wx))
+                               num_epochs,vocab->hmap,embedding->Wx))
         fprintf(stderr,"Failed to save word embeddings to '%s'\n",
                 embedding_file);
     printf("\n");
-    hashmap_free(hmap);
+    vocab_free(vocab);
     embedding_free(embedding);
     negsample_free(output);
     freemem(dy);
     freemem(gWx[0]);
     freemem(gWx[1]);
     freemem(touched_in);
-    freemem(dist_table);
-    freemem(word_freq);
     freemem(file_words);
     free_text_file_list(file_list,num_files);
     return 0;

@@ -10,7 +10,7 @@
  *
  * Two ways to supply data:
  *
- *   1. Single file (as before):
+ *   1. Single file
  *        -d path/to/input.txt
  *      The corpus is cut into length-T windows and split into train/val
  *      internally according to -F.
@@ -31,7 +31,7 @@
  *      or      --> N x lstm(D)
  *              --> dense(K,"Softmax")          (vocab logits -> probs)
  *
- * Design notes (see the library headers):
+ * Design notes:
  *   - The Transformer's MHA applies rotary position embeddings internally,
  *     so a plain one-hot per character is enough; no positional features.
  *   - The MODEL container fixes batch size == sequence length T, so every
@@ -178,31 +178,46 @@ typedef struct vocab_s {
     unsigned char idx2ch[256];  /* class index -> byte               */
 } VOCAB;
 
-/* Reads an entire file into a freshly allocated buffer. Exits on failure. */
+/* Reads an entire file into a buffer */
 static void buffer_from_file(BUFFER* b, const char* path)
 {
     FILE* f = fopen(path,"rb");
-    if (f == NULL) { fprintf(stderr,"Cannot open '%s'.\n",path); exit(1); }
+    if (f == NULL) {
+        fprintf(stderr,"Cannot open '%s'.\n",path);
+        exit(1);
+    }
     fseek(f,0,SEEK_END);
     long n = ftell(f);
     fseek(f,0,SEEK_SET);
-    if (n < 1) { fprintf(stderr,"'%s' is empty.\n",path); fclose(f); exit(1); }
+    if (n < 1) {
+        fprintf(stderr,"'%s' is empty.\n",path);
+        fclose(f);
+        exit(1);
+    }
     b->text = allocmem(n,1,unsigned char);
     long got = (long) fread(b->text,1,n,f);
     fclose(f);
-    if (got != n) { fprintf(stderr,"Short read on '%s'.\n",path); exit(1); }
+    if (got != n) {
+        fprintf(stderr,"Short read on '%s'.\n",path);
+        exit(1);
+    }
     b->n = n;
 }
 
 /* Resolves 'name' against 'dir' (absolute names ignore dir). */
 static void join_path(char* out, size_t outsz, const char* dir, const char* name)
 {
-    if (name[0] == '/')                 snprintf(out,outsz,"%s",name);
-    else if (dir == NULL || !dir[0])    snprintf(out,outsz,"%s",name);
+    if (name[0] == '/')
+        snprintf(out,outsz,"%s",name);
+    else
+    if (dir == NULL || !dir[0])
+        snprintf(out,outsz,"%s",name);
     else {
         size_t dl = strlen(dir);
-        if (dir[dl-1] == '/') snprintf(out,outsz,"%s%s",dir,name);
-        else                  snprintf(out,outsz,"%s/%s",dir,name);
+        if (dir[dl-1] == '/')
+            snprintf(out,outsz,"%s%s",dir,name);
+        else
+            snprintf(out,outsz,"%s/%s",dir,name);
     }
 }
 
@@ -216,8 +231,7 @@ static char** read_list(const char* path, int* count)
     buffer_from_file(&lb,path);
 
     int cap = 16, n = 0;
-    char** names = (char**) malloc(cap * sizeof(char*));
-    if (names == NULL) { fprintf(stderr,"Out of memory.\n"); exit(1); }
+    char** names = (char**) allocmem(cap,1,char*);
 
     long i = 0;
     while (i < lb.n) {
@@ -228,11 +242,13 @@ static char** read_list(const char* path, int* count)
         while (e > s && (lb.text[e-1]==' '||lb.text[e-1]=='\t'||lb.text[e-1]=='\r')) e--;
         if (e > s && lb.text[s] != '#') {                /* keep non-blank */
             int len = (int)(e - s);
-            char* nm = (char*) malloc(len + 1);
-            if (nm == NULL) { fprintf(stderr,"Out of memory.\n"); exit(1); }
+            char* nm = (char*) allocmem(1,len + 1,char);
             memcpy(nm,lb.text + s,len);
             nm[len] = '\0';
-            if (n == cap) { cap *= 2; names = (char**) realloc(names,cap*sizeof(char*)); }
+            if (n == cap) {
+                cap *= 2;
+                names = (char**) realloc(names,cap * sizeof(char*));
+            }
             names[n++] = nm;
         }
         i = j + 1;
@@ -244,8 +260,9 @@ static char** read_list(const char* path, int* count)
 
 static void free_list(char** names, int count)
 {
-    for (int i = 0; i < count; i++) free(names[i]);
-    free(names);
+    for (int i = 0; i < count; i++)
+        freemem(names[i]);
+    freemem(names);
 }
 
 /* Concatenates every file named in 'listpath' (resolved against 'dir') into
@@ -272,17 +289,23 @@ static void buffer_from_list(BUFFER* b, const char* listpath, const char* dir)
         if (sizes[i] < 0) sizes[i] = 0;
         total += sizes[i] + 1;                           /* +1 separator  */
     }
-    if (total < 2) { fprintf(stderr,"'%s' files are empty.\n",listpath); exit(1); }
+    if (total < 2) {
+        fprintf(stderr,"'%s' files are empty.\n",listpath);
+        exit(1);
+    }
 
     b->text = allocmem(total,1,unsigned char);
     long off = 0;
     for (int i = 0; i < nfiles; i++) {                   /* pass 2: read  */
         join_path(path,sizeof(path),dir,names[i]);
         FILE* f = fopen(path,"rb");
-        if (f == NULL) { fprintf(stderr,"Cannot open '%s'.\n",path); exit(1); }
-        long got = (long) fread(b->text + off,1,sizes[i],f);
+        if (f == NULL) {
+            fprintf(stderr,"Cannot open '%s'.\n",path);
+            exit(1);
+        }
+        long cnt = (long) fread(b->text + off,1,sizes[i],f);
         fclose(f);
-        off += got;
+        off += cnt;
         b->text[off++] = '\n';                           /* file separator */
     }
     b->n = off;
@@ -291,22 +314,27 @@ static void buffer_from_list(BUFFER* b, const char* listpath, const char* dir)
     free_list(names,nfiles);
 }
 
-/* Builds a shared vocabulary by scanning one or more buffers. */
+/* Builds a shared vocabulary by scanning one or more buffers */
 static void vocab_build(VOCAB* v, BUFFER** bufs, int nbufs)
 {
-    for (int i = 0; i < 256; i++) v->ch2idx[i] = -1;
+    for (int i = 0; i < 256; i++)
+        v->ch2idx[i] = -1;
     int K = 0;
     for (int i = 0; i < nbufs; i++) {
         BUFFER* b = bufs[i];
         for (long p = 0; p < b->n; p++) {
             int by = b->text[p];
-            if (v->ch2idx[by] < 0) { v->ch2idx[by] = K; v->idx2ch[K] = (unsigned char) by; K++; }
+            if (v->ch2idx[by] < 0) {
+                v->ch2idx[by] = K;
+                v->idx2ch[K] = (unsigned char) by;
+                K++;
+            }
         }
     }
     v->K = K;
 }
 
-/* Each sequence is T consecutive characters; its per-position target  
+/* Each sequence is T consecutive characters; its per-position target 
  * is the next character. Windows are cut with a stride chosen so that,
  * if a buffer yields more than max_seqs windows, they are spread evenly
  * across the whole buffer. Stored as dense one-hot [num*T][K].
@@ -361,8 +389,12 @@ static void dataset_build(DATASET* d, const BUFFER* b, const VOCAB* v,
 
 static void dataset_free(DATASET* d)
 {
-    freemem(d->x); freemem(d->y); freemem(d->len);
-    d->x = NULL; d->y = NULL; d->len = NULL;
+    freemem(d->x);
+    freemem(d->y);
+    freemem(d->len);
+    d->x = NULL;
+    d->y = NULL;
+    d->len = NULL;
 }
 
 /* Resolves -m into an explicit middle-layer pattern of 'T' (transformer)
@@ -370,31 +402,45 @@ static void dataset_free(DATASET* d)
  *   "transformer" -> "TTT..."   "lstm" -> "LLL..."   "hybrid" -> "TLTL..."
  * Anything else is taken as a literal pattern (e.g. "TLTL", "llt", "TLLTLL").
  * Returns a malloc'd, upper-cased string; sets *nmid to its length. Exits on
- * an empty or invalid pattern. Caller frees. 
+ * an empty or invalid pattern. Caller frees.
  */
 static char* resolve_pattern(const CONFIG* c, int* nmid)
 {
     char* p;
-    if (!strcmp(c->model,"transformer") || !strcmp(c->model,"lstm") ||
-        !strcmp(c->model,"hybrid")) {
+    if (!strcmp(c->model,"transformer") ||
+        !strcmp(c->model,"lstm") || !strcmp(c->model,"hybrid")) {
+
         int n = c->layers;
-        if (n < 1) { fprintf(stderr,"-L (layers) must be >= 1\n"); exit(1); }
-        p = (char*) malloc(n + 1);
+        if (n < 1) {
+            fprintf(stderr,"-L (layers) must be >= 1\n");
+            exit(1);
+        }
+        p = (char*) allocmem(1,n + 1,char);
         for (int i = 0; i < n; i++) {
-            if      (!strcmp(c->model,"transformer")) p[i] = 'T';
-            else if (!strcmp(c->model,"lstm"))        p[i] = 'L';
-            else                                      p[i] = (i % 2 == 0) ? 'T' : 'L';
+            if (!strcmp(c->model,"transformer"))
+                p[i] = 'T';
+            else
+            if (!strcmp(c->model,"lstm"))
+                p[i] = 'L';
+            else
+                p[i] = (i % 2 == 0) ? 'T' : 'L';
         }
         p[n] = '\0';
     }
-    else {                                    /* literal pattern string */
+    else { /* Literal pattern string */
         int n = (int) strlen(c->model);
-        if (n < 1) { fprintf(stderr,"-m pattern is empty\n"); exit(1); }
-        p = (char*) malloc(n + 1);
+        if (n < 1) {
+            fprintf(stderr,"-m pattern is empty\n");
+            exit(1);
+        }
+        p = (char*) allocmem(1,n + 1,char);
         for (int i = 0; i < n; i++) {
             char ch = c->model[i];
-            if (ch=='T'||ch=='t') p[i] = 'T';
-            else if (ch=='L'||ch=='l') p[i] = 'L';
+            if (ch=='T'||ch=='t')
+                p[i] = 'T';
+            else
+            if (ch=='L'||ch=='l')
+                p[i] = 'L';
             else {
                 fprintf(stderr,"-m pattern may contain only T/L, got '%c'\n",ch);
                 exit(1);
@@ -411,7 +457,7 @@ static char* resolve_pattern(const CONFIG* c, int* nmid)
  * A leading dense(D,"none") always projects the one-hot input to the model
  * dimension, so the residual stream is D-dimensional from the start and any
  * mix of transformer (D->D) and lstm (D->D). The output is dense(K,"Softmax").
- * Layer count = pattern length + 2. 
+ * Layer count = pattern length + 2.
  */
 static MODEL* build_model(const CONFIG* c, const char* pattern, int nmid, int K)
 {
@@ -440,20 +486,28 @@ static MODEL* build_model(const CONFIG* c, const char* pattern, int nmid, int K)
  */
 static int sample_row(const float* p, int K, float temp)
 {
-    if (temp <= 0.0f) {
+    if (temp <= 0.0) {
         int best = 0;
-        for (int k = 1; k < K; k++) if (p[k] > p[best]) best = k;
+        for (int k = 1; k < K; k++)
+            if (p[k] > p[best])
+                best = k;
         return best;
     }
     float w[256];
-    float sum = 0.0f, inv = 1.0f / temp;
+    float sum = 0.0;
+    float inv = 1.0 / temp;
     for (int k = 0; k < K; k++) {
         float pk = p[k] > 1e-16f ? p[k] : 1e-16f;
         w[k] = powf(pk,inv);
         sum += w[k];
     }
-    float r = urand(0.0f,1.0f) * sum, acc = 0.0f;
-    for (int k = 0; k < K; k++) { acc += w[k]; if (r <= acc) return k; }
+    float r = urand(0,1) * sum;
+    float acc = 0;
+    for (int k = 0; k < K; k++) {
+        acc += w[k];
+        if (r <= acc)
+            return k;
+    }
     return K - 1;
 }
 
@@ -466,14 +520,16 @@ static void generate(MODEL* m, const VOCAB* v, const CONFIG* cfg)
              : (v->ch2idx[' ']  >= 0) ? v->ch2idx[' '] : 0;
 
     int* window = allocmem(T,1,int);
-    for (int t = 0; t < T; t++) window[t] = fill;
+    for (int t = 0; t < T; t++)
+        window[t] = fill;
 
     const char* pr = cfg->prompt;
     int plen = (int) strlen(pr);
     printf("---- sample (%s, temp %.2f) ----\n",cfg->model,cfg->temp);
     for (int i = 0; i < plen; i++) {
         int idx = v->ch2idx[(unsigned char) pr[i]];
-        if (idx < 0) continue;
+        if (idx < 0)
+            continue;
         memmove(window,window + 1,(T - 1) * sizeof(int));
         window[T - 1] = idx;
         putchar(pr[i]);
@@ -487,7 +543,8 @@ static void generate(MODEL* m, const VOCAB* v, const CONFIG* cfg)
 
     for (int step = 0; step < cfg->gen; step++) {
         fltclr(X,T * K);
-        for (int t = 0; t < T; t++) x[t][window[t]] = 1.0f;
+        for (int t = 0; t < T; t++)
+            x[t][window[t]] = 1;
 
         model_predict(m,X,Y,T);
 
@@ -506,7 +563,8 @@ int main(int argc, char** argv)
 {
     CONFIG cfg;
     config_defaults(&cfg);
-    if (!parse_args(argc,argv,&cfg)) return 1;
+    if (!parse_args(argc,argv,&cfg))
+        return 1;
 
     unsigned int seed = cfg.seed;
     if (seed == 0) {
@@ -586,7 +644,7 @@ int main(int argc, char** argv)
         free(pattern); return 1;
     }
 
-    if (has_xfmr) 
+    if (has_xfmr)
         printf("model %s -> stack %s (%d layers), "
                "D %d, ffn %d, heads %d, block %d\n",
                cfg.model,pattern,nmid,cfg.dim,cfg.ffn,cfg.heads,cfg.block);
@@ -613,14 +671,17 @@ int main(int argc, char** argv)
 
     generate(m,&voc,&cfg);
 
-    freemem(losses); freemem(accs); freemem(vloss); freemem(vaccs);
-    free(pattern);
+    freemem(losses);
+    freemem(accs);
+    freemem(vloss);
+    freemem(vaccs);
+    freemem(pattern);
     model_free(m);
-    if (list_mode) { 
+    if (list_mode) {
         dataset_free(&dtr);
         dataset_free(&dval);
     }
-    else 
+    else
         dataset_free(&ds);
     return 0;
 }
