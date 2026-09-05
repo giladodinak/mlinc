@@ -51,6 +51,6 @@ int lm_generate(LM* m, HASHMAP* hmap,
                 const int* seed, int seedlen,
                 int steps, char *buffer, int buflen,
                 float temperature, int top_k,
-                int rep_win_len, float rep_penalty);
+                float rep_penalty, int rep_win_len);
 
 #endif

@@ -195,8 +195,8 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
  *   buflen      - Capacity of `buffer` in characters. If the text would
  *                 overflow, output is truncated at a token boundary
  *   temperature - Sampling temperature
- *   rep_win_len - Size of the recent-token ring buffer used by the penalty
  *   rep_penalty - Repetition penalty multiplier (<= 1 to disable)
+ *   rep_win_len - Size of the recent-token ring buffer used by the penalty
  *
  * References:
  * [1] Hinton, Vinyals & Dean (2015), Distilling the Knowledge in a
@@ -222,7 +222,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
                 const int* seed, int seedlen,
                 int steps, char *buffer, int buflen,
                 float temperature, int top_k, 
-                int rep_win_len, float rep_penalty)
+                float rep_penalty, int rep_win_len)
 {
     int T = m->T, K = m->V;
 
@@ -232,21 +232,22 @@ int lm_generate(LM* m, HASHMAP* hmap,
         return -1;
     buffer[0] = '\0';
     int bufext = 0;
+    int bufpos = 0;
     int s = 0;
 
     float* logits = allocmem(1,K,float);
 
     /* Ring of recently generated tokens for the repetition penalty */
-    int* recent = allocmem(rep_win_len,1,int);
+    int* recent = (rep_win_len > 0) ? allocmem(rep_win_len,1,int) : NULL;
     int nrecent = 0;
 
     /* Output buffer starts with the seed tokens. */
     for (int i = 0; i < seedlen && buflen > 1; i++) {
-        bufext = snprintf(buffer,buflen,"%s ",hashmap_inx2str(hmap,seed[i]));
-        if (bufext < 0 || bufext >= buflen)
+        bufext = snprintf(buffer + bufpos,buflen - bufpos,
+                          "%s ",hashmap_inx2str(hmap,seed[i]));
+        if (bufext < 0 || bufext >= buflen - bufpos)
             break;
-        buffer += bufext;
-        buflen -= bufext;
+        bufpos += bufext;
     }
 
     /* Switch to single-row processing and use the MHA KV cache */
@@ -288,7 +289,8 @@ int lm_generate(LM* m, HASHMAP* hmap,
         if (rep_penalty > 1) {
             for (int i = 0; i < nrecent; i++) {
                 int t = recent[i];
-                if (t <= 0 || t >= K) continue;
+                if (t <= 0 || t >= K)
+                    continue;
 
                 int seen = 0;
                 for (int j = 0; j < i; j++)
@@ -370,14 +372,14 @@ int lm_generate(LM* m, HASHMAP* hmap,
                     nxt = k;
         }
 
-        bufext = snprintf(buffer,buflen,"%s ",hashmap_inx2str(hmap,nxt));
-        if (bufext < 0 || bufext >= buflen)
+        bufext = snprintf(buffer + bufpos,buflen - bufpos,
+                          "%s ",hashmap_inx2str(hmap,nxt));
+        if (bufext < 0 || bufext >= buflen - bufpos)
             break;
-        buffer += bufext;
-        buflen -= bufext;
+        bufpos += bufext;
 
         /* Record the emitted token in the repetition window */
-        if (rep_penalty > 1) {
+        if (rep_win_len > 0 && rep_penalty > 1) {
             if (nrecent < rep_win_len)
                 recent[nrecent++] = nxt;
             else {
@@ -390,8 +392,8 @@ int lm_generate(LM* m, HASHMAP* hmap,
         H = lm_forward_step(m,nxt,pos);
         pos++;
     }
-    if (bufext > 1 && buffer[bufext - 1] == ' ')
-        buffer[bufext - 1] = '\0';
+    if (bufpos > 0 && buffer[bufpos - 1] == ' ')
+        buffer[bufpos - 1] = '\0';
     lm_use_cache(m,0); /* Restore batch row counts */
     freemem(logits);
     freemem(recent);

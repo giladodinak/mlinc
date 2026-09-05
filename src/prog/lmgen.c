@@ -78,7 +78,7 @@ static void generate_and_print(LM* m, const VOCAB* vocab, int* toks, int n,
     int out_size = (n + max_new + 8) * 32;
     char* out = allocmem(1,out_size,char);
     lm_generate(m,vocab->hmap,toks,n,max_new,out,out_size,
-                temperature,top_k,repeat_window,repeat_penalty);
+                temperature,top_k,repeat_penalty,repeat_window);
     printf("%s\n",out);
     fflush(stdout);
     freemem(out);

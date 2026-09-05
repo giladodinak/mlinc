@@ -615,7 +615,7 @@ int main(int argc, char** argv)
 
         char output[1024];
         lm_generate(m,vocab->hmap,prompt_tokens,prompt_token_count,
-                    20,output,sizeof(output),0.8,40,32,3.7);
+                    20,output,sizeof(output),0.8,40,3.7,32);
         printf("%s\n",output);
         fflush(stdout);
 

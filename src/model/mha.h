@@ -253,7 +253,7 @@ static inline void mha_forward(MHA* restrict l,
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
 
-            int base = (b * H + h) * T; /* row offset into [BHT][...] buffers */
+            int base = (b * H + h) * T; /* Row offset into [BHT][...] buffers */
 
             /* Step 2 - Split into heads (Sec. 3.2.2):
              * Qh = Q[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
@@ -262,9 +262,9 @@ static inline void mha_forward(MHA* restrict l,
              */
             for (int t = 0; t < T; t++) {
                 int r = b * T + t;
-                fltcpy(&Qh[base+t][0],&Q[r][h*Dh],Dh);
-                fltcpy(&Kh[base+t][0],&K[r][h*Dh],Dh);
-                fltcpy(&Vh[base+t][0],&V[r][h*Dh],Dh);
+                fltcpy(&Qh[base + t][0],&Q[r][h * Dh],Dh);
+                fltcpy(&Kh[base + t][0],&K[r][h * Dh],Dh);
+                fltcpy(&Vh[base + t][0],&V[r][h * Dh],Dh);
             }
 
             rope_apply(&Qh[base],l->theta,0,offset,T,Dh);
@@ -302,15 +302,15 @@ static inline void mha_forward(MHA* restrict l,
             }
 
             /* Compute attention probabilities - Softmax - in Eq. 1 */
-            softmax(Scores, T, T);
+            softmax(Scores,T,T);
 
             /* Store this head's attention weights for backward */
-            fltcpy(&Att[base], Scores, T * T);
+            fltcpy(&Att[base],Scores,T * T);
 
             if (training && l->training && l->dropout_rate > 0)
                 dropout(&Att[base],&AttMask[base],T,T,l->dropout_rate);
 
-            /* in Eq. 1: Attention @ V */
+            /* In Eq. 1: Attention @ V */
             matmul(Oh,&Att[base],&Vh[base],T,T,Dh);
 
             /* Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
