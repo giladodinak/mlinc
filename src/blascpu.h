@@ -4,7 +4,9 @@
 
 #include <sched.h>
 #include <string.h>
+#ifdef USE_BLAS
 #include <cblas.h>
+#endif
 
 /*Configures OpenBLAS to use the specified CPUs.
  *

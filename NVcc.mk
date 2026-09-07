@@ -32,7 +32,8 @@ CFLAGS += -DUSE_CUDA -I$(CUDA_HOME)/include -fno-omit-frame-pointer
 LIB_DIRS += -L$(CUDA_HOME)/lib64
 LIBS += -lcublas -lcudart
 
-NVFLAGS = -arch=$(CUDA_ARCH) -DUSE_CUDA -Drestrict=__restrict__ $(CUINC_DIRS) $(INC_DIRS) -I$(CUDA_HOME)/include
+NVFLAGS = -arch=$(CUDA_ARCH) -DUSE_CUDA -Drestrict=__restrict__ 
+NVFLAGS += $(CUINC_DIRS) $(INC_DIRS) -I$(CUDA_HOME)/include
 
 ifeq ($(DEBUG),)    # DEBUG is blank - not debug 
 NVFLAGS += -O3 -Xcompiler=-O3,-march=$(MARCH),-ffast-math,-fno-omit-frame-pointer --use_fast_math
