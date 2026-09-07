@@ -1,4 +1,10 @@
 /* Copyright (c) 2026 Gilad Odinak */
+
+/* Simple test to verify existance of GPU liraries/driver
+ * and compare cpu vs gpu matrix multiplication speed.
+ *
+ * This program is compiled by gcc.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,13 +22,12 @@
 
 #define ASIZE 512
 
-float a[ASIZE][ASIZE];
-float b[ASIZE][ASIZE];
-float c[ASIZE][ASIZE];
-
-
 int main (int argc, char **argv) 
 {
+    float (*a)[ASIZE] = (float (*)[512])  aligned_alloc(64, sizeof(float) * ASIZE * ASIZE);
+    float (*b)[ASIZE] = (float (*)[512])  aligned_alloc(64, sizeof(float) * ASIZE * ASIZE);
+    float (*c)[ASIZE] = (float (*)[512])  aligned_alloc(64, sizeof(float) * ASIZE * ASIZE);
+
     int cuda = 0;
     int iter = 0;
     if (argc == 1) {
@@ -37,7 +42,19 @@ int main (int argc, char **argv)
         else
             iter = atoi(argv[1]);
     }
-    printf("matrix size %d X %d, cuda %s iterations %d\n",ASIZE,ASIZE,(cuda)?"true":"false",iter);        
+
+    printf("Compiler: ");
+    #ifdef __CUDACC__
+    printf("nvcc %d.%d\n", __CUDACC_VER_MAJOR__, __CUDACC_VER_MINOR__);
+    #elif defined(__clang__)
+    printf("clang %s\n", __clang_version__);
+    #elif defined(__GNUC__)
+    printf("gcc %d.%d.%d\n", __GNUC__, __GNUC_MINOR__, __GNUC_PATCHLEVEL__);
+    #else
+    printf("unknown\n");
+    #endif
+
+    printf("matrix size %d X %d, cuda %s iterations %d\n",ASIZE,ASIZE,(cuda)?"true":"false",iter);
 
     for (int i = 0; i < ASIZE; i++) {
         for (int j = 0; j < ASIZE; j++) {
@@ -96,17 +113,24 @@ int main (int argc, char **argv)
     }
 
 #ifdef USE_CUDA
-    if (cuda) {
+    if (cuda)
         cudaDeviceSynchronize();
+#endif
+    float time_total = elapsed_time(start_time);
+#ifdef USE_CUDA
+    if (cuda) {
         cublasDestroy(handle);
         cufreemem(da);
         cufreemem(db);
         cufreemem(dc);
     }
 #endif
-
-    float time_total = elapsed_time(start_time);
     float time_iter_us = time_total * 1000000 / iter;
     printf("Elapsed time %g seconds, time per iteration %.f microseconds\n",time_total,time_iter_us);
+
+    free(a);
+    free(b);
+    free(c);    
+
     return 0;
 }

@@ -29,7 +29,7 @@
  */
 static inline void fltclr(void* restrict v_, int n)
 {
-    float* restrict v = (float* restrict) v_;
+    float* restrict v = (float*) v_;
     for (int i = 0; i < n; i++) v[i] = 0.0;
 }
 

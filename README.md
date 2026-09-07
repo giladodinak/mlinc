@@ -100,6 +100,14 @@ in [array.h](src/numeric/array.h) with highly optimized multi-core library
 routines, To enable BLAS, compile the code with the USEBLAS flag\
 `$ make USEBLAS=Yes`
 
+### Using CUDA
+
+When enabled, CUDA substitutes GPU implementations for supported functions
+and uses NVIDIA CUDA/cuBLAS routines. This requires the NVIDIA CUDA toolkit,
+including nvcc, to be installed. To enable CUDA, compile the code with the
+USECUDA flag\
+`$ make USECUDA=Yes`
+
 ### Plotting
 
 Some test programs use C bindings to Python matplotlib to display

@@ -12,7 +12,7 @@ ifeq ($(DEBUG),)    # DEBUG is blank - not debug
 ifeq ($(MARCH),)
 MARCH = native
 endif
-CFLAGS += -O3 -march=$(MARCH) -ffast-math
+CFLAGS = -O3 -march=$(MARCH) -ffast-math
 else
 CFLAGS += -ggdb     # gdb support
 endif

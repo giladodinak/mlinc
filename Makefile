@@ -7,6 +7,7 @@ USEDOUBLE = # Set to yes to use double precision math
 MARCH =     # Set to target architecture, if not same as this machine
 NOPLOT =    # Set to yes to disable plotting, and use of python matplotlib
 USEBLAS=    # Set to yes to use openblas/cblas for matrix multiplications
+USECUDA=    # Set to yes to use CUDA/cuBLAS implementations where available
 USECLANG=   # Set to yes to use clang instead of gcc
 USEGCCENV=  # Set to use gcc headers and libraries with clang
 
@@ -14,7 +15,6 @@ CC = gcc
 CPPC = g++
 LINK = g++
 
-# Environ.mk and Plot.mk add more flags to CFLAGS LFLAGS LIBS
 CFLAGS = -Wall -Wextra
 
 LFLAGS =
@@ -44,7 +44,8 @@ LIB_DIRS =
 
 PROGRAMS = sph2wav feat2audio word2vec wordembd simlex bats \
            har timitfeat timit timittest charlm lmtrain lmgen
-TESTS = testmem cblastest testarray testrandom testhash testannoy \
+TESTS = testmem cblastest cudatest \
+        testrandom testarray testhash testannoy \
 		testhann testfilter testlpc testlsp \
 		testqr testsvd testpca \
 		testadamw testctc testnorm \
@@ -61,6 +62,10 @@ include Environ.mk # OS and processor depndencies
 
 ifneq ($(USECLANG),) # USECLANG is not blank - use clang instead of gcc
 include Clang.mk
+endif
+
+ifneq ($(USECUDA),)  # USECUDA is not blank - use CUDA/cuBLAS implementations
+include NVcc.mk
 endif
 
 ifeq ($(NOPLOT),)

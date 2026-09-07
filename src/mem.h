@@ -1,12 +1,16 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
-/* Memory data structures and functions */
+/* Memory allocation functions          */
 
 #ifndef MEM_H
 #define MEM_H
 #include <stdlib.h>  /* declares free() */
 
-void* allocmem_int(size_t M, size_t N, int S, char* typ, 
-                                       const char* func, char* file, int line);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void* allocmem_int(size_t M, size_t N, int S, const char* typ, 
+                   const char* func, const char* file, int line);
 
 /* Allocates contiguous memory for an array of MxN elements of type T,
  * and initializes all elements to zero.
@@ -43,5 +47,9 @@ void* allocmem_int(size_t M, size_t N, int S, char* typ,
  *  does nothing.
  */
 inline static void freemem(void *p) { if (p != NULL) free(p); }
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
