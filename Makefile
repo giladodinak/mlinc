@@ -58,6 +58,8 @@ AOBJS= $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 OBJS = $(filter-out $(BUILD_DIR)/prog/%.o,$(filter-out \
                                               $(BUILD_DIR)/tests/%.o,$(AOBJS)))
 
+.DEFAULT_GOAL := all
+
 include Environ.mk # OS and processor depndencies
 
 ifneq ($(USECLANG),) # USECLANG is not blank - use clang instead of gcc

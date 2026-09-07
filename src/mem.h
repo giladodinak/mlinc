@@ -5,6 +5,10 @@
 #define MEM_H
 #include <stdlib.h>  /* declares free() */
 
+#ifdef USE_CUDA
+#include "../cuda/cumem.h"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

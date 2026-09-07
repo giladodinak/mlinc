@@ -12,6 +12,8 @@ CUDA_DIR = ./cuda
 CUDA_HOME ?= /usr/local/cuda
 CUDA_ARCH ?= sm_86
 
+TESTS += cudatest-nvcc testarray-gpu
+
 CUSRCS = $(shell find $(CUDA_DIR) -name '*.cu' 2>/dev/null)
 CUHDRS = $(shell find $(CUDA_DIR) \( -name '*.h' \) 2>/dev/null)
 CUOBJS = $(patsubst $(CUDA_DIR)/%.cu,$(BUILD_DIR)/%.o,$(CUSRCS))

@@ -1,8 +1,8 @@
 /* Copyright (c) 2026 Gilad Odinak */
 /* GPU Memory allocation functions */
 
-#ifndef MEM_H
-#define MEM_H
+#ifndef CUMEM_H
+#define CUMEM_H
 #include <cuda_runtime.h>
 
 #ifdef __cplusplus
