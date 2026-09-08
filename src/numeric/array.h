@@ -5,19 +5,19 @@
 #include <math.h>
 #include "float.h"
 
-/* Define types of one and two dimensional arrays of unspecified dimensions
- * These are dynamically cast to explicit dimensions within each function
+/* Define types of one and two dimensional arrays of unspecified dimensions.
+ * These are dynamically cast to explicit dimensions within each function.
  *
- * for example
+ * For example
  *     fArr2D a2d; // a2d is two-dimensional array of unspecified dimensions
  *     typedef float (*ArrNK)[K]; // two-dimensional array NxK (e.g. N=3 K=5)
- *     ArrNK a2dNK = (ArrNK) a2d; a2dNK is the addrress of 2-D array 3x5
+ *     ArrNK a2dNK = (ArrNK) a2d; // a2dNK is the addrress of 2-D array 3x5
  *     a2dNK[2][4] access an entry in the array
  * Notice that a2dNK memory is contiguous just like when declaring
  * a two-dimensional array  float arr[3][5]
  *
  * When passing an array by reference to a function, only the last dimension
- * can be sepcified. By convention, the first dimension is noted in typedef,
+ * can be specified. By convention, the first dimension is noted in typedef,
  * and in comments, see examples below.
  *
  */
@@ -34,8 +34,12 @@ typedef float (*fArr2D)[];
 #endif
 #ifdef USE_DOUBLE
 #define GEMM cblas_dgemm
+#define GEMV cblas_dgemv
+#define GER  cblas_dger
 #else
 #define GEMM cblas_sgemm
+#define GEMV cblas_sgemv
+#define GER  cblas_sger
 #endif
 #endif
 
@@ -173,6 +177,7 @@ static inline void addvecmatmul(fVec restrict r_/*[N]*/,
                              const fArr2D restrict m_/*[M][N]*/,
                              int M, int N)
 {
+#ifndef USE_BLAS
     typedef float (*VecN);
     typedef float (*VecM);
     typedef float (*ArrMN)[N];
@@ -183,6 +188,13 @@ static inline void addvecmatmul(fVec restrict r_/*[N]*/,
     for (int i = 0; i < M; i++)
         for (int j = 0; j < N; j++)
             r[j] += v[i] * m[i][j];
+#else
+    GEMV(CblasRowMajor,CblasTrans,
+         M,N,
+         1.0,(const float*)m_,N,
+             (const float*)v_,1,
+         1.0,(float*)r_,1);
+#endif
 }
 
 /* Multiplies the vector w by the transpose of matrix m
@@ -197,6 +209,7 @@ static inline void addinnermul(fVec restrict v_/*[N]*/,
                                const fArr2D restrict m_/*[N][M]*/,
                                int N, int M)
 {
+#ifndef USE_BLAS
     typedef float (*VecN);
     typedef float (*VecM);
     typedef float (*ArrNM)[M];
@@ -207,6 +220,13 @@ static inline void addinnermul(fVec restrict v_/*[N]*/,
     for (int j = 0; j < N; j++)
         for (int i = 0; i < M; i++)
             v[j] += w[i] * m[j][i];
+#else
+    GEMV(CblasRowMajor,CblasNoTrans,
+         N,M,
+         1.0,(const float*)m_,M,
+             (const float*)w_,1,
+         1.0,(float*)v_,1);
+#endif
 }
 
 /* Calculates the tensor product (i.e. outer multiplication) of the
@@ -222,6 +242,7 @@ static inline void addoutermul(fArr2D restrict m_/*[N][M]*/,
                                const fVec restrict w_/*[M]*/,
                                int N, int M)
 {
+#ifndef USE_BLAS
     typedef float (*VecN);
     typedef float (*VecM);
     typedef float (*ArrNM)[M];
@@ -231,11 +252,16 @@ static inline void addoutermul(fArr2D restrict m_/*[N][M]*/,
     for (int i = 0; i < N; i++)
         for (int j = 0; j < M; j++)
             m[i][j] += v[i] * w[j];
+#else
+    GER(CblasRowMajor,
+        N,M,
+        1.0,(const float*)v_,1,
+            (const float*)w_,1,
+        (float*)m_,M);
+#endif
 }
 
-/* Transposes the matrix m and returns the tansposed matrix in mt.
- * The transpose of m is obtained by flipping the rows and columns of m.
- */
+/* Transposes the matrix m and returns the tansposed matrix in mt. */
 static inline void transpose(const fArr2D restrict m_/*[N][M]*/,
                              fArr2D restrict mt_/*[M][N]*/,
                              int N, int M)
@@ -277,7 +303,7 @@ static inline void diagmat(const fVec restrict v_/*[N]*/,
     VecN v = (VecN) v_;
     typedef float (*ArrNN)[N];
     ArrNN m = (ArrNN) m_;
-    fltclr(m,N*N);
+    fltclr(m,N * N);
     for (int i = 0; i < N; i++)
         m[i][i] = v[i];
 }

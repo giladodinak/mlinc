@@ -10,7 +10,7 @@
 NVCC = nvcc
 CUDA_DIR = ./cuda
 CUDA_HOME ?= /usr/local/cuda
-CUDA_ARCH ?= sm_86
+CUDA_ARCH ?= $(if $(CARCH),$(CARCH),native)
 
 TESTS += cudatest-nvcc testarray-gpu
 
@@ -18,7 +18,7 @@ CUSRCS = $(shell find $(CUDA_DIR) -name '*.cu' 2>/dev/null)
 CUHDRS = $(shell find $(CUDA_DIR) \( -name '*.h' \) 2>/dev/null)
 CUOBJS = $(patsubst $(CUDA_DIR)/%.cu,$(BUILD_DIR)/%.o,$(CUSRCS))
 
-# CUDA headers take precedence over corresponding SRC_DIR headers for .cu files.
+# .cu files use cuda/** header files instead of same name src/** header files.
 CUINC_DIRS = $(addprefix -I,$(shell find $(CUDA_DIR) -type d 2>/dev/null))
 
 # CUDA module objects exclude programs and tests, which are linked separately.
@@ -36,14 +36,15 @@ NVFLAGS = -arch=$(CUDA_ARCH) -DUSE_CUDA -Drestrict=__restrict__
 NVFLAGS += $(CUINC_DIRS) $(INC_DIRS) -I$(CUDA_HOME)/include
 
 ifeq ($(DEBUG),)    # DEBUG is blank - not debug 
-NVFLAGS += -O3 -Xcompiler=-O3,-march=$(MARCH),-ffast-math,-fno-omit-frame-pointer --use_fast_math
+XCOMPILER = -Xcompiler=-O3,-march=$(MARCH),-ffast-math,-fno-omit-frame-pointer
+NVFLAGS += -O3 --use_fast_math $(XCOMPILER)
 else
 NVFLAGS += -g -G
 endif
 
-#ifneq ($(PROFILE),) # PROFILE is not blank - add profilng support
+ifneq ($(PROFILE),) # PROFILE is not blank - add profilng support
 NVFLAGS += -g
-#endif
+endif
 
 ifneq ($(USEDOUBLE),)
 NVFLAGS += -DUSE_DOUBLE

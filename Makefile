@@ -1,15 +1,16 @@
 # Copyright (c) 2023 Gilad Odinak
 
-DEBUG =     # Set to yes to disable optimizations and add gdb support
-MEMCHK =    # Set to yes to add memory errors detection
-PROFILE =   # Set to yes to enable profiling support (disables inlining)
-USEDOUBLE = # Set to yes to use double precision math
-MARCH =     # Set to target architecture, if not same as this machine
-NOPLOT =    # Set to yes to disable plotting, and use of python matplotlib
-USEBLAS=    # Set to yes to use openblas/cblas for matrix multiplications
-USECUDA=    # Set to yes to use CUDA/cuBLAS implementations where available
-USECLANG=   # Set to yes to use clang instead of gcc
-USEGCCENV=  # Set to use gcc headers and libraries with clang
+DEBUG=     # Set to yes to disable optimizations and add gdb support
+MEMCHK=    # Set to yes to add memory errors detection
+PROFILE=   # Set to yes to enable profiling support (disables inlining)
+USEDOUBLE= # Set to yes to use double precision math
+NOPLOT=    # Set to yes to disable plotting, and use of python matplotlib
+USEBLAS=   # Set to yes to use openblas/cblas for matrix multiplications
+USECUDA=   # Set to yes to use CUDA/cuBLAS implementations where available
+USECLANG=  # Set to yes to use clang instead of gcc
+USEGCCENV= # Set to use gcc headers and libraries with clang
+MARCH =    # Set to target architecture, if not same as this machine
+CARCH =    # Set to cuda target hardware architecture
 
 CC = gcc
 CPPC = g++

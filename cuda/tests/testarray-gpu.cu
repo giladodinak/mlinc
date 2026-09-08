@@ -1,4 +1,4 @@
-/* Copyright (c) 2023-2024 Gilad Odinak */
+/* Copyright (c) 2023-2026 Gilad Odinak */
 #include <stdio.h>
 #include <math.h>
 #include <cuda_runtime.h>

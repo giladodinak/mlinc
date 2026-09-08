@@ -439,8 +439,7 @@ static inline void mha_forward_step(MHA* restrict l,
         matmul(Y,Out,Wo,1,D,D);
 }
 
-/*
- * mha_backward - backward pass of Multi-Head Attention (MHA) layer.
+/* mha_backward - backward pass of Multi-Head Attention (MHA) layer.
  *
  * Computes gradients of the loss with respect to weights and inputs,
  * reversing each step of mha_forward in order.

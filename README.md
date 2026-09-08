@@ -102,7 +102,7 @@ routines, To enable BLAS, compile the code with the USEBLAS flag\
 
 ### Using CUDA
 
-When enabled, CUDA substitutes GPU implementations for supported functions
+When enabled, CUDA substitutes GPU based implementations for some functions
 and uses NVIDIA CUDA/cuBLAS routines. This requires the NVIDIA CUDA toolkit,
 including nvcc, to be installed. To enable CUDA, compile the code with the
 USECUDA flag\
@@ -129,7 +129,8 @@ In the project root directory, run these commands:\
 `$ bin/testembed`\
 `$ bin/har`\
 `$ bin/timit`\
-`$ bin/word2vec`
+`$ bin/word2vec`\
+`$ bin/lmtrain`
 
 ### License
 
