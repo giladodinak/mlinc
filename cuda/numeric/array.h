@@ -301,7 +301,7 @@ static inline void diagmat(const fVec restrict v_/*[N]*/,
                            fArr2D restrict m_/*[N][N]*/,
                            int N)
 {
-    cufltclr((void*)m_,0,(size_t)N * N);
+    cufltclr(m_,N * N);
     int threads = 256;
     diagmat_kernel<<<(N + threads - 1) / threads,threads>>>(
         (const float*)v_,(float*)m_,N);
@@ -318,7 +318,7 @@ static __global__ void mateye_kernel(float* m, int N)
  */
 static inline void mateye(const fArr2D restrict m_/*[N][N]*/, int N)
 {
-    cufltclr((void*)m_,0,(size_t)N * N);
+    cufltclr(m_,N * N);
     int threads = 256;
     mateye_kernel<<<(N + threads - 1) / threads,threads>>>((float*)m_,N);
 }

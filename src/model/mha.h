@@ -368,17 +368,20 @@ static inline void mha_forward_step(MHA* restrict l,
     ArrDD Wk = (ArrDD) l->Wk;
     ArrDD Wv = (ArrDD) l->Wv;
     ArrDD Wo = (ArrDD) l->Wo;
-    Arr1D Q  = (Arr1D) l->Q;
-    Arr1D K  = (Arr1D) l->K;
-    Arr1D V  = (Arr1D) l->V;
+    Arr1D Q = (Arr1D) l->Q;
+    Arr1D K = (Arr1D) l->K;
+    Arr1D V = (Arr1D) l->V;
     Arr1D Out = (Arr1D) l->Out;
 
     if (l->Kh_cache == NULL) {
         l->Kh_cache = allocmem(H * T,Dh,float);
         l->Vh_cache = allocmem(H * T,Dh,float);
     }
+
     ArrHTDh Kc = (ArrHTDh) l->Kh_cache;
     ArrHTDh Vc = (ArrHTDh) l->Vh_cache;
+    ArrHTDh Qh = (ArrHTDh) l->Qh;
+    ArrHTDh Kh = (ArrHTDh) l->Kh;
 
     /* Project the single new token */
     matmul(Q,x,Wq,1,D,D);
@@ -393,7 +396,8 @@ static inline void mha_forward_step(MHA* restrict l,
 
     for (int h = 0; h < H; h++) {
         int hbase = h * T;
-        float qh[Dh], kh[Dh];
+        float* qh = (float*) &Qh[hbase];
+        float* kh = (float*) &Kh[hbase];
         fltcpy(qh,&Q[0][h*Dh],Dh);
         fltcpy(kh,&K[0][h*Dh],Dh);
 
@@ -407,7 +411,7 @@ static inline void mha_forward_step(MHA* restrict l,
 
         /* Attention of the new token over the n valid cached keys */
         float sc[T];
-        float maxs = -1e30f;
+        float maxs = -1e30;
         for (int j = 0; j < n; j++) {
             const float* kj = &Kc[hbase+j][0];
             float dot = 0.0;
@@ -547,7 +551,6 @@ static inline void mha_backward(MHA* restrict l,
 
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
-
             int base = (b * H + h) * T; /* row offset into [BHT][...] buffers */
 
             /* split dOut */

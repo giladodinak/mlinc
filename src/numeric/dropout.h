@@ -64,8 +64,8 @@ static inline void apply_dropout_mask(const fArr2D in_/*[M][N]*/,
                                       int M, int N)
 {
     typedef float (*ArrMN)[N];
-    const ArrMN in = (const ArrMN) in_;
-    const ArrMN mk = (const ArrMN) mk_;
+    const ArrMN in = (ArrMN) in_;
+    const ArrMN mk = (ArrMN) mk_;
     ArrMN out = (ArrMN) out_;
     for (int i = 0; i < M; i++)
         for (int j = 0; j < N; j++)

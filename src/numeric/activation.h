@@ -146,7 +146,7 @@ static inline void d_sigmoid(fArr2D x_/*[B][D]*/,
 {
     typedef float (*ArrBD)[D];
     ArrBD x = (ArrBD) x_;
-    const ArrBD z = (const ArrBD) z_;
+    const ArrBD z = (ArrBD) z_;
 
     for (int i = 0; i < B; i++)
         for (int j = 0; j < D; j++)
@@ -182,7 +182,7 @@ static inline void d_relu(fArr2D x_/*[B][D]*/,
 {
     typedef float (*ArrBD)[D];
     ArrBD x = (ArrBD) x_;
-    const ArrBD z = (const ArrBD) z_;
+    const ArrBD z = (ArrBD) z_;
 
     for (int i = 0; i < B; i++)
         for (int j = 0; j < D; j++)
@@ -221,7 +221,7 @@ static inline void d_gelu(fArr2D x_/*[B][D]*/,
 {
     typedef float (*ArrBD)[D];
     ArrBD x = (ArrBD) x_;
-    const ArrBD z = (const ArrBD) z_;
+    const ArrBD z = (ArrBD) z_;
 
     for (int i = 0; i < B; i++)
         for (int j = 0; j < D; j++)
@@ -250,8 +250,8 @@ static inline void d_softmax(fArr2D g_/*[B][D]*/,
 {
     typedef float (*ArrBD)[D];
     ArrBD g = (ArrBD) g_;
-    const ArrBD dp = (const ArrBD) dp_;
-    const ArrBD p = (const ArrBD) p_;
+    const ArrBD dp = (ArrBD) dp_;
+    const ArrBD p = (ArrBD) p_;
 
     for (int i = 0; i < B; i++) {
         float dot = 0;
