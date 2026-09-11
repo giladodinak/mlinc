@@ -251,7 +251,7 @@ int main(int argc, char** argv)
     EMBEDDING* embedding = embedding_create(embedding_dim,cxt_size,0);
     embedding_init(embedding,vocab_size,batch_size,1);
     NEGSAMPLE* output = negsample_create(vocab_size,neg_samples);
-    negsample_init(output,embedding_dim,batch_size);
+    negsample_init(output,embedding_dim,batch_size,1);
     negsample_set_dist(output,dist_table,dist_table_size);
 
     /* Allocate memory for gradients */
@@ -324,9 +324,7 @@ int main(int argc, char** argv)
 
                 /* Forward pass */
                 fArr2D yp = embedding_forward(embedding,contexts,0);
-
-                loss += negsample_loss(output,yp,labels,gWx[1],dy,
-                                       batch_size,NULL);
+                loss += negsample_loss(output,yp,labels,dy,batch_size,NULL);
 
                 /* backward pass */
                 int ntouched_in = 0;
@@ -338,7 +336,7 @@ int main(int argc, char** argv)
                  */
                 update(embedding->Wx,gWx[0],touched_in,ntouched_in,
                                                    embedding->E,learning_rate);
-                negsample_update(output,gWx[1],learning_rate,0.0);
+                negsample_update(output,learning_rate,0.0);
 
                 word_cnt += wcnt;
                 int pct = (num_files >= 1) ?
@@ -347,10 +345,10 @@ int main(int argc, char** argv)
                 int sec = seconds % 60;
                 int min = (seconds / 60) % 60;
                 int hours = seconds / 3600;
-                printf("epoch %2d lr %6.4f loss %6.4f %3d%% "
-                       "(file %d of %d, %lld words) %d:%02d:%02d\r",
-                       epoch,learning_rate,loss / word_cnt,pct,
-                       file_cnt,num_files,word_cnt,hours,min,sec);
+                printf("epoch %2d lr %6.4f loss %6.4f "
+                       "%3d%% (%d files, %lld words) %d:%02d:%02d\r",
+                       epoch,learning_rate,loss / word_cnt,
+                       pct,file_cnt,word_cnt,hours,min,sec);
                 fflush(stdout);
             }
         }

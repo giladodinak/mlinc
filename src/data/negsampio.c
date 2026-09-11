@@ -19,18 +19,19 @@
  *   Pointer to the read layer if successful, NULL otherwise
  *
  * Notes:
- *   - Only the output weights (Wo) are persisted; the passthrough, touched,
- *     and seen buffers are scratch and are (re)allocated here.
+ *   - Only the output weights (Wo) and layer configuration are persisted.
+ *     Training-only buffers (gWo, touched, seen) are allocated only when
+ *     training is enabled.
  *   - The unigram sampling table (dist) is not owned by the layer and is not
  *     persisted; the caller must re-attach it via negsample_set_dist() after
  *     loading, before calling negsample_loss().
  */
 NEGSAMPLE* read_negsample(FILE* fp)
 {
-    int K, E, B, n_neg;
-    int cnt = fscanf(fp," NEGSAMPLE K %d E %d B %d n_neg %d\n",
-                     &K,&E,&B,&n_neg);
-    if (cnt < 4 || cnt == EOF) {
+    int K, E, B, n_neg, training;
+    int cnt = fscanf(fp," NEGSAMPLE K %d E %d B %d n_neg %d training %d\n",
+                     &K,&E,&B,&n_neg,&training);
+    if (cnt < 5 || cnt == EOF) {
         fprintf(stderr,"In read_negsample: failed to read the header\n");
         return NULL;
     }
@@ -39,13 +40,17 @@ NEGSAMPLE* read_negsample(FILE* fp)
     l->E = E;
     l->B = B;
     l->n_neg = n_neg;
+    l->training = training ? 1 : 0;
     l->Wo = allocmem(l->K,l->E,float);
     l->h = allocmem(l->B,l->E,float);
-    l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
-    l->ntouched = 0;
-    l->seen = allocmem(l->K,1,int);
-    for (int i = 0; i < l->K; i++)
-        l->seen[i] = -1;
+    if (l->training) {
+        l->gWo = allocmem(l->K,l->E,float);
+        l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
+        l->ntouched = 0;
+        l->seen = allocmem(l->K,1,int);
+        for (int i = 0; i < l->K; i++)
+            l->seen[i] = -1;
+    }
     l->stamp = 0;
     l->dist = NULL;
     l->dist_size = 0;
@@ -65,16 +70,18 @@ NEGSAMPLE* read_negsample(FILE* fp)
  * to by fp.
  *
  * Parameters:
- *   l  - Pointer to the layer to be written
- *   fp - Pointer to a FILE object representing the output file
+ *   l     - Pointer to the layer to be written
+ *   final - If not zero, record the layer as inference-only
+ *   fp    - Pointer to a FILE object representing the output file
  *
  * Returns:
  *   1 if successful, 0 otherwise
  */
-int write_negsample(const NEGSAMPLE* l, FILE* fp)
+int write_negsample(const NEGSAMPLE* l, int final, FILE* fp)
 {
-    int cnt = fprintf(fp,"NEGSAMPLE K %d E %d B %d n_neg %d\n",
-                      l->K,l->E,l->B,l->n_neg);
+    int training = final ? 0 : l->training;
+    int cnt = fprintf(fp,"NEGSAMPLE K %d E %d B %d n_neg %d training %d\n",
+                      l->K,l->E,l->B,l->n_neg,training);
     if (cnt <= 0 || cnt == EOF) {
         fprintf(stderr,"In write_negsample: failed to write the header\n");
         return 0;
@@ -129,7 +136,7 @@ int store_negsample(const NEGSAMPLE* l, const char* filename)
         fprintf(stderr,"In store_negsample: failed to open file '%s' for write\n",filename);
         return 0;
     }
-    int ok = write_negsample(l,fp);
+    int ok = write_negsample(l,0,fp);
     fclose(fp);
     return ok;
 }

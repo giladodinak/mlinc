@@ -36,25 +36,24 @@ int test_dense_regression(const float range[3],
     const int L = layers_cnt + 1;
     const int M = (int) ((range[1] - range[0]) / range[2] + 0.5);
     printf("%d layers (including output layer), %d input samples\n",L,M);
-    const int D = 2;  /* Input vector dimension (including bias)    */
-    const int N = 1;  /* Output vector dimension                    */
-    float X[M][D];    /* X[][0] is x values, X[][1] is bias == 1.0  */
-    float yt[M][N];   /* True labels vector yt = f(X)               */
-    float y[M][N];    /* Output prediction (single dimension)       */
+    const int D = 1;  /* Input vector dimension               */
+    const int N = 1;  /* Output vector dimension              */
+    float X[M][D];    /* X[][0] is x values                   */
+    float yt[M][N];   /* True labels vector yt = f(X)         */
+    float y[M][N];    /* Output prediction (single dimension) */
     float x = range[0];
     /* Initialize data */
     for (int i = 0; i < M ; i++) {
         X[i][0] = x;
-        X[i][1] = 1.0;
         yt[i][0] = f(x);
         x += range[2];
     }
     /* Create Model (single batch of all samples) */
-    MODEL* m = model_create(L,M,D,0,1); /* don't add bias, normalize */
-    model_add(m,dense_create(layers[0],"relu"),"dense"); 
+    MODEL* m = model_create(L,M,D,1); /* normalize */
+    model_add(m,dense_create(layers[0],"relu",1),"dense"); 
     for (int i = 1; i < L - 1; i++)
-        model_add(m,dense_create(layers[i],"relu"),"dense");
-    model_add(m,dense_create(N,"none"),"dense"); 
+        model_add(m,dense_create(layers[i],"relu",1),"dense");
+    model_add(m,dense_create(N,"none",1),"dense"); 
 
     model_compile(m,"mean-square-error",optimizer);
 
@@ -124,25 +123,24 @@ int test_lstm_regression(const float range[3],
     const int L = layers_cnt + 1;
     const int M = (int) ((range[1] - range[0]) / range[2] + 0.5);
     printf("%d layers (including output layer), %d input samples\n",L,M);
-    const int D = 2;   /* Input vector dimension (including bias)    */
-    const int N = 1;  /* Output vector dimension                    */
-    float X[M][D];    /* X[][0] is x values, X[][1] is bias == 1.0  */
-    float yt[M][N];   /* True labels vector yt = f(X)               */
-    float y[M][N];    /* Output prediction (single dimension)       */
+    const int D = 1;  /* Input vector dimension               */
+    const int N = 1;  /* Output vector dimension              */
+    float X[M][D];    /* X[][0] is x values                   */
+    float yt[M][N];   /* True labels vector yt = f(X)         */
+    float y[M][N];    /* Output prediction (single dimension) */
     float x = range[0];
     /* Initialize data */
     for (int i = 0; i < M ; i++) {
         X[i][0] = x;
-        X[i][1] = 1.0;
         yt[i][0] = f(x);
         x += range[2];
     }
     /* Create Model (single batch of all samples) */
-    MODEL* m = model_create(L,M,D,0,0); /* don't add bias, don't normalize */
-    model_add(m,lstm_create(layers[0],1),"lstm");
+    MODEL* m = model_create(L,M,D,0); /* don't normalize */
+    model_add(m,lstm_create(layers[0],1,1),"lstm");
     for (int i = 1; i < L - 1; i++)
-        model_add(m,lstm_create(layers[i],1),"lstm");
-    model_add(m,lstm_create(N,1),"lstm"); 
+        model_add(m,lstm_create(layers[i],1,1),"lstm");
+    model_add(m,lstm_create(N,1,1),"lstm"); 
 
     model_compile(m,"mean-square-error",optimizer);
 
@@ -216,25 +214,24 @@ int test_lstm_dense_regression(const float range[3],
     const int M = (int) ((range_end - range_start) / range_step + 0.5);
     const int B = M;
     printf("%d layers (including output layer), %d input samples\n",L,M);
-    const int D = 2;  /* Input vector dimension (including bias)   */
-    const int N = 1;  /* Output vector dimension                    */
-    float X[M][D];    /* X[][0] is x values, X[][1] is bias == 1.0  */
-    float yt[M][N];   /* True labels vector yt = f(X)               */
-    float y[M][N];    /* Output prediction (single dimension)       */
+    const int D = 1;  /* Input vector dimension               */
+    const int N = 1;  /* Output vector dimension              */
+    float X[M][D];    /* X[][0] is x values                   */
+    float yt[M][N];   /* True labels vector yt = f(X)         */
+    float y[M][N];    /* Output prediction (single dimension) */
     float x = range_start;
     /* Initialize data */
     for (int i = 0; i < M ; i++) {
         X[i][0] = x;
-        X[i][1] = 1.0;
         yt[i][0] = f(x);
         x += range_step;
     }
     /* Create Model */
-    MODEL* m = model_create(L,B,D,0,1); /* don't add bias, normalize */
-    model_add(m,lstm_create(layers[0],1),"lstm"); 
+    MODEL* m = model_create(L,B,D,1); /* normalize */
+    model_add(m,lstm_create(layers[0],1,1),"lstm"); 
     for (int i = 1; i < L - 1; i++)
-        model_add(m,lstm_create(layers[i],1),"lstm");
-    model_add(m,dense_create(N,"none"),"dense"); 
+        model_add(m,lstm_create(layers[i],1,1),"lstm");
+    model_add(m,dense_create(N,"none",1),"dense"); 
 
     model_compile(m,"mean-square-error",optimizer);
 
@@ -330,11 +327,11 @@ int test_dense_classification(
         yt[i][yc[i]] = 1.0;
         
     /* Create Model (multiple batches of B samples each) */
-    MODEL* m = model_create(L,B,D,1,0); /* add bias, don't normalize */
-    model_add(m,dense_create(layers[0],"relu"),"dense"); 
+    MODEL* m = model_create(L,B,D,0); /* don't normalize */
+    model_add(m,dense_create(layers[0],"relu",1),"dense"); 
     for (int i = 1; i < L - 1; i++)
-        model_add(m,dense_create(layers[i],"relu"),"dense");
-    model_add(m,dense_create(N,"softmax"),"dense"); 
+        model_add(m,dense_create(layers[i],"relu",1),"dense");
+    model_add(m,dense_create(N,"softmax",1),"dense"); 
 
     model_compile(m,"cross-entropy",optimizer);
 
@@ -576,11 +573,11 @@ int test_lstm_dense_classification(
         yTet[i][yTec[i] - 1] = 1.0;
         
     /* Create Model (multiple batches of B samples each) */
-    MODEL* m = model_create(L,B,D,1,1); /* add bias, normalize */
-    model_add(m,lstm_create(layers[0],1),"lstm"); 
+    MODEL* m = model_create(L,B,D,1); /* normalize */
+    model_add(m,lstm_create(layers[0],1,1),"lstm"); 
     for (int i = 1; i < L - 1; i++)
-        model_add(m,lstm_create(layers[i],1),"lstm");
-    model_add(m,dense_create(N,"softmax"),"dense"); 
+        model_add(m,lstm_create(layers[i],1,1),"lstm");
+    model_add(m,dense_create(N,"softmax",1),"dense"); 
 
     model_compile(m,"cross-entropy",optimizer);
     
@@ -668,7 +665,7 @@ int test_lstm_dense_classification(
  * is used because the relevant pulse is always in the past.
  */
 
-/* Fills one length-T sequence: X[T][2] (value,bias), yt[T][1] (held pulse). */
+/* Fills one length-T sequence: X[T][1] (value), yt[T][1] (held pulse). */
 static void gen_sequence(float* X, float* yt, int T)
 {
     float last = 0;
@@ -685,8 +682,7 @@ static void gen_sequence(float* X, float* yt, int T)
         else {                   /* noise */
             v = urand(-0.6,0.6); /* +/- 0 .. 0.6 */
         }
-        X[t * 2 + 0] = v;
-        X[t * 2 + 1] = 1;        /* bias  */
+        X[t] = v;
         yt[t] = last;
     }
 }
@@ -705,7 +701,7 @@ int test_transformer_retrieval(int heads, int model_dim, int ffn_dim,
 
     const int T = seq_len;      /* sequence length; model batch size = T    */
     const int L = n_layers + 2; /* proj dense + n transformers + out dense  */
-    const int D = 2;            /* input dim: value + bias                  */
+    const int D = 1;            /* input dim: value                         */
     const int N = 1;            /* output dim                               */
 
     /* num_* sequences of length T, laid out sequence by sequence, with
@@ -736,12 +732,12 @@ int test_transformer_retrieval(int heads, int model_dim, int ffn_dim,
     printf("model_dim %d, heads %d, ffn_dim %d\n",model_dim,heads,ffn_dim);
 
     /* One sequence per batch: batch size == T, so B = T/T = 1. */
-    MODEL* m = model_create(L,T,D,0,0); /* don't add bias, don't normalize */
-    model_add(m,dense_create(model_dim,"none"),"dense");
+    MODEL* m = model_create(L,T,D,0); /* don't normalize */
+    model_add(m,dense_create(model_dim,"none",1),"dense");
     for (int i = 0; i < n_layers; i++)
         model_add(m,transformer_create(heads,T,model_dim,ffn_dim,0),
                                                               "transformer");
-    model_add(m,dense_create(N,"none"),"dense");
+    model_add(m,dense_create(N,"none",1),"dense");
     model_compile(m,"mean-square-error",optimizer);
 
     /* Train, with validation on the held-out sequences */
@@ -754,7 +750,7 @@ int test_transformer_retrieval(int heads, int model_dim, int ffn_dim,
               xVd,yVd,sVd,num_val,
               epochs,learning_rate,weight_decay,
               losses,accuracies,v_losses,v_accuracies,
-              "final=1 verbose=2");
+              "final=1 verbose=1");
 
     float y[T][N];
     model_predict(m,xVd,(fArr2D) y,T);
@@ -823,19 +819,19 @@ int main(int argc, char** argv)
         init_lrng(42);
         const int layers[3] = {32,128,32};
         const float range[3] = {0.0,5.0,0.1};
-        test_dense_regression(range,layers,3,"linear",0.0008,0.008,10000);
+        test_dense_regression(range,layers,3,"linear",0.0008,0.008,20000);
     }
     if (tests[1]) {
         init_lrng(42);
         const int layers[4] = {32,16,32,16};
         const float range[3] = {-10.0,10.0,0.1};
-        test_lstm_regression(range,layers,4,"adamw",0.0002,0.02,1000);
+        test_lstm_regression(range,layers,4,"adamw",0.0002,0.02,2000);
     }
     if (tests[2]) {
         init_lrng(42);
         const int layers[1] = {35};
         const float range[3] = {-10.0,10.0,0.1};
-        test_lstm_dense_regression(range,layers,1,"adamw",0.0003,0.09,1100);
+        test_lstm_dense_regression(range,layers,1,"adamw",0.0003,0.09,2000);
     }
     if (tests[3]) {
         init_lrng(42);
@@ -850,13 +846,13 @@ int main(int argc, char** argv)
     if (tests[5]) {
         init_lrng(42 * 2);
         const int heads = 4;
-        const int model_dim = 32; /* must be a multiple of heads    */
-        const int ffn_dim = 128;  /* 4 * model_dim                  */
+        const int model_dim = 64; /* must be a multiple of heads    */
+        const int ffn_dim = 256;  /* 4 * model_dim                  */
         const int n_layers = 2;   /* transformer layers             */
         const char* optimizer = "adamw";
         const float lr = 0.0005;
         const float wd = 0.01;
-        const int epochs = 20;
+        const int epochs = 40;
 
         test_transformer_retrieval(heads,model_dim,ffn_dim,
                                    n_layers,optimizer,lr,wd,epochs);

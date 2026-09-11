@@ -23,10 +23,8 @@ MODEL* read_model(FILE* fp);
  * 
  * Parameters:
  *   m     - Pointer to the model to be written
- *   final - If not zero, store the model as final: gradient/optimizer
- *           state is omitted (the file records num_grads 0 for every
- *           layer) so the model can be loaded for inference but not
- *           further trained. The model m itself is not modified.
+ *   final - If not zero, store the model as final: optimizer state is
+ *           omitted and trainable layers are recorded as inference-only.
  *   fp    - Pointer to a FILE object representing the output file
  * 
  * Returns:

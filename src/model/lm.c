@@ -30,7 +30,7 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
         transformer_init(t,batch,/*training=*/1,dropout);
         m->tr[i].type = 't';
         m->tr[i].transformer = t;
-        layer_alloc_grads(&m->tr[i],optimizer);
+        layer_alloc_opt_state(&m->tr[i],optimizer);
     }
 
     /* Output layer */
@@ -57,9 +57,9 @@ void lm_free(LM* m)
     lmemb_free(m->emb);
     for (int i = 0; i < m->N; i++) {
         transformer_free(m->tr[i].transformer);
-        for (int j = 0; j < m->tr[i].num_grads; j++)
-            freemem(m->tr[i].grads[j]);
-        freemem(m->tr[i].grads);
+        for (int j = 0; j < m->tr[i].num_opt_state; j++)
+            freemem(m->tr[i].opt_state[j]);
+        freemem(m->tr[i].opt_state);
     }
     freemem(m->tr);
     smsftmax_free(m->head);

@@ -68,13 +68,7 @@ ensures that the allocated memory is properly initialized to all zeros;
 if not enough memory is available, it prints an error message and
 termintes the program.\
 \
-The neural network architecture does not incorporate a separate bias
-term. Instead it uses the \"Bias Trick\": it incorporates the bias term
-directly into the weight matrix. This is done by adding an extra input
-to each neuron that is always set to 1, called the bias input. The
-corresponding weight for this bias input effectively becomes the bias
-term. This way, the bias can be treated as just another weight,
-simplifying matrix operations.
+The neural network architecture incorporates a separate bias term.
 
 ### Browsing the code
 

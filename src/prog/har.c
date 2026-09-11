@@ -327,11 +327,11 @@ int har_lstm_dense_classification(const char* loadmodel, const char* storemodel,
         m = load_model(loadmodel);
     else {
         /* Create Model (to process multiple batches of B samples each) */
-        m = model_create(L,B,D,1,1); /* Notice adding bias to input */
-        model_add(m,lstm_create(layers[0],stateful),"lstm"); 
+        m = model_create(L,B,D,1);
+        model_add(m,lstm_create(layers[0],stateful,1),"lstm"); 
         for (int i = 1; i < L - 1; i++)
-            model_add(m,lstm_create(layers[i],stateful),"lstm");
-        model_add(m,dense_create(N,"softmax"),"dense");
+            model_add(m,lstm_create(layers[i],stateful,1),"lstm");
+        model_add(m,dense_create(N,"softmax",1),"dense");
         model_compile(m,"cross-entropy",optimizer);
     }
     float losses[epochs];
@@ -425,7 +425,7 @@ int main(int argc, char** argv)
         " -s: Store model in file at the end of training                \n"
         "\n";
 
-    int epochs = 7, bsize = 64, tbsize = 64;
+    int epochs = 6, bsize = 64, tbsize = 64;
     float lr = 0.0001, wd = 0.1;
     char *loadfile = NULL, *storefile = NULL;
     int lyrcnt = 2;

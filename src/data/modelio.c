@@ -32,24 +32,23 @@ MODEL* read_model(FILE* fp)
     MODEL* m = allocmem(1,1,MODEL);
     int ok;
     int cnt = fscanf(fp," MODEL num_layers %d batch_size %d input_dim %d "
-                     "add_bias %d output_dim %d target_dim %d normalize %d "
+                     "output_dim %d target_dim %d normalize %d "
                      "loss_func '%c' optimizer '%c' update_cnt %d final %d\n",
                      &m->num_layers,&m->batch_size,&m->input_dim,
-                     &m->add_bias,&m->output_dim,&m->target_dim,&m->normalize,
+                     &m->output_dim,&m->target_dim,&m->normalize,
                      &m->loss_func,&m->optimizer,&m->update_cnt,&m->final);
-    if (cnt < 11 || cnt == EOF) {
+    if (cnt < 10 || cnt == EOF) {
         fprintf(stderr,"In read_model: failed to read the header\n");
         goto err;
     }
     m->layer = allocmem(1,m->num_layers,LAYER);
     if (m->normalize) {
-        int D = m->input_dim;           /* Input dimension: may include bias */
-        int Dx = D - (1 - m->add_bias); /* Input dimension excluding bias    */
-        m->mean = allocmem(1,Dx,float);
-        m->sdev = allocmem(1,Dx,float);
-        ok = read_array((fArr2D)m->mean,1,Dx,fp,0);
+        int D = m->input_dim;
+        m->mean = allocmem(1,D,float);
+        m->sdev = allocmem(1,D,float);
+        ok = read_array((fArr2D)m->mean,1,D,fp,0);
         if (ok)
-            ok = read_array((fArr2D)m->sdev,1,Dx,fp,0);
+            ok = read_array((fArr2D)m->sdev,1,D,fp,0);
         if (!ok) {
             fprintf(stderr,"In read_model: failed to read mean, sdev data\n");
             goto err;
@@ -66,8 +65,8 @@ MODEL* read_model(FILE* fp)
     }
     for (int i = 0; i < m->num_layers; i++) {
         LAYER* l = &m->layer[i];
-        cnt = fscanf(fp,
-                     " LAYER type '%c' num_grads %d\n",&l->type,&l->num_grads);
+        cnt = fscanf(fp," LAYER type '%c' num_opt_state %d\n",
+                                             &l->type,&l->num_opt_state);
         if (cnt < 2 || cnt == EOF) {
             fprintf(stderr,
                     "In read_model: failed to read layer %d header\n",i);
@@ -96,24 +95,31 @@ MODEL* read_model(FILE* fp)
                     "In read_model: failed to read layer %d data\n",i);
             goto err;
         }
-        if (l->num_grads > 0) {
-            /* grads is an array of pointers to arrays 
-             * see model_compile() for layout
+        if (l->num_opt_state > 0) {
+            /* opt_state is an array of pointers to arrays 
+             * see layer_alloc_opt_state() for layout
              */
-            l->grads  = allocmem(1,l->num_grads,fArr2D*);
+            l->opt_state  = allocmem(1,l->num_opt_state,fArr2D*);
             ok = 1; /* assume success */
             switch (l->type) {
-                case 'd': /* dense layer gradients */
-                    for (int j = 0; j < l->num_grads && ok; j++) {
-                        l->grads[j] = allocmem(l->dense->D,l->dense->S,float);
-                        ok = read_array(l->grads[j],l->dense->D,l->dense->S,fp,0);
+                case 'd': /* dense layer optimizer moments */
+                    for (int j = 0; j < l->num_opt_state && ok; j++) {
+                        int rows = (j < 2) ? l->dense->D : 1;
+                        l->opt_state[j] = allocmem(rows,l->dense->S,float);
+                        ok = read_array(l->opt_state[j],rows,l->dense->S,fp,0);
                     }
                 break;
-                case 'l': /* lstm layer gradients  */
-                    for (int j = 0; j < l->num_grads && ok; j++) {
-                        int rows = ((j / 4) % 2) ? l->lstm->S : l->lstm->D;
-                        l->grads[j] = allocmem(rows,l->lstm->S,float);
-                        ok = read_array(l->grads[j],rows,l->lstm->S,fp,0);
+                case 'l': /* lstm layer optimizer moments */
+                    for (int j = 0; j < l->num_opt_state && ok; j++) {
+                        int rows;
+                        if (j < 16) {
+                            int k = j % 8;
+                            rows = (k < 4) ? l->lstm->D : l->lstm->S;
+                        }
+                        else
+                            rows = 1;
+                        l->opt_state[j] = allocmem(rows,l->lstm->S,float);
+                        ok = read_array(l->opt_state[j],rows,l->lstm->S,fp,0);
                     }
                 break;
                 case 't': /* transformer layer gradients (adamw m/v moments) */
@@ -122,10 +128,10 @@ MODEL* read_model(FILE* fp)
                     int Dff = l->transformer->Dff;
                     int gr[10] = { D, D, D, D, D,   Dff, D, D, D, D };
                     int gc[10] = { D, D, D, D, Dff, D,   1, 1, 1, 1 };
-                    for (int j = 0; j < l->num_grads && ok; j++) {
+                    for (int j = 0; j < l->num_opt_state && ok; j++) {
                         int k = j % 10;
-                        l->grads[j] = allocmem(gr[k],gc[k],float);
-                        ok = read_array(l->grads[j],gr[k],gc[k],fp,0);
+                        l->opt_state[j] = allocmem(gr[k],gc[k],float);
+                        ok = read_array(l->opt_state[j],gr[k],gc[k],fp,0);
                     }
                 }
                 break;
@@ -133,16 +139,16 @@ MODEL* read_model(FILE* fp)
                 {
                     int K = l->negsample->K;
                     int E = l->negsample->E;
-                    for (int j = 0; j < l->num_grads && ok; j++) {
-                        l->grads[j] = allocmem(K,E,float);
-                        ok = read_array(l->grads[j],K,E,fp,0);
+                    for (int j = 0; j < l->num_opt_state && ok; j++) {
+                        l->opt_state[j] = allocmem(K,E,float);
+                        ok = read_array(l->opt_state[j],K,E,fp,0);
                     }
                 }
                 break;
             }
             if (!ok) {
                 fprintf(stderr,"In read_model: "
-                        "failed to read layer %d gradient data\n",i);
+                        "failed to read layer %d optimizer state data\n",i);
                 goto err;
             }
         }
@@ -162,9 +168,8 @@ err: /* error return */
  * Parameters:
  *   m     - Pointer to the model to be written
  *   final - If not zero, store the model as final: gradient/optimizer
- *           state is omitted (the file records num_grads 0 for every
- *           layer) so the model can be loaded for inference but not
- *           further trained. The model m itself is not modified.
+ *           state is omitted so the model can be used for inference
+ *           but not further trained.
  *   fp    - Pointer to a FILE object representing the output file
  * 
  * Returns:
@@ -175,21 +180,20 @@ int write_model(const MODEL* m, int final, FILE* fp)
     int ok;
     int fin = (final || m->final) ? 1 : 0;
     int cnt = fprintf(fp,"MODEL num_layers %d batch_size %d input_dim %d "
-                 "add_bias %d output_dim %d target_dim %d normalize %d " 
+                 "output_dim %d target_dim %d normalize %d " 
                  "loss_func '%c' optimizer '%c' update_cnt %d final %d\n",
                  m->num_layers,m->batch_size,m->input_dim,
-                 m->add_bias,m->output_dim,m->target_dim,m->normalize,
+                 m->output_dim,m->target_dim,m->normalize,
                  m->loss_func,m->optimizer,m->update_cnt,fin);
     if (cnt <= 0 || cnt == EOF) {
         fprintf(stderr,"In write_model: failed to write the header\n");
         return 0;
     }
     if (m->normalize) {
-        int D = m->input_dim;           /* Input dimension: may include bias */
-        int Dx = D - (1 - m->add_bias); /* Input dimension excluding bias    */
-        int ok = write_array((fArr2D)m->mean,1,Dx,fp,NULL,0);
+        int D = m->input_dim;
+        int ok = write_array((fArr2D)m->mean,1,D,fp,NULL,0);
         if (ok)
-            ok = write_array((fArr2D)m->sdev,1,Dx,fp,NULL,0);
+            ok = write_array((fArr2D)m->sdev,1,D,fp,NULL,0);
         if (!ok) {
             fprintf(stderr,"In write_model: failed to write mean, sdev data\n");
             return 0;
@@ -205,40 +209,49 @@ int write_model(const MODEL* m, int final, FILE* fp)
     }
     for (int i = 0; i < m->num_layers; i++) {
         LAYER* l = &m->layer[i];
-        int num_grads = fin ? 0 : l->num_grads;
-        cnt = fprintf(fp,"LAYER type '%c' num_grads %d\n",l->type,num_grads);
+        int num_opt_state = fin ? 0 : l->num_opt_state;
+        cnt = fprintf(fp,"LAYER type '%c' num_opt_state %d\n",
+                                                    l->type,num_opt_state);
         if (cnt <= 0 || cnt == EOF) {
             fprintf(stderr,
                     "In write_model: failed to write layer %d header\n",i);
             return 0;
         }
         switch (l->type) {
-            case 'd': ok = write_dense(l->dense,fp); break;
-            case 'l': ok = write_lstm(l->lstm,fp); break;
+            case 'd': ok = write_dense(l->dense,fin,fp); break;
+            case 'l': ok = write_lstm(l->lstm,fin,fp); break;
             case 't': ok = write_transformer(l->transformer,fin,fp); break;
-            case 'n': ok = write_negsample(l->negsample,fp); break;
+            case 'n': ok = write_negsample(l->negsample,fin,fp); break;
         }
         if (!ok) {
             fprintf(stderr,
                     "In write_model: failed to write layer %d data\n",i);
             return 0;
         }
-        if (num_grads > 0 && l->grads != NULL) {
-            /* grads is an array of pointers to arrays 
-             * see model_compile() for layout
+        if (num_opt_state > 0 && l->opt_state != NULL) {
+            /* opt_state is an array of pointers to arrays 
+             * see layer_alloc_opt_state() for layout
              */
             ok = 1; /* assume success */
             switch (l->type) {
-                case 'd': /* dense layer gradients */
-                    for (int j = 0; j < l->num_grads && ok; j++) {
-                        ok = write_array(l->grads[j],
-                                         l->dense->D,l->dense->S,fp,NULL,0);
+                case 'd': /* dense layer optimizer moments */
+                    for (int j = 0; j < l->num_opt_state && ok; j++) {
+                        int rows = (j < 2) ? l->dense->D : 1;
+                        ok = write_array(
+                                   l->opt_state[j],rows,l->dense->S,fp,NULL,0);
                     }
                 break;
-                case 'l': /* lstm layer gradients  */
-                    for (int j = 0; j < l->num_grads && ok; j++) {
-                        int rows = ((j / 4) % 2) ? l->lstm->S : l->lstm->D;
-                        ok = write_array(l->grads[j],rows,l->lstm->S,fp,NULL,0);
+                case 'l': /* lstm layer optimizer moments */
+                    for (int j = 0; j < l->num_opt_state && ok; j++) {
+                        int rows;
+                        if (j < 16) {
+                            int k = j % 8;
+                            rows = (k < 4) ? l->lstm->D : l->lstm->S;
+                        }
+                        else
+                            rows = 1;
+                        ok = write_array(
+                                   l->opt_state[j],rows,l->lstm->S,fp,NULL,0);
                     }
                 break;
                 case 't': /* transformer layer gradients (adamw m/v moments) */
@@ -247,9 +260,9 @@ int write_model(const MODEL* m, int final, FILE* fp)
                     int Dff = l->transformer->Dff;
                     int gr[10] = { D, D, D, D, D,   Dff, D, D, D, D };
                     int gc[10] = { D, D, D, D, Dff, D,   1, 1, 1, 1 };
-                    for (int j = 0; j < l->num_grads && ok; j++) {
+                    for (int j = 0; j < l->num_opt_state && ok; j++) {
                         int k = j % 10;
-                        ok = write_array(l->grads[j],gr[k],gc[k],fp,NULL,0);
+                        ok = write_array(l->opt_state[j],gr[k],gc[k],fp,NULL,0);
                     }
                 }
                 break;
@@ -257,14 +270,14 @@ int write_model(const MODEL* m, int final, FILE* fp)
                 {
                     int K = l->negsample->K;
                     int E = l->negsample->E;
-                    for (int j = 0; j < l->num_grads && ok; j++)
-                        ok = write_array(l->grads[j],K,E,fp,NULL,0);
+                    for (int j = 0; j < l->num_opt_state && ok; j++)
+                        ok = write_array(l->opt_state[j],K,E,fp,NULL,0);
                 }
                 break;
             }
             if (!ok) {
                 fprintf(stderr,"In write_model: "
-                        "failed to write layer %d gradient data\n",i);
+                        "failed to write layer %d optimizer state data\n",i);
                 return 0;
             }
         }

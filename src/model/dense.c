@@ -14,6 +14,7 @@
  * Parameters:
  *   units      - Number of cells (hidden size)
  *   activation - Can be one of "none", "sigmoid", "relu", "gelu", or "Softmax"
+ *   use_bias   - If set add bias
  *
  * Returns:
  *   Pointer to a dense neural network layer.
@@ -22,10 +23,11 @@
  *   - The neural network needs to be further intialized using dense_init()
  *     before it can be used.
  */
-DENSE* dense_create(int units, char* activation)
+DENSE* dense_create(int units, char* activation, int use_bias)
 {
     DENSE* l = allocmem(1,1,DENSE);
     l->S = units;
+    l->use_bias = (use_bias) ? 1 : 0;
     if (!strcasecmp("none",activation)) l->activation = 'n';
     if (!strcasecmp("sigmoid",activation)) l->activation = 's';
     if (!strcasecmp("relu",activation)) l->activation = 'r';
@@ -42,20 +44,24 @@ DENSE* dense_create(int units, char* activation)
 
 /* Initializes a feed forward neural network created by dense_create().
  *
- *   input_dim  - Size of input vectors (must include bias dimension)
+ *   input_dim  - Size of input vectors
  *   batch_size - Number of input vectors processed simultaneously
+ *   training   - 1: allocate backward/gradient buffers, 0 for inference-only
  *
  * Notes:
  *   - The layer's weights are initialized using glorot normal distribution 
  */
-void dense_init(DENSE* l, int input_dim, int batch_size)
+void dense_init(DENSE* l, int input_dim, int batch_size, int training)
 {
     l->D = input_dim;
     l->B = batch_size;
+    l->training = (training) ? 1: 0;
     l->Wx = allocmem(l->D,l->S,float);
     l->h = allocmem(l->B,l->S,float);
-    if (l->activation == 'g')
+    if (l->training && l->activation == 'g')
         l->z = allocmem(l->B,l->S,float);
+    if (l->use_bias)
+        l->b = allocmem(1,l->S,float);
 
     typedef float (*ArrDS)[l->S];
     ArrDS Wx = (ArrDS) l->Wx;
@@ -63,6 +69,12 @@ void dense_init(DENSE* l, int input_dim, int batch_size)
     for (int i = 0; i < l->D; i++)
         for (int j = 0; j < l->S; j++)
             Wx[i][j] = nrand(0.0,scale);
+
+    if (l->training) {
+        l->gWx = allocmem(l->D,l->S,float);
+        if (l->use_bias)
+            l->gb = allocmem(1,l->S,float);
+    }
 }
 
 /* Sets a new batch size.
@@ -82,7 +94,7 @@ void dense_set_batch_size(DENSE* l, int batch_size)
         l->B = batch_size;
         freemem(l->h);
         l->h = allocmem(l->B,l->S,float);
-        if (l->activation == 'g') {
+        if (l->training && l->activation == 'g') {
             freemem(l->z);
             l->z = allocmem(l->B,l->S,float);
         }
@@ -99,9 +111,11 @@ void dense_set_batch_size(DENSE* l, int batch_size)
 void dense_free(DENSE* l)
 {
     freemem(l->h);
-    if (l->activation == 'g')
-        freemem(l->z);
+    freemem(l->z);
     freemem(l->Wx);
+    freemem(l->gWx);
+    freemem(l->b);
+    freemem(l->gb);
     freemem(l);
 }
 

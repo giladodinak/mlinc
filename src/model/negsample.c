@@ -79,22 +79,31 @@ NEGSAMPLE* negsample_create(int vocab_size, int num_negatives)
  * Parameters:
  *   input_dim  - Size of input vectors (E)
  *   batch_size - Number of input vectors processed simultaneously
+ *   training   - 1: allocate backward/gradient buffers, 0 for inference-only
  *
  * Notes:
  *   The output weights are initialized using a normal distribution
  *   scaled by 1/sqrt(E).
  */
-void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size)
+void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training)
 {
     l->E = input_dim;
     l->B = batch_size;
-    l->Wo = allocmem(l->K,l->E,float);
     l->h = allocmem(l->B,l->E,float);
-    l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
-    l->ntouched = 0;
-    l->seen = allocmem(l->K,1,int);
-    for (int i = 0; i < l->K; i++)
-        l->seen[i] = -1;
+    l->Wo = allocmem(l->K,l->E,float);
+
+    training = (training) ? 1 : 0;
+    l->training = training;
+
+    if (training) {
+        l->gWo = allocmem(l->K,l->E,float);
+        l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
+        l->ntouched = 0;
+        l->seen = allocmem(l->K,1,int);
+        for (int i = 0; i < l->K; i++)
+            l->seen[i] = -1;
+    }
+        
     l->stamp = 0;
     l->dist = NULL;
     l->dist_size = 0;
@@ -121,7 +130,6 @@ void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size
  *
  * Notes:
  *   If this function is called before negsample_init(), it does nothing.
- *   Otherwise, the passthrough and touched buffers are resized.
  */
 void negsample_set_batch_size(NEGSAMPLE* l, int batch_size)
 {
@@ -131,8 +139,10 @@ void negsample_set_batch_size(NEGSAMPLE* l, int batch_size)
         l->B = batch_size;
         freemem(l->h);
         l->h = allocmem(l->B,l->E,float);
-        freemem(l->touched);
-        l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
+        if (l->training) {
+            freemem(l->touched);
+            l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
+        }
     }
     else
         fltclr(l->h,l->B * l->E);
@@ -149,6 +159,7 @@ void negsample_free(NEGSAMPLE* l)
 {
     freemem(l->h);
     freemem(l->Wo);
+    freemem(l->gWo);
     freemem(l->touched);
     freemem(l->seen);
     freemem(l);
@@ -177,7 +188,6 @@ void negsample_reset(NEGSAMPLE* l)
  *   l       - Pointer to the layer
  *   h       - Input embeddings [B][E]
  *   labels  - Target word indices [B][1] (stored as floats)
- *   gWo     - Output-weight gradients [K][E]
  *   dh      - Gradient w.r.t. h [B][E]
  *   cnt     - Number of valid rows in this batch (<= B)
  *   correct - If not NULL, incremented by the number of positions whose
@@ -189,10 +199,10 @@ void negsample_reset(NEGSAMPLE* l)
 float negsample_loss(NEGSAMPLE* restrict l,
                      const fArr2D restrict h_/*[B][E]*/,
                      const fArr2D restrict labels_/*[B][1]*/,
-                     fArr2D restrict gWo_/*[K][E]*/,
                      fArr2D restrict dh_/*[B][E]*/,
                      int cnt, int* correct)
 {
+    if (!l->training) return 1e30;
     const int E = l->E;
     const int K = l->K;
     const int n_neg = l->n_neg;
@@ -202,7 +212,7 @@ float negsample_loss(NEGSAMPLE* restrict l,
     ArrBE h = (ArrBE) h_;
     ArrBE dh = (ArrBE) dh_;
     ArrKE Wo = (ArrKE) l->Wo;
-    ArrKE gWo = (ArrKE) gWo_;
+    ArrKE gWo = (ArrKE) l->gWo;
     const float* labels = (const float*) labels_;
 
     if (l->dist == NULL) {
@@ -231,7 +241,7 @@ float negsample_loss(NEGSAMPLE* restrict l,
         loss -= logf(p + 1e-8);
         float grad = p - 1.0; /* d loss / d dot */
 
-        prep_row(l,gWo_,target);
+        prep_row(l,l->gWo,target);
         for (int j = 0; j < E; j++) {
             gWo[target][j] += grad * h[i][j];
             dh[i][j] += grad * Wo[target][j];
@@ -269,7 +279,7 @@ float negsample_loss(NEGSAMPLE* restrict l,
             loss -= logf(p + 1e-8f);
             grad = 1.0f - p; /* d loss / d dot */
 
-            prep_row(l,gWo_,neg);
+            prep_row(l,l->gWo,neg);
             for (int j = 0; j < E; j++) {
                 gWo[neg][j] += grad * h[i][j];
                 dh[i][j]    += grad * Wo[neg][j];
@@ -288,17 +298,17 @@ float negsample_loss(NEGSAMPLE* restrict l,
  *
  * Parameters:
  *   l             - Pointer to the layer
- *   gWo           - Output-weight gradients [K][E]
  *   learning_rate - Gradient multiplier
  *   weight_decay  - Weight magnitude suppressor (0 to disable)
  */
-void negsample_update(NEGSAMPLE* restrict l, fArr2D gWo_,
+void negsample_update(NEGSAMPLE* restrict l,
                       float learning_rate, float weight_decay)
 {
+    if (!l->training) return;
     const int E = l->E;
     typedef float (*ArrKE)[E];
     ArrKE Wo  = (ArrKE) l->Wo;
-    ArrKE gWo = (ArrKE) gWo_;
+    ArrKE gWo = (ArrKE) l->gWo;
 
     for (int r = 0; r < l->ntouched; r++) {
         int i = l->touched[r];

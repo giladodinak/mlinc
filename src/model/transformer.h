@@ -28,7 +28,11 @@
  * preceded by token and positional embeddings and followed by a linear
  * projection to vocabulary logits.
  *
- * Note: The original paper uses ReLU. This implementation uses GELU instead.
+ * Notes:
+ *   - The original paper uses ReLU. This implementation uses GELU instead.
+ *
+ *   - In the pepr the FFN use a bias term (Sec. 3.3. Eq. 2).
+ *     This implementation omits the bias.
  */
 typedef struct {
     int B;              /* Batch size                                    */
@@ -48,13 +52,11 @@ typedef struct {
     fArr2D drop_mask1;  /* Dropout mask after MHA     [BT][D]            */
     fArr2D drop_mask2;  /* Dropout mask after FFN     [BT][D]            */
     fArr2D d_norm2_in;  /* Grad w.r.t. ffn2 output / norm2 input [BT][D] */
-    fArr2D d_ffn1_in;   /* Grad w.r.t. ffn1 input                [BT][D] */
+    fArr2D d_ffn1_in;   /* Grad w.r.t. ffn1 input              [BT][Dff] */
     fArr2D d_norm1_in;  /* Grad w.r.t. mha output / norm1 input  [BT][D] */
     fArr2D d_mha_out;   /* Grad w.r.t. mha output                [BT][D] */
     fArr2D d_ffn2_in;   /* Masked grad into FFN branch (post-drop2) [BT][D] */
     fArr2D d_mha_masked;/* Masked grad into MHA branch (post-drop1) [BT][D] */
-    fArr2D gWx1;        /* Gradient of ffn1->Wx  [D][Dff]                */
-    fArr2D gWx2;        /* Gradient of ffn2->Wx  [Dff][D]                */
     fVec dg1;           /* Gradient of norm1->gamma  [D]                 */
     fVec db1;           /* Gradient of norm1->beta   [D]                 */
     fVec dg2;           /* Gradient of norm2->gamma  [D]                 */
@@ -258,7 +260,7 @@ static inline void transformer_forward_step(TRANSFORMER* restrict l,
  *       (X feeds both the MHA branch and the AddNorm1 residual)
  *
  * Weight gradients written to:
- *   l->gWx1, l->gWx2          (ffn1, ffn2 weights)
+ *   l->ffn1->gWx, l->ffn2->gWx  (ffn1, ffn2 weights)
  *   l->mha->gWq/gWk/gWv/gWo  (MHA weights)
  *   l->dg1/db1, l->dg2/db2   (norm1, norm2 gamma/beta)
  */
@@ -304,9 +306,9 @@ static inline void transformer_backward(TRANSFORMER* restrict l,
      * gWx1 = norm1_out.T @ d_ffn1_in
      * d_norm1_in = d_ffn1_in @ Wx1.T (through gelu derivative)
      */
-    dense_backward(l->ffn2,d_ffn2_in,l->ffn1->h,l->gWx2,(fArr2D) d_ffn1_in,lyr);
+    dense_backward(l->ffn2,d_ffn2_in,l->ffn1->h,(fArr2D) d_ffn1_in,lyr);
 
-    dense_backward(l->ffn1,(fArr2D) d_ffn1_in,norm1_out,l->gWx1,d_norm1_in,lyr);
+    dense_backward(l->ffn1,(fArr2D) d_ffn1_in,norm1_out,d_norm1_in,lyr);
 
     /* Residual accumulation for norm2 skip connection:
      * d_norm1_in += d_norm2_in

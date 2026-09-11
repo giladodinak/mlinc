@@ -8,7 +8,7 @@
 #include "loss.h"
 #include "dense.h"
 
-static void dense_update_lin(fArr2D Wx_,fArr2D gWx_,float lr,int D, int S);
+static void dense_update_lin(DENSE* l, float lr);
 
 /* Trains a Multi Layer Perceptronn to predict 
  * the values of f(x) = (x**2 + 10* sin(x))
@@ -28,37 +28,33 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     const int L = layers_cnt + 1;
     const int M = (int) ((range[1] - range[0]) / range[2] + 0.5);
     printf("%d layers (including output layer), %d input samples\n",L,M);
-    const int D = 2;  /* Input vector dimension (including bisas)   */
+    const int D = 1;  /* Input vector dimension                    */
     const int N = 1;  /* Output vector dimension                    */
-    float X[M][D];    /* X[][0] is x values, X[][1] is bias == 1.0  */
+    float X[M][D];    /* X[][0] is x values                        */
     float yt[M][N];   /* True labels vector yt = f(X)               */
     float y[M][N];    /* Output prediction (single dimension)       */
     float x = range[0];
     /* Initialize data */
     for (int i = 0; i < M ; i++) {
         X[i][0] = x;
-        X[i][1] = 1.0;
         yt[i][0] = (pow(x,2) + 10.0 * sin(x));
         x += range[2];
     }
     /* Create layers */
     DENSE* l[L];
     for (int j = 0; j < L - 1; j++)
-        l[j] = dense_create(layers[j],"relu");
-    l[L - 1] = dense_create(N,"none");
+        l[j] = dense_create(layers[j],"relu",1);
+    l[L - 1] = dense_create(N,"none",1);
 
     /* Initialize layers */
-    dense_init(l[0],D,M);
+    dense_init(l[0],D,M,1);
     for (int j = 1; j < L; j++)
-        dense_init(l[j],layers[j - 1],M);
+        dense_init(l[j],layers[j - 1],M,1);
 
-    /* Allocate memory for gradients */
-    fArr2D dy[L];  /* Gradients with respect to the inputs  */
-    fArr2D gWx[L]; /* Gradients with respect to the weights */
-    for (int j = 0; j < L; j++) {
+    /* Allocate memory for input gradients */
+    fArr2D dy[L];
+    for (int j = 0; j < L; j++)
         dy[j] = allocmem(l[j]->B,l[j]->S,float);
-        gWx[j] = allocmem(l[j]->D,l[j]->S,float);
-    }
 
     float losses[epochs];
     
@@ -76,11 +72,11 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
         /* Backward pass */
         dLdy_mean_square_error(y,yt,dy[L - 1],M,N);
         for (int j = L - 1; j > 0; j--)
-            dense_backward(l[j],dy[j],yp[j - 1],gWx[j],dy[j - 1],0);
-        dense_backward(l[0],dy[0],X,gWx[0],NULL,0);
+            dense_backward(l[j],dy[j],yp[j - 1],dy[j - 1],0);
+        dense_backward(l[0],dy[0],X,NULL,0);
         /* Update weights */
         for (int j = 0; j < L; j++)
-            dense_update_lin(l[j]->Wx,gWx[j],learning_rate,l[j]->D,l[j]->S);
+            dense_update_lin(l[j],learning_rate);
     }
     printf("\n");
     printf("X:  ");
@@ -96,7 +92,6 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     for (int i = 0; i < L; i++) {
         dense_free(l[i]);
         freemem(dy[i]);
-        freemem(gWx[i]);
     }
 #ifdef HAS_PLOT
     {
@@ -114,23 +109,19 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     return 0;
 }
 
-/* Updates dense layer's weights in a linear way: 
- * weight = weight - learning_rate * weight_gradient
- * Wx:  weight matrix DxS
- * gWx: gradient matrix DxS
- * lr:  learning_rate
- */
-static void dense_update_lin(fArr2D Wx_/*[D][S]*/,
-                             fArr2D gWx_/*[D][S]*/,
-                             float lr,
-                             int D, int S)
+/* Updates dense layer's weights and bias in a linear way. */
+static void dense_update_lin(DENSE* l, float lr)
 {
-    typedef float (*ArrDS)[S];
-    ArrDS Wx = (ArrDS) Wx_;
-    ArrDS gWx = (ArrDS) gWx_;
-    for (int i = 0; i < D; i++)
-        for (int j = 0; j < S; j++)
+    typedef float (*ArrDS)[l->S];
+    ArrDS Wx = (ArrDS) l->Wx;
+    ArrDS gWx = (ArrDS) l->gWx;
+    for (int i = 0; i < l->D; i++)
+        for (int j = 0; j < l->S; j++)
             Wx[i][j] -= lr * gWx[i][j];
+
+    if (l->use_bias)
+        for (int j = 0; j < l->S; j++)
+            l->b[j] -= lr * l->gb[j];
 }
 
 int main()

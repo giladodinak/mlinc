@@ -6,7 +6,7 @@
 #include "activation.h"
 
 typedef struct lstm_s {
-  int D;           /* Input vector dimension (including bias)       */
+  int D;           /* Input vector dimension                        */
   int S;           /* Number of units, size of hidden state         */
   int B;           /* Number of input vectors in a batch            */
   /* Note that B also is the sequence length (number of time steps) */
@@ -15,6 +15,8 @@ typedef struct lstm_s {
    * forward passes only. Gradients do NOT propagate across sequences
    * (i.e., truncated BPTT with truncation at sequence boundaries).
    */
+  char use_bias;   /* 1 - add bias, 0 - do not add bias             */
+  char training;   /* 1 - training mode, 0 - inference only         */
   fArr2D Wf;       /* Weights matrix [D][S]                         */
   fArr2D Wi;       /* Weights matrix [D][S]                         */
   fArr2D Wc;       /* Weights matrix [D][S]                         */
@@ -23,6 +25,10 @@ typedef struct lstm_s {
   fArr2D Ui;       /* Weights matrix [S][S]                         */
   fArr2D Uc;       /* Weights matrix [S][S]                         */
   fArr2D Uo;       /* Weights matrix [S][S]                         */
+  fVec bf;         /* Bias vector [S] (only if use_bias == 1)       */
+  fVec bi;         /* Bias vector [S] (only if use_bias == 1)       */
+  fVec bc;         /* Bias vector [S] (only if use_bias == 1)       */
+  fVec bo;         /* Bias vector [S] (only if use_bias == 1)       */
   fArr2D f;        /* Forget gate matrix [B][S]                     */
   fArr2D i;        /* Input  gate matrix [B][S]                     */
   fArr2D o;        /* Output gate matrix [B][S]                     */
@@ -31,6 +37,19 @@ typedef struct lstm_s {
   fArr2D h;        /* Hidden state matrix [B+1][S]                  */
   fVec ph;         /* Previous batch last hidden state vector [S]   */
   fVec pc;         /* Previous batch last cell state vector [S]     */
+  /* Gradients (only if training == 1) */
+  fArr2D gWf;      /* Weight gradients [D][S]                       */
+  fArr2D gWi;      /* Weight gradients [D][S]                       */
+  fArr2D gWc;      /* Weight gradients [D][S]                       */
+  fArr2D gWo;      /* Weight gradients [D][S]                       */
+  fArr2D gUf;      /* Weight gradients [S][S]                       */
+  fArr2D gUi;      /* Weight gradients [S][S]                       */
+  fArr2D gUc;      /* Weight gradients [S][S]                       */
+  fArr2D gUo;      /* Weight gradients [S][S]                       */
+  fVec gbf;        /* Bias gradients [S] (use_bias && training)     */
+  fVec gbi;        /* Bias gradients [S] (use_bias && training)     */
+  fVec gbc;        /* Bias gradients [S] (use_bias && training)     */
+  fVec gbo;        /* Bias gradients [S] (use_bias && training)     */
 } LSTM;
 
 /* Creates a long short term memory (LSTM) neural network.
@@ -38,6 +57,7 @@ typedef struct lstm_s {
  * Parameters:
  *   units      - Number of cells (hidden size)
  *   stateful   - If not zero, maintain state across batches.
+ *   use_bias   - If not zero, add a per-gate bias.
  * 
  * Returns:
  *   Pointer to an LSTM neural network layer.
@@ -46,20 +66,21 @@ typedef struct lstm_s {
  *   - The neural network needs to be further initialized using lstm_init()
  *     before it can be used.
  */
-LSTM* lstm_create(int units, int stateful);
+LSTM* lstm_create(int units, int stateful, int use_bias);
 
 /* Initializes an LSTM neural network created by lstm_create().
  *
  * Parameters:
- *   input_dim  - Size of input vectors (must include bias dimension)
+ *   input_dim  - Size of input vectors
  *   batch_size - Number of input vectors processed simultaneously
+ *   training   - 1: allocate gradient buffers, 0 for inference-only
  *
  * Notes:
  *   - Kernel weights (Wx) are initialized using Glorot normal distribution.
  *   - Recurrent weights (Ux) are initialized using orthogonal uniform 
  *     distribution.
  */
-void lstm_init(LSTM* l, int input_dim, int batch_size);
+void lstm_init(LSTM* l, int input_dim, int batch_size, int training);
 
 /* Sets a new batch size.
  *
@@ -89,6 +110,15 @@ void lstm_reset(LSTM* l);
 static inline void lstm_activate(fVec v, int S)
 {
    sigmoid((fArr2D) v,1,S);
+}
+
+/* Adds bias vector b to a gate pre-activation vector v (length S) */
+static inline void lstm_add_bias(fVec v_, const fVec b_, int S)
+{
+    float* v = (float*) v_;
+    const float* b = (const float*) b_;
+    for (int j = 0; j < S; j++)
+        v[j] += b[j];
 }
 
 /* Performs LSTM layer training/prediction's forward pass.
@@ -161,18 +191,22 @@ static inline fArr2D lstm_forward(LSTM* restrict l,
         /* f[t] = activate(X[t] @ Wf + h[t-1] * Uf) */
         addvecmatmul(f[t],x[t],l->Wf,D,S);
         addvecmatmul(f[t],h[t-1],l->Uf,S,S);
+        if (l->use_bias) lstm_add_bias(f[t],l->bf,S);
         lstm_activate(f[t],S);
         /* i[t] = activate(X[t] @ Wi + h[t-1] * Ui) */
         addvecmatmul(i[t],x[t],l->Wi,D,S);
         addvecmatmul(i[t],h[t-1],l->Ui,S,S);
+        if (l->use_bias) lstm_add_bias(i[t],l->bi,S);
         lstm_activate(i[t],S);
         /* o[t] = activate(X[t] @ Wo + h[t-1] * Uo) */
         addvecmatmul(o[t],x[t],l->Wo,D,S);
         addvecmatmul(o[t],h[t-1],l->Uo,S,S);
+        if (l->use_bias) lstm_add_bias(o[t],l->bo,S);
         lstm_activate(o[t],S);
         /* cc[t] = tanh(X[t] @ Wc + h[t-1] @ Uc) */
         addvecmatmul(cc[t],x[t],l->Wc,D,S);
         addvecmatmul(cc[t],h[t-1],l->Uc,S,S);
+        if (l->use_bias) lstm_add_bias(cc[t],l->bc,S);
         for (int j = 0; j < S; j++)
             cc[t][j] = tanh(cc[t][j]);
         /* c[t] = f[t] * c[t-1] + i[t] * cc[t] */
@@ -200,8 +234,6 @@ static inline float lstm_d_activate(float x)
  *   dY   - Output vector gradient of lstm_create's units dimension
  *   X    - Array of input vectors BxD, where B is the number of input
  *          vectors, and D is the number of features in each vector
- *   g    - Array of 8 gradient matrices Wf Wi Wc Wo Uf Ui Uc Uo of the 
- *          same dimensions as their corresponding weight matrices
  *   dX   - Output parameter for the input vector gradient (if not NULL)
  *   lyr  - Ordinal number of this layer in a model (not used)
  * 
@@ -209,11 +241,10 @@ static inline float lstm_d_activate(float x)
  *   None
  * 
  * Note:
- *   - Calculates the weight matrices gradients with respect to the weights 
- *     and adds them to the matrices in g.
+ *   - Calculates the weight and bias gradients and stores them in the
+ *     layer's own gradient buffers (gWf..gUo, and gbf..gbo if use_bias).
  *   - Calculates the input vector gradient and returns it in dx, if dx is 
  *     not NULL
- *   - Calculates and returns nh and nc
  *   - When stateful is enabled, forward state is carried across calls,
  *     but gradients do not propagate across sequence boundaries.
  *   - In a multi-layered neural network, except the last layer, dy is the 
@@ -224,7 +255,6 @@ static inline float lstm_d_activate(float x)
 static inline void lstm_backward(LSTM* restrict l,
                                  const fArr2D restrict dY/*[B][S]*/,
                                  const fArr2D restrict X/*[B][D]*/,
-                                 fArr2D* g/*Gradient matrices*/,
                                  fArr2D restrict dX/*[B][D]*/,
                                  int lyr)
 {
@@ -247,19 +277,34 @@ static inline void lstm_backward(LSTM* restrict l,
     ArrBS h = ((ArrB1S) l->h) + 1;
     /* Layer's gradients */
     typedef float (*ArrDS)[S];
-    ArrDS gWf = (ArrDS) g[0];
-    ArrDS gWi = (ArrDS) g[1];
-    ArrDS gWc = (ArrDS) g[2];
-    ArrDS gWo = (ArrDS) g[3];
-    for (int i = 0; i < 4; i++)
-        fltclr(g[i],D * S);
+    ArrDS gWf = (ArrDS) l->gWf;
+    ArrDS gWi = (ArrDS) l->gWi;
+    ArrDS gWc = (ArrDS) l->gWc;
+    ArrDS gWo = (ArrDS) l->gWo;
+    fltclr(l->gWf,D * S);
+    fltclr(l->gWi,D * S);
+    fltclr(l->gWc,D * S);
+    fltclr(l->gWo,D * S);
     typedef float (*ArrS2)[S];
-    ArrS2 gUf = (ArrS2) g[4];
-    ArrS2 gUi = (ArrS2) g[5];
-    ArrS2 gUc = (ArrS2) g[6];
-    ArrS2 gUo = (ArrS2) g[7];
-    for (int i = 4; i < 8; i++)
-        fltclr(g[i],S * S);
+    ArrS2 gUf = (ArrS2) l->gUf;
+    ArrS2 gUi = (ArrS2) l->gUi;
+    ArrS2 gUc = (ArrS2) l->gUc;
+    ArrS2 gUo = (ArrS2) l->gUo;
+    fltclr(l->gUf,S * S);
+    fltclr(l->gUi,S * S);
+    fltclr(l->gUc,S * S);
+    fltclr(l->gUo,S * S);
+    /* Bias gradient accumulators (summed over time steps) */
+    float* gbf = (float*) l->gbf;
+    float* gbi = (float*) l->gbi;
+    float* gbc = (float*) l->gbc;
+    float* gbo = (float*) l->gbo;
+    if (l->use_bias) {
+        fltclr(l->gbf,S);
+        fltclr(l->gbi,S);
+        fltclr(l->gbc,S);
+        fltclr(l->gbo,S);
+    }
     /* Future time step gradient */
     float dh_next[S];
     float dc_next[S];
@@ -279,6 +324,9 @@ static inline void lstm_backward(LSTM* restrict l,
             do_[j] = dh[j] * tanh(c[t][j]) * lstm_d_activate(o[t][j]);
         addoutermul(gWo,x[t],do_,D,S);
         addoutermul(gUo,h[t-1],do_,S,S);
+        if (l->use_bias)
+            for (int j = 0; j < S; j++)
+                gbo[j] += do_[j];
         /* Update cell state gradient */
         /* dc = dh * o[t] * tanh_derivative(c[t]) + dc_next */
         float dc[S];
@@ -294,6 +342,9 @@ static inline void lstm_backward(LSTM* restrict l,
             dcc[j] = dc[j] * i[t][j] * d_tanh_x(cc[t][j]);
         addoutermul(gWc,x[t],dcc,D,S);
         addoutermul(gUc,h[t-1],dcc,S,S);
+        if (l->use_bias)
+            for (int j = 0; j < S; j++)
+                gbc[j] += dcc[j];
 
         /* Update input gate gradient */
         float di[S];
@@ -301,6 +352,9 @@ static inline void lstm_backward(LSTM* restrict l,
             di[j] = dc[j] * cc[t][j] * lstm_d_activate(i[t][j]);
         addoutermul(gWi,x[t],di,D,S);
         addoutermul(gUi,h[t-1],di,S,S);
+        if (l->use_bias)
+            for (int j = 0; j < S; j++)
+                gbi[j] += di[j];
 
         /* Update forget gate gradient */
         float df[S];
@@ -308,6 +362,9 @@ static inline void lstm_backward(LSTM* restrict l,
             df[j] = dc[j] * c[t-1][j] * lstm_d_activate(f[t][j]);
         addoutermul(gWf,x[t],df,D,S);
         addoutermul(gUf,h[t-1],df,S,S); 
+        if (l->use_bias)
+            for (int j = 0; j < S; j++)
+                gbf[j] += df[j];
         
         /* Compute gradients for the previous layer */
         fltclr(dh_next,S);

@@ -45,9 +45,6 @@ static inline void reset_state(MODEL* m)
  * between model updates.
  * input_dim is the dimension of the model first layer input.
  *
- * If add_bias is zero, input_dim includes a bias dimension
- * whose value is 1.0; otherwise, a bias dimension is added internally.
- *
  * If normalize is not zero, normalizes input feature vectors by feature,
  * to have mean of zero and standard deviation of one.
  *
@@ -56,14 +53,13 @@ static inline void reset_state(MODEL* m)
  * Note that the output dimension is determined by the size of the last layer.
  */
 MODEL* model_create(int num_layers,
-                    int batch_size, int input_dim, int add_bias, int normalize)
+                    int batch_size, int input_dim, int normalize)
 {
     MODEL* m = allocmem(1,1,MODEL);
     m->num_layers = num_layers;
     m->layer = allocmem(1,m->num_layers,LAYER);
     m->batch_size = batch_size;
     m->input_dim = input_dim;
-    m->add_bias = (add_bias) ? 1 : 0;
     m->normalize = (normalize) ? 1 : 0;
     m->compiled = 0;
     m->final = 0;
@@ -75,10 +71,10 @@ void model_free(MODEL* m)
 {
     for (int i = 0; i < m->num_layers; i++) {
         layer_free(&m->layer[i]);
-        if (m->layer[i].grads) {
-            for (int j = 0; j < m->layer[i].num_grads; j++)
-                freemem(m->layer[i].grads[j]);
-            freemem(m->layer[i].grads);
+        if (m->layer[i].opt_state) {
+            for (int j = 0; j < m->layer[i].num_opt_state; j++)
+                freemem(m->layer[i].opt_state[j]);
+            freemem(m->layer[i].opt_state);
         }
     }
     freemem(m->ctc);
@@ -169,13 +165,12 @@ void model_compile(MODEL* m, const char* loss_func, const char* optimizer)
     }
     m->compiled = 1;
     if (m->normalize) {
-        int D = m->input_dim;           /* Input dimension: may include bias */
-        int Dx = D - (1 - m->add_bias); /* Input dimension excluding bias    */
-        m->mean = allocmem(1,Dx,float);
-        m->sdev = allocmem(1,Dx,float);
+        int D = m->input_dim;
+        m->mean = allocmem(1,D,float);
+        m->sdev = allocmem(1,D,float);
     }
 
-    int D = m->input_dim + m->add_bias;
+    int D = m->input_dim;
     int B = m->batch_size;
     int L = m->num_layers;
     for (int i = 0; i < L; i++) {
@@ -194,7 +189,7 @@ void model_compile(MODEL* m, const char* loss_func, const char* optimizer)
 
     /* Allocate gradient arrays */
     for (int i = 0; i < m->num_layers; i++)
-        layer_alloc_grads(&m->layer[i],m->optimizer);
+        layer_alloc_opt_state(&m->layer[i],m->optimizer);
 }
 
 /* Sets a new batch size.
@@ -316,9 +311,7 @@ void model_fit(MODEL* m,
     int N = m->output_dim;          /* Dimension of model output vectors */
     int Nt = m->target_dim;         /* Target width (1 for negsample)    */
     int B = m->batch_size;          /* Batch size (all layers)           */
-    int D = m->input_dim;           /* Input dimension: may include bias */
-    int Dx = D - (1 - m->add_bias); /* Input dimension excluding bias    */
-    int Db = D + m->add_bias;       /* Input dimension including bias    */
+    int D = m->input_dim;           /* Input dimension                   */
     
     int MTr = 0;           /* Total number of training samples        */
     if (lenTr != NULL) {
@@ -340,12 +333,12 @@ void model_fit(MODEL* m,
     VecDx mean = (VecDx) m->mean;
     VecDx sdev = (VecDx) m->sdev;
     if (m->normalize)
-        calculate_mean_sdev(xTr,MTr,D,mean,sdev,D - Dx);
+        calculate_mean_sdev(xTr,MTr,D,mean,sdev,0);
 
-    BATCH* bTr = batch_create(xTr,D,yTr,Nt,B,lenTr,numTr,shuffle,m->add_bias);
+    BATCH* bTr = batch_create(xTr,D,yTr,Nt,B,lenTr,numTr,shuffle,0);
     BATCH* bVd = NULL;
     if (MVd > 0) /* Notice validation data not shuffled */
-        bVd = batch_create(xVd,D,yVd,Nt,B,lenVd,numVd,0,m->add_bias);
+        bVd = batch_create(xVd,D,yVd,Nt,B,lenVd,numVd,0,0);
         
     fArr2D dy[L];  /* Gradients with respect to the inputs          */
     for (int i = 0; i < L; i++)
@@ -353,9 +346,9 @@ void model_fit(MODEL* m,
                          layer_output_dim(&m->layer[i]),float);
     
     /* Allocate memory for one batch */
-    typedef float (*ArrBDb)[Db];
+    typedef float (*ArrBD)[D];
     typedef float (*ArrBN)[Nt];
-    ArrBDb x = (ArrBDb) allocmem(B,Db,float); /* Array of samples      */
+    ArrBD x = (ArrBD) allocmem(B,D,float);    /* Array of samples      */
     ArrBN yt = (ArrBN) allocmem(B,Nt,float);  /* Array of true outputs */
 
     /* Track training loss, accuracy and model improvement across epochs */
@@ -391,7 +384,7 @@ void model_fit(MODEL* m,
             if (cnt == 0)
                 break;
             if (m->normalize)
-                normalize(x,B,Db,mean,sdev,1);
+                normalize(x,B,D,mean,sdev,0);
             model_batch_forward(m,x,1,yp);
             sample_cnt += cnt;
 
@@ -419,14 +412,10 @@ void model_fit(MODEL* m,
                 case 'N': {
                     /* Negative-sampling : loss and grad w.r.t. h are
                      * computed here (h = yp[L-1], identity forward); 
-                     * the gradient into the stack is written to dy[L-1]
-                     * and the output-weight grads accumulate into the
-                     * layer's grads.
                      */
                     NEGSAMPLE* head = m->layer[L - 1].negsample;
                     int correct = 0;
                     loss += negsample_loss(head,yp[L - 1],yt,
-                                           m->layer[L - 1].grads[0],
                                            dy[L - 1],cnt,&correct);
                     match_cnt += correct;
                 }
@@ -468,7 +457,7 @@ void model_fit(MODEL* m,
                 if (cnt == 0)
                     break;
                 if (m->normalize)
-                    normalize(x,B,Db,mean,sdev,1); 
+                    normalize(x,B,D,mean,sdev,0); 
                 model_batch_forward(m,x,0,yp);
                 v_sample_cnt += cnt;
 
@@ -493,7 +482,6 @@ void model_fit(MODEL* m,
                         NEGSAMPLE* head = m->layer[L - 1].negsample;
                         int correct = 0;
                         v_loss += negsample_loss(head,yp[L - 1],yt,
-                                                 m->layer[L - 1].grads[0],
                                                  dy[L - 1],cnt,&correct);
                         v_match_cnt += correct;
                     }
@@ -536,12 +524,12 @@ void model_fit(MODEL* m,
     if (final) {
         m->final = 1;
         for (int i = 0; i < m->num_layers; i++) {
-            if (m->layer[i].grads) {
-                for (int j = 0; j < m->layer[i].num_grads; j++)
-                    freemem(m->layer[i].grads[j]);
-                free(m->layer[i].grads);
-                m->layer[i].num_grads = 0;
-                m->layer[i].grads = NULL;
+            if (m->layer[i].opt_state) {
+                for (int j = 0; j < m->layer[i].num_opt_state; j++)
+                    freemem(m->layer[i].opt_state[j]);
+                free(m->layer[i].opt_state);
+                m->layer[i].num_opt_state = 0;
+                m->layer[i].opt_state = NULL;
             }
         }
     }
@@ -564,9 +552,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
      */
     int No = (m->loss_func == 'N') ? m->layer[L - 1].negsample->K : N;
     int B = m->batch_size;    /* Batch size (all layers)           */
-    int D = m->input_dim;     /* Input dimension: may include bias */
-    int Dx = D - (1 - m->add_bias); (void) Dx; /* Input dim excluding bias */
-    int Db = D + m->add_bias; /* Input dimension including bias    */
+    int D = m->input_dim;     /* Input dimension                   */
     
     typedef float (*ArrMD)[D];
     typedef float (*ArrMNo)[No];
@@ -577,10 +563,10 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     VecDx mean = (VecDx) m->mean;
     VecDx sdev = (VecDx) m->sdev;
     /* Allocate memory for one batch */
-    typedef float (*ArrBDb)[Db];
-    ArrBDb xb = (ArrBDb) allocmem(B,Db,float); /* Array of samples      */
+    typedef float (*ArrBD)[D];
+    ArrBD xb = (ArrBD) allocmem(B,D,float);    /* Array of samples      */
 
-    BATCH* b = batch_create(x,D,NULL,0,B,NULL,len,0,m->add_bias);
+    BATCH* b = batch_create(x,D,NULL,0,B,NULL,len,0,0);
     reset_state(m);
     for (;;) {
         fArr2D yp[L]; /* Pointers to layers' prediction arrays */
@@ -588,7 +574,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
         if (cnt == 0)
             break;
         if (m->normalize)
-            normalize(xb,B,Db,mean,sdev,1); 
+            normalize(xb,B,D,mean,sdev,0); 
         model_batch_forward(m,xb,0,yp);
         if (m->loss_func == 'N') {
             /* Full-vocabulary pass, then normalize to a distribution. */
