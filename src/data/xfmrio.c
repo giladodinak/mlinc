@@ -94,9 +94,6 @@ TRANSFORMER* read_transformer(FILE* fp)
         l->d_ffn2_in = allocmem(l->BT,l->D,float);
         l->d_mha_masked = allocmem(l->BT,l->D,float);
 
-        l->gWx1 = allocmem(l->D,l->Dff,float);
-        l->gWx2 = allocmem(l->Dff,l->D,float);
-
         l->dg1 = allocmem(l->D,1,float);
         l->db1 = allocmem(l->D,1,float);
         l->dg2 = allocmem(l->D,1,float);
@@ -148,11 +145,11 @@ int write_transformer(const TRANSFORMER* l, int final, FILE* fp)
         fprintf(stderr,"In write_transformer: failed to write mha\n");
         return 0;
     }
-    if (!write_dense(l->ffn1,fp)) {
+    if (!write_dense(l->ffn1,final,fp)) {
         fprintf(stderr,"In write_transformer: failed to write ffn1\n");
         return 0;
     }
-    if (!write_dense(l->ffn2,fp)) {
+    if (!write_dense(l->ffn2,final,fp)) {
         fprintf(stderr,"In write_transformer: failed to write ffn2\n");
         return 0;
     }

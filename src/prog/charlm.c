@@ -248,6 +248,11 @@ static char** read_list(const char* path, int* count)
             if (n == cap) {
                 cap *= 2;
                 names = (char**) realloc(names,cap * sizeof(char*));
+                if (names == NULL) {
+                    fflush(stdout);
+                    fprintf(stderr,"\nIn read_list: out of memory in realloc\n");
+                    exit(-1);
+                }
             }
             names[n++] = nm;
         }
@@ -359,8 +364,7 @@ static void dataset_build(DATASET* d, const BUFFER* b, const VOCAB* v,
     long num = max_windows;
     if (max_seqs > 0 && (long) max_seqs < max_windows) {
         num = max_seqs;
-        stride = usable / num;
-        if (stride < 1) stride = 1;
+        stride = usable / num; /* stride >= T */
     }
 
     int K = v->K;
@@ -464,17 +468,17 @@ static MODEL* build_model(const CONFIG* c, const char* pattern, int nmid, int K)
     const int T = c->block;
     const int D = c->dim;
 
-    int L = nmid + 2;                   /* embedding + middle + output   */
-    MODEL* m = model_create(L,T,K,1,0); /* batch==T, one-hot K, add bias */
+    int L = nmid + 2;                   /* embedding + middle + output */
+    MODEL* m = model_create(L,T,K,0);   /* batch==T, one-hot K         */
 
-    model_add(m,dense_create(D,"none"),"dense");    /* embedding    */
+    model_add(m,dense_create(D,"none",1),"dense");    /* embedding  */
     for (int i = 0; i < nmid; i++) {
         if (pattern[i] == 'T')
             model_add(m,transformer_create(c->heads,T,D,c->ffn,0),"transformer");
         else
-            model_add(m,lstm_create(D,0),"lstm");   /* stateful=0   */
+            model_add(m,lstm_create(D,0,1),"lstm");   /* stateful=0 */
     }
-    model_add(m,dense_create(K,"Softmax"),"dense"); /* vocab output */
+    model_add(m,dense_create(K,"Softmax",1),"dense"); /* vocab output */
 
     model_compile(m,"cross-entropy","adamw");
     return m;

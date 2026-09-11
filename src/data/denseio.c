@@ -20,10 +20,12 @@
  */
 DENSE* read_dense(FILE* fp)
 {
-    int D, S, B;
+    int D, S, B, use_bias, training;
     char c;
-    int cnt = fscanf(fp," DENSE D %d S %d B %d activation '%c'\n",&D,&S,&B,&c);
-    if (cnt < 4 || cnt == EOF) {
+    int cnt = fscanf(fp," DENSE D %d S %d B %d activation '%c' "
+                        "use_bias %d training %d\n",
+                        &D,&S,&B,&c,&use_bias,&training);
+    if (cnt < 6 || cnt == EOF) {
         fprintf(stderr,"In read_dense: failed to read the header\n");
         return NULL;
     }
@@ -31,23 +33,45 @@ DENSE* read_dense(FILE* fp)
         fprintf(stderr,"In read_dense: invalid activation code\n");
         return NULL;
     }
+    use_bias = (use_bias) ? 1 : 0;
+    training = (training) ? 1 : 0;
+
     DENSE* d = allocmem(1,1,DENSE);
     d->S = S;
     d->D = D;
     d->B = B;
     d->activation = c;
-    if (c == 'g') d->z = allocmem(d->B,d->S,float);
+    d->use_bias = use_bias;
+    d->training = training;
+
     d->h = allocmem(d->B,d->S,float);
+    if (training && c == 'g')
+        d->z = allocmem(d->B,d->S,float);
+
     d->Wx = allocmem(d->D,d->S,float);
-    int ok = read_array(d->Wx,d->D,d->S,fp,0);
-    if (ok)
-        return d;
-    /* error exit */
-    fprintf(stderr,"In read_dense: failed to read weights\n");
-    freemem(d->h);
-    freemem(d->z);
-    freemem(d->Wx);
-    freemem(d);
+    if (!read_array(d->Wx,d->D,d->S,fp,0)) {
+        fprintf(stderr,"In read_dense: failed to read weights\n");
+        goto err;
+    }
+
+    if (d->use_bias) {
+        d->b = allocmem(1,d->S,float);
+        if (!read_array((fArr2D) d->b,1,d->S,fp,0)) {
+            fprintf(stderr,"In read_dense: failed to read bias\n");
+            goto err;
+        }
+    }
+
+    if (d->training) {
+        d->gWx = allocmem(d->D,d->S,float);
+        if (d->use_bias)
+            d->gb = allocmem(1,d->S,float);
+    }
+
+    return d;
+
+err:
+    dense_free(d);
     return NULL;
 }
 
@@ -56,25 +80,37 @@ DENSE* read_dense(FILE* fp)
  * Writes the dense layer pointed to by d to the file pointed to by fp. 
  * 
  * Parameters:
- *   d  - Pointer to the dense layer to be written
- *   fp - Pointer to a FILE object representing the output file
+ *   d     - Pointer to the dense layer to be written
+ *   final - If not zero, record the layer as inference-only
+ *   fp    - Pointer to a FILE object representing the output file
  * 
  * Returns:
  *   1 if successful, 0 otherwise
  */
-int write_dense(const DENSE* d, FILE* fp)
+int write_dense(const DENSE* d, int final, FILE* fp)
 {
-    int cnt = fprintf(fp,"DENSE D %d S %d B %d activation '%c'\n",d->D,d->S,d->B,d->activation);
+    int training = final ? 0 : d->training;
+    int cnt = fprintf(fp,"DENSE D %d S %d B %d activation '%c' "
+                        "use_bias %d training %d\n",
+                        d->D,d->S,d->B,d->activation,
+                        d->use_bias,training);
     if (cnt <= 0 || cnt == EOF) {
         fprintf(stderr,"In write_dense: failed to write the header\n");
         return 0;
     }
-    int ok = write_array(d->Wx,d->D,d->S,fp,NULL,0);
-    if (ok)
-        return 1;
-    /* error exit */
-    fprintf(stderr,"In write_dense: failed to write the weights\n");
-    return 0;
+
+    if (!write_array(d->Wx,d->D,d->S,fp,NULL,0)) {
+        fprintf(stderr,"In write_dense: failed to write weights\n");
+        return 0;
+    }
+
+    if (d->use_bias &&
+        !write_array((fArr2D) d->b,1,d->S,fp,NULL,0)) {
+        fprintf(stderr,"In write_dense: failed to write bias\n");
+        return 0;
+    }
+
+    return 1;
 }
 
 /* load_dense - Load a dense layer from a file
@@ -119,8 +155,7 @@ int store_dense(const DENSE* d, const char* filename)
         fprintf(stderr,"In store_dense: failed to open file '%s' for write\n",filename);
         return 0;
     }
-    int ok = write_dense(d,fp);
+    int ok = write_dense(d,0,fp);
     fclose(fp);
     return ok;
 }
-

@@ -46,7 +46,6 @@ static int write_lm_stack(const LM* m, int fin, const LMPARAM* st, FILE* fp)
     model.input_dim  = m->E;
     model.output_dim = m->E;
     model.target_dim = 1;
-    model.add_bias   = 0;
     model.normalize  = 0;
     model.loss_func  = 'n';
     model.optimizer  = st->optimizer;

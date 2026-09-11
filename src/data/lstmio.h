@@ -19,16 +19,17 @@ LSTM* read_lstm(FILE* fp);
 
 /* write_lstm - Write an LSTM layer to a file
  * 
- * Writes the LSTM layer pointed to by d to the file pointed to by fp. 
+ * Writes the LSTM layer pointed to by l to the file pointed to by fp.
  * 
  * Parameters:
- *   l  - Pointer to the LSTM layer to be written
- *   fp - Pointer to a FILE object representing the output file
+ *   l     - Pointer to the LSTM layer to be written
+ *   final - If not zero, record the layer as inference-only
+ *   fp    - Pointer to a FILE object representing the output file
  * 
  * Returns:
  *   1 if successful, 0 otherwise
  */
-int write_lstm(const LSTM* l, FILE* fp);
+int write_lstm(const LSTM* l, int final, FILE* fp);
 
 /* load_lstm - Load an LSTM layer from a file
  * 
@@ -46,7 +47,7 @@ LSTM* load_lstm(const char* filename);
 /* store_lstm - Store an LSTM layer into a file
  * 
  * Opens the file specified by the filename parameter for writing and 
- * stores the LSTM layer pointed to by d into it.
+ * stores the LSTM layer pointed to by l into it.
  * 
  * Parameters:
  *   l        - Pointer to the LSTM layer to be stored

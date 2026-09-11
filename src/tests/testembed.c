@@ -541,16 +541,15 @@ int run_demo(void)
     int vocab_size = hmap->map_used; /* Already includes pad (at index 0) */
     EMBEDDING* embedding = embedding_create(embedding_dim,cxt_size,0);
     embedding_init(embedding,vocab_size,cxt_cnt,1);
-    DENSE* dense = dense_create(vocab_size,"softmax");
-    dense_init(dense,embedding_dim,cxt_cnt);
+    DENSE* dense = dense_create(vocab_size,"softmax",0);
+    dense_init(dense,embedding_dim,cxt_cnt,1);
 
     /* Allocate memory for gradients */
     fArr2D dy[2];  /* Gradients with respect to the inputs  */
-    fArr2D gWx[2]; /* Gradients with respect to the weights */
+    fArr2D gWx;    /* Embedding weight gradients            */
     dy[0] = allocmem(embedding->B,embedding->E,float);
     dy[1] = allocmem(dense->B,dense->S,float);
-    gWx[0] = allocmem(embedding->D,embedding->E,float);
-    gWx[1] = allocmem(dense->D,dense->S,float);
+    gWx = allocmem(embedding->D,embedding->E,float);
 
     printf("%d sentences, %d words, %d unique words, %d contexts\n\n",
                                     sent_cnt,word_cnt,vocab_size,cxt_cnt);
@@ -568,12 +567,12 @@ int run_demo(void)
 
         /* Backward pass */
         dLdy_sparse_cross_entropy_loss(yp[1],labels,dy[1],cxt_cnt,vocab_size);
-        dense_backward(dense,dy[1],yp[0],gWx[1],dy[0],1);
-        embedding_backward(embedding,dy[0],contexts,gWx[0],NULL,NULL,0);
+        dense_backward(dense,dy[1],yp[0],dy[0],1);
+        embedding_backward(embedding,dy[0],contexts,gWx,NULL,NULL,0);
 
         /* Update weights */
-        update(embedding->Wx,gWx[0],embedding->D,embedding->E,learning_rate);
-        update(dense->Wx,gWx[1],dense->D,dense->S,learning_rate);
+        update(embedding->Wx,gWx,embedding->D,embedding->E,learning_rate);
+        update(dense->Wx,dense->gWx,dense->D,dense->S,learning_rate);
 
         loss /= cxt_cnt;
         losses[i] = loss;
@@ -656,8 +655,7 @@ int run_demo(void)
     (void) losses;
     freemem(dy[0]);
     freemem(dy[1]);
-    freemem(gWx[0]);
-    freemem(gWx[1]);
+    freemem(gWx);
     embedding_free(embedding);
     dense_free(dense);
     hashmap_free(hmap);

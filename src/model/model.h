@@ -13,8 +13,7 @@ typedef struct model_s {
     int num_layers; /* Number of layers                           */
     LAYER *layer;   /* Array of layers with num_layers elements   */ 
     int batch_size; /* Number of input vectors processed together */
-    int input_dim;  /* Input vectors dimension (may include bias) */
-    int add_bias;   /* Either 1 (add) or 0 (do not add)           */ 
+    int input_dim;  /* Input vectors dimension                    */
     int output_dim; /* Output vectors dimension (last layer size) */
     int target_dim; /* == output_dim, or 1 for (n)egsample        */
     char loss_func; /* (m)se (c)ross-entropy (C)tc (N)egative-sampling */
@@ -34,9 +33,6 @@ typedef struct model_s {
  * between model updates.
  * input_dim is the dimension of the model first layer input.
  *
- * If add_bias is zero, input_dim includes a bias dimension 
- * whose value is 1.0; otherwise, a bias dimension is added internally.
- *
  * If normalize is not zero, normalizes input feature vectors by feature,
  * to have mean of zero and standard deviation of one.
  *
@@ -45,7 +41,7 @@ typedef struct model_s {
  * Note that the output dimension is determined by the size of the last layer.
  */
 MODEL* model_create(int num_layers, 
-                    int batch_size, int input_dim, int add_bias, int normalize);
+                    int batch_size, int input_dim, int normalize);
 
 /* Frees the memory allocated by model_create() and all added layers */
 void model_free(MODEL* m);

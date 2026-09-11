@@ -34,8 +34,8 @@ TRANSFORMER* transformer_create(int heads, int steps,
     l->D = model_dim;
     l->Dff = ffn_dim;
     l->mha = mha_create(heads, steps, lookahead);
-    l->ffn1 = dense_create(ffn_dim,"gelu");
-    l->ffn2 = dense_create(model_dim,"none");
+    l->ffn1 = dense_create(ffn_dim,"gelu",0);
+    l->ffn2 = dense_create(model_dim,"none",0);
     l->norm1 = addnorm_create();
     l->norm2 = addnorm_create();
     return l;
@@ -67,8 +67,8 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
     mha_init(l->mha,D,B,training,0);
     addnorm_init(l->norm1,D,BT);
     addnorm_init(l->norm2,D,BT);
-    dense_init(l->ffn1,D,BT);
-    dense_init(l->ffn2,Dff,BT);
+    dense_init(l->ffn1,D,BT,training);
+    dense_init(l->ffn2,Dff,BT,training);
 
     l->mha_out = allocmem(BT,D,float);
     l->norm1_out = allocmem(BT,D,float);
@@ -81,9 +81,6 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
     l->d_mha_out = allocmem(BT,D,float);
     l->d_ffn2_in = allocmem(BT,D,float);
     l->d_mha_masked = allocmem(BT,D,float);
-
-    l->gWx1 = allocmem(D,Dff,float);
-    l->gWx2 = allocmem(Dff,D,float);
 
     l->dg1 = allocmem(D,1,float);
     l->db1 = allocmem(D,1,float);
@@ -113,8 +110,6 @@ void transformer_free(TRANSFORMER* l)
     freemem(l->d_mha_out);
     freemem(l->d_ffn2_in);
     freemem(l->d_mha_masked);
-    freemem(l->gWx1);
-    freemem(l->gWx2);
     freemem(l->dg1);
     freemem(l->db1);
     freemem(l->dg2);

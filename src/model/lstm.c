@@ -19,6 +19,7 @@
  * Parameters:
  *   units      - Number of cells (hidden size)
  *   stateful   - If not zero, maintain state across batches.
+ *   use_bias   - If not zero, add a per-gate bias.
  * 
  * Returns:
  *   Pointer to an LSTM neural network layer.
@@ -27,29 +28,32 @@
  *   - The neural network needs to be further intialized using lstm_init()
  *     before it can be used.
  */
-LSTM* lstm_create(int units, int stateful)
+LSTM* lstm_create(int units, int stateful, int use_bias)
 {
     LSTM* l = allocmem(1,1,LSTM);
     l->S = units;
     l->stateful = stateful ? 1 : 0;
+    l->use_bias = use_bias ? 1 : 0;
     return l;    
 }
 
 /* Initializes an LSTM neural network created by lstm_create().
  *
  * Parameters:
- *   input_dim  - Size of input vectors (must include bias dimension)
+ *   input_dim  - Size of input vectors
  *   batch_size - Number of input vectors processed simultaneously
+ *   training   - 1: allocate gradient buffers, 0 for inference-only
  *
  * Notes:
  *   - Kernel weights (Wx) are initialized using Glorot normal distribution.
  *   - Recurrent weights (Ux) are initialized using orthogonal uniform 
  *     distribution.
  */
-void lstm_init(LSTM* l, int input_dim, int batch_size)
+void lstm_init(LSTM* l, int input_dim, int batch_size, int training)
 {
     l->D = input_dim;
     l->B = batch_size;
+    l->training = training ? 1 : 0;
     l->f = allocmem(l->B,l->S,float);
     l->i = allocmem(l->B,l->S,float);
     l->o = allocmem(l->B,l->S,float);
@@ -66,6 +70,12 @@ void lstm_init(LSTM* l, int input_dim, int batch_size)
     l->Uo = allocmem(l->S,l->S,float);
     l->ph = allocmem(1,l->S,float);
     l->pc = allocmem(1,l->S,float);
+    if (l->use_bias) {
+        l->bf = allocmem(1,l->S,float);
+        l->bi = allocmem(1,l->S,float);
+        l->bc = allocmem(1,l->S,float);
+        l->bo = allocmem(1,l->S,float);
+    }
 
     typedef float (*ArrDS)[l->S];
     ArrDS Wf = (ArrDS) l->Wf;
@@ -108,6 +118,23 @@ void lstm_init(LSTM* l, int input_dim, int batch_size)
     QR(Ui,NULL,NULL,l->S,l->S);
     QR(Uc,NULL,NULL,l->S,l->S);
     QR(Uo,NULL,NULL,l->S,l->S);
+
+    if (l->training) {
+        l->gWf = allocmem(l->D,l->S,float);
+        l->gWi = allocmem(l->D,l->S,float);
+        l->gWc = allocmem(l->D,l->S,float);
+        l->gWo = allocmem(l->D,l->S,float);
+        l->gUf = allocmem(l->S,l->S,float);
+        l->gUi = allocmem(l->S,l->S,float);
+        l->gUc = allocmem(l->S,l->S,float);
+        l->gUo = allocmem(l->S,l->S,float);
+        if (l->use_bias) {
+            l->gbf = allocmem(1,l->S,float);
+            l->gbi = allocmem(1,l->S,float);
+            l->gbc = allocmem(1,l->S,float);
+            l->gbo = allocmem(1,l->S,float);
+        }
+    }
 }
 
 /* Sets a new batch size.
@@ -172,6 +199,22 @@ void lstm_free(LSTM* l)
     freemem(l->Uo);
     freemem(l->ph);
     freemem(l->pc);
+    freemem(l->bf);
+    freemem(l->bi);
+    freemem(l->bc);
+    freemem(l->bo);
+    freemem(l->gWf);
+    freemem(l->gWi);
+    freemem(l->gWc);
+    freemem(l->gWo);
+    freemem(l->gUf);
+    freemem(l->gUi);
+    freemem(l->gUc);
+    freemem(l->gUo);
+    freemem(l->gbf);
+    freemem(l->gbi);
+    freemem(l->gbc);
+    freemem(l->gbo);
     freemem(l);
 }
 

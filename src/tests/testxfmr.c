@@ -184,12 +184,12 @@ void test_transformer_finite_diff(TRANSFORMER* l)
     }
 
     /* Check weight gradients */
-    failed = failed || check_weight(l->mha->Wq, l->mha->gWq,D,  D,  "gWq", ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->mha->Wk, l->mha->gWk,D,  D,  "gWk", ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->mha->Wv, l->mha->gWv,D,  D,  "gWv", ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->mha->Wo, l->mha->gWo,D,  D,  "gWo", ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->ffn1->Wx,l->gWx1,    D,  Dff,"gWx1",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->ffn2->Wx,l->gWx2,    Dff,D,  "gWx2",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wq, l->mha->gWq,D,D, "gWq",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wk, l->mha->gWk,D,D, "gWk",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wv, l->mha->gWv,D,D, "gWv",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wo, l->mha->gWo,D,D, "gWo",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight(l->ffn1->Wx,l->ffn1->gWx, D, Dff,"gWx1",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight(l->ffn2->Wx,l->ffn2->gWx, Dff,D, "gWx2",ls,x_flat,dy_flat,BT,D,TOL);
 
     failed = failed || check_weight((fArr2D) l->norm1->gamma,(fArr2D) l->dg1,1,D,"dg1",ls,x_flat,dy_flat,BT,D,TOL);
     failed = failed || check_weight((fArr2D) l->norm1->beta, (fArr2D) l->db1,1,D,"db1",ls,x_flat,dy_flat,BT,D,TOL);
@@ -391,8 +391,8 @@ static void transformer_update(TRANSFORMER* l,int D,int DFF,float lr)
     update_array_weights(l->mha->Wk,l->mha->gWk,D,D,lr);
     update_array_weights(l->mha->Wv,l->mha->gWv,D,D,lr);
     update_array_weights(l->mha->Wo,l->mha->gWo,D,D,lr);
-    update_array_weights(l->ffn1->Wx,l->gWx1,D,DFF,lr);
-    update_array_weights(l->ffn2->Wx,l->gWx2,DFF,D,lr);
+    update_array_weights(l->ffn1->Wx,l->ffn1->gWx,D,DFF,lr);
+    update_array_weights(l->ffn2->Wx,l->ffn2->gWx,DFF,D,lr);
     update_vector_weights(l->norm1->gamma,l->dg1,D,lr);
     update_vector_weights(l->norm1->beta,l->db1,D,lr);
     update_vector_weights(l->norm2->gamma,l->dg2,D,lr);
@@ -472,9 +472,8 @@ void training_test(void)
     /* Output projection to vocabulary logits,as a dense softmax layer.
      * Wx has shape [D][K]; forward does matmul + softmax in one call.
      */
-    DENSE* out = dense_create(K,"Softmax");
-    dense_init(out,D,BT);
-    float gWout[D][K];
+    DENSE* out = dense_create(K,"Softmax",0);
+    dense_init(out,D,BT,1);
 
     /* Intermediate activations */
     float act[NLYR+1][BT][D]; /* act[0] = X,act[i] = output of layer i */
@@ -503,12 +502,10 @@ void training_test(void)
 
         /* Projection gradients via dense layer (softmax backward is skipped;
          * dy_out is already yp - yt):
-         *   gWout      = act[NLYR].T @ dy_out
-         *   dact[NLYR] = dy_out @ Wx.T
-         * gWout is cleared first because dense_backward accumulates. */
-        fltclr(gWout,D * K);
-        dense_backward(out,(fArr2D) dy_out,(fArr2D) act[NLYR],
-                       (fArr2D) gWout,(fArr2D) dact[NLYR],0);
+         *   out->gWx   = act[NLYR].T @ dy_out
+         *   dact[NLYR] = dy_out @ Wx.T */
+        dense_backward(out,(fArr2D) dy_out,
+                       (fArr2D) act[NLYR],(fArr2D) dact[NLYR],0);
 
         /* Transformer layers backward */
         for (int i = NLYR - 1; i >= 0; i--)
@@ -519,7 +516,7 @@ void training_test(void)
                                  0);
 
         /* Weight updates */
-        update_array_weights(out->Wx,gWout,D,K,LR); /* dense update */
+        update_array_weights(out->Wx,out->gWx,D,K,LR); /* dense update */
         for (int i = 0; i < NLYR; i++)
             transformer_update(layers[i],D,DFF,LR);
     }

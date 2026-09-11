@@ -23,13 +23,14 @@ NEGSAMPLE* read_negsample(FILE* fp);
  * to by fp.
  *
  * Parameters:
- *   l  - Pointer to the layer to be written
- *   fp - Pointer to a FILE object representing the output file
+ *   l     - Pointer to the layer to be written
+ *   final - If not zero, record the layer as inference-only
+ *   fp    - Pointer to a FILE object representing the output file
  *
  * Returns:
  *   1 if successful, 0 otherwise
  */
-int write_negsample(const NEGSAMPLE* l, FILE* fp);
+int write_negsample(const NEGSAMPLE* l, int final, FILE* fp);
 
 /* load_negsample - Load a negative-sampling layer from a file
  *

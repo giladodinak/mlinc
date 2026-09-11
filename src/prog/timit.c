@@ -140,11 +140,11 @@ int timit_lstm_dense_classification(
         /* Create Model (to process multiple batches of B samples each) */
         if (B < 0)
             B = -B;
-        m = model_create(L,B,D,1,1); /* Notice adding bias to input */
-        model_add(m,lstm_create(layers[0],1),"lstm"); 
+        m = model_create(L,B,D,1);
+        model_add(m,lstm_create(layers[0],1,1),"lstm"); 
         for (int i = 1; i < L - 1; i++)
-            model_add(m,lstm_create(layers[i],1),"lstm");
-        model_add(m,dense_create(N,"softmax"),"dense");
+            model_add(m,lstm_create(layers[i],1,1),"lstm");
+        model_add(m,dense_create(N,"softmax",1),"dense");
         model_compile(m,loss_func,optimizer);
     }
 

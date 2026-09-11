@@ -16,7 +16,9 @@ typedef struct negsample_s {
   int K;         /* Vocabulary size (number of words)                     */
   int B;         /* Number of input vectors in a batch                    */
   int n_neg;     /* Number of negative samples drawn per position         */
+  int training;  /* 1 - training mode, 0 - inference only                 */
   fArr2D Wo;     /* Output weight matrix [K][E]                           */
+  fArr2D gWo;    /* Output weight gradients [K][E]                        */
   fArr2D h;      /* Identity output passthrough [B][E]                    */
   const int* dist; /* Unigram negative-sampling table (not owned)         */
   int dist_size; /* Number of entries in dist[]                           */
@@ -46,12 +48,13 @@ NEGSAMPLE* negsample_create(int vocab_size, int num_negatives);
  * Parameters:
  *   input_dim  - Size of input vectors (E)
  *   batch_size - Number of input vectors processed simultaneously
+ *   training   - 1: allocate backward/gradient buffers, 0 for inference-only
  *
  * Notes:
  *   The output weights are initialized using a normal distribution
  *   scaled by 1/sqrt(E).
  */
-void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size);
+void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training);
 
 /* Provides the unigram negative-sampling table (referenced, not owned). */
 void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size);
@@ -63,7 +66,6 @@ void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size
  *
  * Notes:
  *   If this function is called before negsample_init(), it does nothing.
- *   Otherwise, the passthrough and touched buffers are resized.
  */
 void negsample_set_batch_size(NEGSAMPLE* l, int batch_size);
 
@@ -134,7 +136,6 @@ static inline void negsample_backward(NEGSAMPLE* restrict l,
  *   l       - Pointer to the layer
  *   h       - Input embeddings [B][E]
  *   labels  - Target word indices [B][1] (stored as floats)
- *   gWo     - Output-weight gradients [K][E]
  *   dh      - Gradient w.r.t. h [B][E]
  *   cnt     - Number of valid rows in this batch (<= B)
  *   correct - If not NULL, incremented by the number of positions whose
@@ -146,7 +147,6 @@ static inline void negsample_backward(NEGSAMPLE* restrict l,
 float negsample_loss(NEGSAMPLE* restrict l,
                      const fArr2D restrict h/*[B][E]*/,
                      const fArr2D restrict labels/*[B][1]*/,
-                     fArr2D restrict gWo/*[K][E]*/,
                      fArr2D restrict dh/*[B][E]*/,
                      int cnt, int* correct);
 
@@ -155,11 +155,10 @@ float negsample_loss(NEGSAMPLE* restrict l,
  *
  * Parameters:
  *   l             - Pointer to the layer
- *   gWo           - Output-weight gradients [K][E]
  *   learning_rate - Gradient multiplier
  *   weight_decay  - Weight magnitude suppressor (0 to disable)
  */
-void negsample_update(NEGSAMPLE* restrict l, fArr2D gWo,
+void negsample_update(NEGSAMPLE* restrict l,
                       float learning_rate, float weight_decay);
 
 /* Scores h against the entire vocabulary for generation.

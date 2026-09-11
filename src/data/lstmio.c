@@ -20,17 +20,25 @@
  */
 LSTM* read_lstm(FILE* fp)
 {
-    int D, S, B, b;
-    int cnt = fscanf(fp," LSTM D %d S %d B %d stateful %d\n",&D,&S,&B,&b);
-    if (cnt < 4 || cnt == EOF) {
+    int D, S, B, stateful, use_bias, training;
+    int cnt = fscanf(fp," LSTM D %d S %d B %d stateful %d "
+                        "use_bias %d training %d\n",
+                        &D,&S,&B,&stateful,&use_bias,&training);
+    if (cnt < 6 || cnt == EOF) {
         fprintf(stderr,"In read_lstm: failed to read header\n");
         return NULL;
     }
+    stateful = (stateful) ? 1 : 0;
+    use_bias = (use_bias) ? 1 : 0;
+    training = (training) ? 1 : 0;
+
     LSTM* l = allocmem(1,1,LSTM);
     l->S = S;
     l->D = D;
     l->B = B;
-    l->stateful = (b) ? 1 : 0;
+    l->stateful = stateful;
+    l->use_bias = use_bias;
+    l->training = training;
 
     l->f = allocmem(l->B,l->S,float);
     l->i = allocmem(l->B,l->S,float);
@@ -49,6 +57,30 @@ LSTM* read_lstm(FILE* fp)
     l->ph = allocmem(1,l->S,float);
     l->pc = allocmem(1,l->S,float);
 
+    if (l->use_bias) {
+        l->bf = allocmem(1,l->S,float);
+        l->bi = allocmem(1,l->S,float);
+        l->bc = allocmem(1,l->S,float);
+        l->bo = allocmem(1,l->S,float);
+    }
+
+    if (l->training) {
+        l->gWf = allocmem(l->D,l->S,float);
+        l->gWi = allocmem(l->D,l->S,float);
+        l->gWc = allocmem(l->D,l->S,float);
+        l->gWo = allocmem(l->D,l->S,float);
+        l->gUf = allocmem(l->S,l->S,float);
+        l->gUi = allocmem(l->S,l->S,float);
+        l->gUc = allocmem(l->S,l->S,float);
+        l->gUo = allocmem(l->S,l->S,float);
+        if (l->use_bias) {
+            l->gbf = allocmem(1,l->S,float);
+            l->gbi = allocmem(1,l->S,float);
+            l->gbc = allocmem(1,l->S,float);
+            l->gbo = allocmem(1,l->S,float);
+        }
+    }
+
     fArr2D Wx[4] = {l->Wf,l->Wi,l->Wc,l->Wo};
     char* sWx[4] = {"Wf","Wi","Wc","Wo"};
     for (int i = 0; i < 4; i++) {
@@ -58,6 +90,7 @@ LSTM* read_lstm(FILE* fp)
             goto err;
         }
     }
+
     fArr2D Ux[4] = {l->Uf,l->Ui,l->Uc,l->Uo};
     char* sUx[4] = {"Uf","Ui","Uc","Uo"};
     for (int i = 0; i < 4; i++) {
@@ -67,35 +100,33 @@ LSTM* read_lstm(FILE* fp)
             goto err;
         }
     }
+
+    if (l->use_bias) {
+        fVec bx[4] = {l->bf,l->bi,l->bc,l->bo};
+        char* sbx[4] = {"bf","bi","bc","bo"};
+        for (int i = 0; i < 4; i++) {
+            int ok = read_array((fArr2D) bx[i],1,l->S,fp,0);
+            if (!ok) {
+                fprintf(stderr,"In read_lstm: failed to read %s bias\n",sbx[i]);
+                goto err;
+            }
+        }
+    }
+
     fVec px[2] = {l->ph,l->pc};
     char* spx[2] = {"hidden","cell"};
     for (int i = 0; i < 2; i++) {
         int ok = read_array((fArr2D)px[i],1,l->S,fp,0);
         if (!ok) {
             fprintf(stderr,"In read_lstm: failed to read %s state\n",spx[i]);
-            return 0;
+            goto err;
         }
     }
+
     return l;
-        
+
 err: /* error exit */
-    freemem(l->f);
-    freemem(l->i);
-    freemem(l->o);
-    freemem(l->cc);
-    freemem(l->h);
-    freemem(l->c);
-    freemem(l->Wf);
-    freemem(l->Wi);
-    freemem(l->Wc);
-    freemem(l->Wo);
-    freemem(l->Uf);
-    freemem(l->Ui);
-    freemem(l->Uc);
-    freemem(l->Uo);
-    freemem(l->ph);
-    freemem(l->pc);
-    freemem(l);
+    lstm_free(l);
     return NULL;
 }
 
@@ -104,16 +135,20 @@ err: /* error exit */
  * Writes the LSTM layer pointed to by d to the file pointed to by fp. 
  * 
  * Parameters:
- *   l  - Pointer to the LSTM layer to be written
- *   fp - Pointer to a FILE object representing the output file
+ *   l     - Pointer to the LSTM layer to be written
+ *   final - If not zero, record the layer as inference-only
+ *   fp    - Pointer to a FILE object representing the output file
  * 
  * Returns:
  *   1 if successful, 0 otherwise
  */
-int write_lstm(const LSTM* l, FILE* fp)
+int write_lstm(const LSTM* l, int final, FILE* fp)
 {
-    int cnt = fprintf(fp,"LSTM D %d S %d B %d stateful %d\n",
-                                     l->D,l->S,l->B,l->stateful);
+    int training = final ? 0 : l->training;
+    int cnt = fprintf(fp,"LSTM D %d S %d B %d stateful %d "
+                         "use_bias %d training %d\n",
+                         l->D,l->S,l->B,l->stateful,
+                         l->use_bias,training);
     if (cnt <= 0 || cnt == EOF) {
         fprintf(stderr,"In write_lstm: failed to write the header\n");
         return 0;
@@ -129,6 +164,7 @@ int write_lstm(const LSTM* l, FILE* fp)
             return 0;
         }
     }
+
     fArr2D Ux[4] = {l->Uf,l->Ui,l->Uc,l->Uo};
     char* sUx[4] = {"Uf","Ui","Uc","Uo"};
     for (int i = 0; i < 4; i++) {
@@ -139,6 +175,19 @@ int write_lstm(const LSTM* l, FILE* fp)
             return 0;
         }
     }
+
+    if (l->use_bias) {
+        fVec bx[4] = {l->bf,l->bi,l->bc,l->bo};
+        char* sbx[4] = {"bf","bi","bc","bo"};
+        for (int i = 0; i < 4; i++) {
+            int ok = write_array((fArr2D) bx[i],1,l->S,fp,NULL,0);
+            if (!ok) {
+                fprintf(stderr,"In write_lstm: failed to write %s bias\n",sbx[i]);
+                return 0;
+            }
+        }
+    }
+
     fVec px[2] = {l->ph,l->pc};
     char* spx[2] = {"hidden","cell"};
     for (int i = 0; i < 2; i++) {
@@ -148,6 +197,7 @@ int write_lstm(const LSTM* l, FILE* fp)
             return 0;
         }
     }
+
     return 1;
 }
 
@@ -177,7 +227,7 @@ LSTM* load_lstm(const char* filename)
 /* store_lstm - Store an LSTM layer into a file
  * 
  * Opens the file specified by the filename parameter for writing and 
- * stores the LSTM layer pointed to by d into it.
+ * stores the LSTM layer pointed to by l into it.
  * 
  * Parameters:
  *   l        - Pointer to the LSTM layer to be stored
@@ -193,7 +243,7 @@ int store_lstm(const LSTM* l, const char* filename)
         fprintf(stderr,"In store_lstm: failed to open file '%s' for write\n",filename);
         return 0;
     }
-    int ok = write_lstm(l,fp);
+    int ok = write_lstm(l,0,fp);
     fclose(fp);
     return ok;
 }
