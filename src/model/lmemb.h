@@ -2,7 +2,7 @@
 /* Language-model token embedding layer data structures and functions */
 #ifndef LMEMB_H
 #define LMEMB_H
-#include "array.h"
+#include "arraytypes.h"
 
 typedef struct lmemb_s {
   int V;       /* Vocabulary size                                 */

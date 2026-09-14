@@ -2,13 +2,21 @@
 /* Simple test program for the Dense layer implementation */
 #include <stdio.h>
 #include <math.h>
+#include "float.h"
 #include "mem.h"
 #include "random.h"
-#include "array.h"
+#include "arraytypes.h"
+#include "linear.h"
 #include "loss.h"
 #include "dense.h"
 
-static void dense_update_lin(DENSE* l, float lr);
+/* Updates dense layer's weights and bias in a linear way */
+static inline void dense_update_lin(DENSE* l, float lr)
+{
+    linear_update(l->Wx,l->gWx,l->D,l->S,lr,0);
+    if (l->use_bias)
+        linear_update((fArr2D) l->b,(fArr2D) l->gb,1,l->S,lr,0);
+}
 
 /* Trains a Multi Layer Perceptronn to predict 
  * the values of f(x) = (x**2 + 10* sin(x))
@@ -28,11 +36,11 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     const int L = layers_cnt + 1;
     const int M = (int) ((range[1] - range[0]) / range[2] + 0.5);
     printf("%d layers (including output layer), %d input samples\n",L,M);
-    const int D = 1;  /* Input vector dimension                    */
-    const int N = 1;  /* Output vector dimension                    */
-    float X[M][D];    /* X[][0] is x values                        */
-    float yt[M][N];   /* True labels vector yt = f(X)               */
-    float y[M][N];    /* Output prediction (single dimension)       */
+    const int D = 1;  /* Input vector dimension               */
+    const int N = 1;  /* Output vector dimension              */
+    float X[M][D];    /* X[][0] is x values                   */
+    float yt[M][N];   /* True labels vector yt = f(X)         */
+    float y[M][N];    /* Output prediction (single dimension) */
     float x = range[0];
     /* Initialize data */
     for (int i = 0; i < M ; i++) {
@@ -64,7 +72,12 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
         yp[0] = dense_forward(l[0],X,0);
         for (int j = 1; j < L; j++)
             yp[j] = dense_forward(l[j],yp[j - 1],j);
-        fltcpy(y,yp[L - 1],M * N); /* Save final forward pass result */
+        /* Save final forward pass result */
+#ifdef USE_CUDA
+        cufltcpy(y,yp[L - 1],M * N);
+#else
+        fltcpy(y,yp[L - 1],M * N);
+#endif
         float loss = mean_square_error(y,yt,M,N);
         losses[i] = loss;
         printf("epoch %5d loss %10.3f\r",i+1,loss<999999?loss:999999);
@@ -107,21 +120,6 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     (void) title;
 #endif
     return 0;
-}
-
-/* Updates dense layer's weights and bias in a linear way. */
-static void dense_update_lin(DENSE* l, float lr)
-{
-    typedef float (*ArrDS)[l->S];
-    ArrDS Wx = (ArrDS) l->Wx;
-    ArrDS gWx = (ArrDS) l->gWx;
-    for (int i = 0; i < l->D; i++)
-        for (int j = 0; j < l->S; j++)
-            Wx[i][j] -= lr * gWx[i][j];
-
-    if (l->use_bias)
-        for (int j = 0; j < l->S; j++)
-            l->b[j] -= lr * l->gb[j];
 }
 
 int main()

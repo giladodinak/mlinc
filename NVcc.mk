@@ -28,7 +28,7 @@ CUMOD_OBJS = $(filter-out $(BUILD_DIR)/prog/%.o, \
 # Remove CPU objects having CUDA counterparts, then add CUDA module objects.
 OBJS := $(filter-out $(CUMOD_OBJS),$(OBJS)) $(CUMOD_OBJS)
 
-CFLAGS += -DUSE_CUDA -I$(CUDA_HOME)/include -fno-omit-frame-pointer
+CFLAGS += -DUSE_CUDA -fno-omit-frame-pointer
 LIB_DIRS += -L$(CUDA_HOME)/lib64
 LIBS += -lcublas -lcudart
 

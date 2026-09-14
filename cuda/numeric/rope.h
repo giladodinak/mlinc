@@ -16,7 +16,7 @@
  *   Su et al., "RoFormer: Enhanced Transformer with Rotary Position
  *   Embedding", 2021. https://arxiv.org/abs/2104.09864
  */
-static __global__ void rope_init_k(float* theta, int Dh)
+static __global__ void rope_init_kernel(float* theta, int Dh)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < Dh / 2)
@@ -28,7 +28,7 @@ static inline void rope_init(float* theta, int Dh)
     int n = Dh / 2;
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    rope_init_k<<<blocks,threads>>>(theta,Dh);
+    rope_init_kernel<<<blocks,threads>>>(theta,Dh);
 }
 
 /* Applies RoPE in-place to a single head slice of Q or K.
@@ -45,11 +45,11 @@ static inline void rope_init(float* theta, int Dh)
  *   T       : Sequence length (number of rows)
  *   Dh      : Head dimension (number of columns, must be even)
  */
-static __global__ void rope_apply_k(float* x,
-                                    const float* theta,
-                                    int inverse,
-                                    int offset,
-                                    int T, int Dh)
+static __global__ void rope_apply_kernel(float* x,
+                                         const float* theta,
+                                         int inverse,
+                                         int offset,
+                                         int T, int Dh)
 {
     float sign = inverse ? -1.0 : 1.0;
     int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -78,7 +78,7 @@ static inline void rope_apply(fArr2D x/*[T][Dh]*/,
     int n = T * (Dh / 2);
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    rope_apply_k<<<blocks,threads>>>((float*)x,theta,inverse,offset,T,Dh);
+    rope_apply_kernel<<<blocks,threads>>>((float*)x,theta,inverse,offset,T,Dh);
 }
 
 #endif

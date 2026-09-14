@@ -2,7 +2,7 @@
 /* Accuracy evalutation functions  */
 #ifndef ACCURACY_H
 #define ACCURACY_H
-#include "array.h"
+#include "arraytypes.h"
 
 /* Calculates the R-squared factor between predicted and true values.
  * 

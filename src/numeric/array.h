@@ -1,30 +1,10 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
-/* Array data structures and functions  */
+/* Array and vector opetaitons          */
 #ifndef ARRAY_H
 #define ARRAY_H
 #include <math.h>
 #include "float.h"
-
-/* Define types of one and two dimensional arrays of unspecified dimensions.
- * These are dynamically cast to explicit dimensions within each function.
- *
- * For example
- *     fArr2D a2d; // a2d is two-dimensional array of unspecified dimensions
- *     typedef float (*ArrNK)[K]; // two-dimensional array NxK (e.g. N=3 K=5)
- *     ArrNK a2dNK = (ArrNK) a2d; // a2dNK is the addrress of 2-D array 3x5
- *     a2dNK[2][4] access an entry in the array
- * Notice that a2dNK memory is contiguous just like when declaring
- * a two-dimensional array  float arr[3][5]
- *
- * When passing an array by reference to a function, only the last dimension
- * can be specified. By convention, the first dimension is noted in typedef,
- * and in comments, see examples below.
- *
- */
-typedef int (*iVec);
-typedef int (*iArr2D)[];
-typedef float (*fVec);
-typedef float (*fArr2D)[];
+#include "arraytypes.h"
 
 #ifdef USE_BLAS
 #ifdef __APPLE__

@@ -5,7 +5,8 @@
 #include <time.h>
 #include "mem.h"
 #include "random.h"
-#include "array.h"
+#include "arraytypes.h"
+#include "activation.h"
 #include "mha.h"
 
 #define EPS 1e-3

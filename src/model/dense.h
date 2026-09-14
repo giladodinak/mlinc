@@ -2,6 +2,7 @@
 /* Dense (feed forward) neural network layer data structures and functions */
 #ifndef DENSE_H
 #define DENSE_H
+#include "arraytypes.h"
 #include "array.h"
 #include "activation.h"
 

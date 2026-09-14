@@ -4,32 +4,13 @@
 #include <stdlib.h>
 #include "mem.h"
 #include "array.h"
-#include "clip.h"
+#include "linear.h"
 #include "adamw.h"
 #include "dense.h"
 #include "lstm.h"
 #include "transformer.h"
 #include "negsample.h"
 #include "layer.h"
-
-/* Updates all weights in array w[M][N], according to the corresponding
- * gradients in g[M][N], using linear update.
- * The rate of update is controlled by learning_rate, weight_decay.
- */
-static inline void linear_update(fArr2D w_/*[M][N]*/, fArr2D g_/*[M][N]*/,
-                                 int M, int N,
-                                 float learning_rate, float weight_decay)
-{
-    typedef float (*ArrMN)[N];
-    ArrMN w = (ArrMN) w_;
-    ArrMN g = (ArrMN) g_;
-
-    clip_gradients(g,M,N,1.0e-12,10.0);
-
-    for (int i = 0; i < M; i++)
-        for (int j = 0; j < N; j++)
-            w[i][j] -= learning_rate * (g[i][j] + weight_decay * w[i][j]);
-}
 
 int layer_init(LAYER* l, int input_dim, int batch_size)
 {

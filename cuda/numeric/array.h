@@ -1,5 +1,5 @@
 /* Copyright (c) 2023-2026 Gilad Odinak */
-/* Array data structures and functions  */
+/* Array and vector operation           */
 #ifndef ARRAY_H
 #define ARRAY_H
 
@@ -9,22 +9,13 @@
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include "cuflt.h"
-
-/* Define types of one and two dimensional arrays of unspecified dimensions.
- * These are dynamically cast to explicit dimensions within GPU kernels or
- * device functions.
- *
- * For example:
+#include "arraytypes.h"
+/*
+ * Array examples
  *     fArr2D a2d; // a2d is two-dimensional array of unspecified dimensions
  *     typedef float (*ArrNK)[K]; // two-dimensional array NxK (e.g. N=3 K=5)
  *     ArrNK a2dNK = (ArrNK) a2d; // a2dNK is the addrress of 2-D array 3x5
  *     a2dNK[2][4] access an entry in the array
- * Notice that a2dNK memory is contiguous just like when declaring
- * a two-dimensional array  float arr[3][5]
- *
- * When passing an array by reference to a function, only the last dimension
- * can be specified. By convention, the first dimension is noted in the typedef
- * and in comments, as in the CPU implementation.
  *
  * When a2d points to CUDA device memory, a2dNK may be passed through host code
  * and to CUDA/cuBLAS functions, but its elements may only be dereferenced by
@@ -40,11 +31,6 @@
  * Reference:
  * https://docs.nvidia.com/cuda/cuda-programming-guide/pdf/cuda-programming-guide.pdf
  */
-typedef int (*iVec);
-typedef int (*iArr2D)[];
-typedef float (*fVec);
-typedef float (*fArr2D)[];
-
 #ifdef USE_DOUBLE
 #define CUGEMM cublasDgemm
 #define CUGEMV cublasDgemv

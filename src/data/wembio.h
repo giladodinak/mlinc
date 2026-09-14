@@ -2,7 +2,7 @@
 /* Functions to load and store word embeddings */
 #ifndef WEMBIO_H
 #define WEMBIO_H
-#include "array.h"
+#include "arraytypes.h"
 #include "hash.h"
 
 /* load_word_embeddings - Load word embeddings from a file

@@ -10,7 +10,11 @@
 #include "mem.h"
 #include "cuflt.h"
 #include "random.h"
+#include "activation.h"
+#include "dropout.h"
 #include "rope.h"
+#include "arraytypes.h"
+#include "array.h"
 #include "mha.h"
 
 static __global__ void scale_scores(float* Scores, const int* pad_mask,

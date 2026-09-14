@@ -1,6 +1,8 @@
 /* Copyright (c) 2026 Gilad Odinak       */
 /* Decoder-only language model functions */
 #include "mem.h"
+#include "random.h"
+#include "arraytypes.h"
 #include "array.h"
 #include "hash.h"
 #include "vocab.h"

@@ -1,7 +1,7 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 /* Accuracy evalutation functions  */
 #include <math.h>
-#include "array.h"
+#include "arraytypes.h"
 #include "accuracy.h"
 
 /* Calculate the R-squared factor between predicted and true values.

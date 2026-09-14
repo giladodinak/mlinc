@@ -15,6 +15,7 @@ CARCH =    # Set to cuda target hardware architecture
 CC = gcc
 CPPC = g++
 LINK = g++
+AR = ar
 
 CFLAGS = -Wall -Wextra
 
@@ -59,6 +60,8 @@ AOBJS= $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 OBJS = $(filter-out $(BUILD_DIR)/prog/%.o,$(filter-out \
                                               $(BUILD_DIR)/tests/%.o,$(AOBJS)))
 
+LIB = $(BUILD_DIR)/libmlinc.a
+
 .DEFAULT_GOAL := all
 
 include Environ.mk # OS and processor depndencies
@@ -75,22 +78,27 @@ ifeq ($(NOPLOT),)
 include Plot.mk   # plotting (matlibplot for C++) support, if available
 endif
 
-.PRECIOUS: $(OBJS) $(AOBJS) # Do not delete object files after link
+.PRECIOUS: $(OBJS) $(AOBJS) $(LIB) # Do not delete object files after link
 
 all: $(PROGRAMS) $(TESTS)
 
 $(PROGRAMS): %: $(BIN_DIR)/%
 $(TESTS): %: $(BIN_DIR)/%
 
-$(BIN_DIR)/%: $(BUILD_DIR)/prog/%.o $(OBJS)
+# Build the static library from all shared object files.
+$(LIB): $(OBJS)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $(OBJS)
+
+$(BIN_DIR)/%: $(BUILD_DIR)/prog/%.o $(LIB)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(LFLAGS) $(CFLAGS) -o $@ $(BUILD_DIR)/prog/$*.o \
-	      $(OBJS) $(LIB_DIRS) $(LIBS)
+	      -Wl,--start-group $(LIB) -Wl,--end-group $(LIB_DIRS) $(LIBS)
 
-$(BIN_DIR)/%: $(BUILD_DIR)/tests/%.o $(OBJS)
+$(BIN_DIR)/%: $(BUILD_DIR)/tests/%.o $(LIB)
 	@mkdir -p $(BIN_DIR)
 	$(LINK) $(LFLAGS) $(CFLAGS) -o $@ $(BUILD_DIR)/tests/$*.o \
-	      $(OBJS) $(LIB_DIRS) $(LIBS)
+	      -Wl,--start-group $(LIB) -Wl,--end-group $(LIB_DIRS) $(LIBS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS)
 	@mkdir -p $(dir $@)

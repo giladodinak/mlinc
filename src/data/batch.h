@@ -2,7 +2,7 @@
 /* Data preparation for model training  */
 #ifndef BATCH_H
 #define BATCH_H
-#include "array.h"
+#include "arraytypes.h"
 
 typedef struct batch_s {
     fArr2D x;       /* Array of input vectors                       */
