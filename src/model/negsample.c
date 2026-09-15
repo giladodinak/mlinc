@@ -117,7 +117,9 @@ void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training)
 }
 
 /* Provides the unigram negative-sampling table (referenced, not owned). */
-void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size)
+void negsample_set_dist(NEGSAMPLE* l, 
+                        const int* dist_table,
+                        int dist_table_size)
 {
     l->dist = dist_table;
     l->dist_size = dist_table_size;

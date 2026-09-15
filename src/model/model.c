@@ -69,14 +69,8 @@ MODEL* model_create(int num_layers,
 /* Frees the memory allocated by model_create() and all added layers */
 void model_free(MODEL* m)
 {
-    for (int i = 0; i < m->num_layers; i++) {
+    for (int i = 0; i < m->num_layers; i++)
         layer_free(&m->layer[i]);
-        if (m->layer[i].opt_state) {
-            for (int j = 0; j < m->layer[i].num_opt_state; j++)
-                freemem(m->layer[i].opt_state[j]);
-            freemem(m->layer[i].opt_state);
-        }
-    }
     freemem(m->ctc);
     freemem(m->mean);
     freemem(m->sdev);
@@ -315,8 +309,8 @@ void model_fit(MODEL* m,
     
     int MTr = 0;           /* Total number of training samples        */
     if (lenTr != NULL) {
-    for (int i = 0; i < numTr; i++)
-        MTr += lenTr[i];
+        for (int i = 0; i < numTr; i++)
+            MTr += lenTr[i];
     }
     else
         MTr = numTr;
@@ -335,15 +329,16 @@ void model_fit(MODEL* m,
     if (m->normalize)
         calculate_mean_sdev(xTr,MTr,D,mean,sdev,0);
 
-    BATCH* bTr = batch_create(xTr,D,yTr,Nt,B,lenTr,numTr,shuffle,0);
+    BATCH* bTr = batch_create(xTr,D,yTr,Nt,B,lenTr,numTr,shuffle);
     BATCH* bVd = NULL;
     if (MVd > 0) /* Notice validation data not shuffled */
-        bVd = batch_create(xVd,D,yVd,Nt,B,lenVd,numVd,0,0);
+        bVd = batch_create(xVd,D,yVd,Nt,B,lenVd,numVd,0);
         
-    fArr2D dy[L];  /* Gradients with respect to the inputs          */
-    for (int i = 0; i < L; i++)
+    fArr2D dy[L];  /* Gradients with respect to the inputs */
+    for (int i = 0; i < L; i++) {
         dy[i] = allocmem(layer_batch_size(&m->layer[i]),
                          layer_output_dim(&m->layer[i]),float);
+    }
     
     /* Allocate memory for one batch */
     typedef float (*ArrBD)[D];
@@ -523,15 +518,8 @@ void model_fit(MODEL* m,
         batch_free(bVd);
     if (final) {
         m->final = 1;
-        for (int i = 0; i < m->num_layers; i++) {
-            if (m->layer[i].opt_state) {
-                for (int j = 0; j < m->layer[i].num_opt_state; j++)
-                    freemem(m->layer[i].opt_state[j]);
-                free(m->layer[i].opt_state);
-                m->layer[i].num_opt_state = 0;
-                m->layer[i].opt_state = NULL;
-            }
-        }
+        for (int i = 0; i < m->num_layers; i++)
+            layer_free_opt_state(&m->layer[i]);
     }
     if (verbose)
         printf("\n");
@@ -566,7 +554,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     typedef float (*ArrBD)[D];
     ArrBD xb = (ArrBD) allocmem(B,D,float);    /* Array of samples      */
 
-    BATCH* b = batch_create(x,D,NULL,0,B,NULL,len,0,0);
+    BATCH* b = batch_create(x,D,NULL,0,B,NULL,len,0);
     reset_state(m);
     for (;;) {
         fArr2D yp[L]; /* Pointers to layers' prediction arrays */

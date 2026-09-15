@@ -56,4 +56,15 @@ inline static void freemem(void *p) { if (p != NULL) free(p); }
 }
 #endif
 
+/* nnallocmem and nnfreemem are used whenever CPU code allocates memory
+ * that is device memory when using GPU, and CPU memory otherwise
+ */
+#ifdef USE_CUDA
+#define nnallocmem(M,N,T) cuallocmem(M,N,T)
+#define nnfreemem(P)      cufreemem(P)
+#else
+#define nnallocmem(M,N,T) allocmem(M,N,T)
+#define nnfreemem(P)      freemem(P)
+#endif
+
 #endif

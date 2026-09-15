@@ -11,7 +11,6 @@ typedef struct batch_s {
     int  N;         /* Dimension of y vectors                       */
     int  B;         /* Number of vectors returned by batch_next()   */
     int  shuffle;   /* if set, batch_shuffle() shuffles, else only resets */
-    int  add_bias;  /* if set, batch_next() adds bias dimension     */
     int  num;       /* Number of sequences, or number of vectors    */
     int* shufSeq;   /* Offsets of shuffled training sequences       */
     int* shufLen;   /* Lengths of shuffled training sequences       */
@@ -24,7 +23,7 @@ typedef struct batch_s {
  * and optionally their expected output vectors.
  */
 BATCH* batch_create(const fArr2D x, int D, const fArr2D y, int N, int B,
-                    const int* len, int num, int shuffle, int add_bias);
+                    const int* len, int num, int shuffle);
 
 /* Frees mmemory allocated by batch_create() */
 void batch_free(BATCH* b);

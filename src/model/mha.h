@@ -3,7 +3,11 @@
 #ifndef MHA_H
 #define MHA_H
 #include "float.h"
+#include "mem.h"
 #include "arraytypes.h"
+#include "activation.h"
+#include "dropout.h"
+#include "rope.h"
 
 typedef struct {
     /* dimensions */

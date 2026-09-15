@@ -4,13 +4,14 @@
 #include "mem.h"
 #include "float.h"
 #include "random.h"
+#include "array.h"
 #include "batch.h"
 
 /* Constructs an iterator that returns batches of input vectors, 
  * and optionally their expected output vectors.
  */
 BATCH* batch_create(const fArr2D x, int D, const fArr2D y, int N, int B,
-                    const int* len, int num, int shuffle, int add_bias)
+                    const int* len, int num, int shuffle)
 {
     BATCH* b = allocmem(1,1,BATCH);
     b->x = x;
@@ -19,7 +20,6 @@ BATCH* batch_create(const fArr2D x, int D, const fArr2D y, int N, int B,
     b->N = N;
     b->B = B;
     b->shuffle = (shuffle) ? 1 : 0;
-    b->add_bias = (add_bias) ? 1 : 0;
     b->num = num;
     b->shufSeq = NULL;
     b->shufLen = NULL;
@@ -104,15 +104,13 @@ void batch_shuffle(BATCH* restrict b)
 int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
 {
     int D = b->D;
-    int Db = D + b->add_bias;
     int N = b->N;
     int B = b->B;
     int cnt = 0, ycnt = 0;
-    typedef float (*ArrBD)[D];           
-    typedef float (*ArrBDb)[Db];
-    typedef float (*ArrBN)[b->N];           
+    typedef float (*ArrBD)[D];
+    typedef float (*ArrBN)[b->N];
     ArrBD xs = (ArrBD) b->x;
-    ArrBDb xd = (ArrBDb) x;
+    ArrBD xd = (ArrBD) x;
     ArrBN ys = (ArrBN) b->y; /* Maybe NULL */
     ArrBN yd = (ArrBN) y;    /* Maybe NULL */
     
@@ -126,8 +124,6 @@ int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
                 int i = b->shufSeq[b->curSeq] + b->curVec++;
                 for (int j = 0; j < D; j++)
                     xd[cnt][j] = xs[i][j];
-                if (b->add_bias)
-                    xd[cnt][b->D] = 1.0;
             }
             if (ys != NULL && yd != NULL) {
                 for (ycnt = 0; ycnt < cnt; ycnt++) {
@@ -149,8 +145,6 @@ int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
             int i = b->shufVec[b->curVec++];
             for (int j = 0; j < D; j++)
                 xd[cnt][j] = xs[i][j];
-            if (b->add_bias)
-                xd[cnt][D] = 1.0;
         }
         if (ys != NULL && yd != NULL) {
             for (ycnt = 0; ycnt < cnt; ycnt++) {
@@ -166,8 +160,6 @@ int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
             int i = b->curVec++;
             for (int j = 0; j < D; j++)
                 xd[cnt][j] = xs[i][j];
-            if (b->add_bias)
-                xd[cnt][D] = 1.0;
         }
         if (ys != NULL && yd != NULL) {
             for (ycnt = 0; ycnt < cnt; ycnt++) {
@@ -179,7 +171,7 @@ int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
     }
     if (cnt < B) { /* Pad to batch size */
         for (int i = cnt; i < B; i++)
-            for (int j = 0; j < Db; j++)
+            for (int j = 0; j < D; j++)
                 xd[i][j] = 1.0;
         if (ys != NULL && yd != NULL) {
             for (int i = ycnt; i < B; i++)

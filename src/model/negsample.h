@@ -2,6 +2,7 @@
 /* Negative-sampling layer data structure and functions */
 #ifndef NEGSAMPLE_H
 #define NEGSAMPLE_H
+#include "float.h"
 #include "array.h"
 
 /* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
@@ -27,6 +28,10 @@ typedef struct negsample_s {
   int* seen;     /* Per-row batch stamp [K], for first-touch detection    */
   int stamp;     /* Current batch stamp                                   */
 } NEGSAMPLE;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Creates a negative-sampling layer.
  *
@@ -56,8 +61,9 @@ NEGSAMPLE* negsample_create(int vocab_size, int num_negatives);
  */
 void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training);
 
-/* Provides the unigram negative-sampling table (referenced, not owned). */
-void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size);
+/* Provides the unigram negative-sampling table (referenced, not owned) */
+void negsample_set_dist(NEGSAMPLE* l, 
+                        const int* dist_table, int dist_table_size);
 
 /* Sets a new batch size.
  *
@@ -99,7 +105,11 @@ static inline fArr2D negsample_forward(NEGSAMPLE* restrict l,
                                        int lyr)
 {
     (void) lyr;
+#ifdef USE_CUDA
+    cufltcpy(l->h,X,l->B * l->E);
+#else
     fltcpy(l->h,X,l->B * l->E);
+#endif
     return l->h;
 }
 
@@ -120,8 +130,12 @@ static inline void negsample_backward(NEGSAMPLE* restrict l,
                                       int lyr)
 {
     (void) lyr;
-    if (dx != NULL)
-        fltcpy(dx,dy,l->B * l->E);
+    if (dx == NULL) return;
+#ifdef USE_CUDA
+    cufltcpy(dx,dy,l->B * l->E);
+#else
+    fltcpy(dx,dy,l->B * l->E);
+#endif
 }
 
 /* Computes the negative-sampling loss and its gradients for a batch.
@@ -176,5 +190,9 @@ void negsample_logits(NEGSAMPLE* restrict l,
                       const fArr2D restrict h/*[cnt][E]*/,
                       fArr2D restrict logits/*[cnt][K]*/,
                       int cnt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

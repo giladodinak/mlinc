@@ -57,31 +57,6 @@ void layer_reset(LAYER* l)
     }
 }
 
-void layer_free(LAYER* l)
-{
-    switch (l->type) {
-        case 'd': dense_free(l->dense); break;
-        case 'l': lstm_free(l->lstm); break;
-        case 't': transformer_free(l->transformer); freemem(l->out); break;
-        case 'n': negsample_free(l->negsample); break;
-    }
-}
-
-void layer_set_batch_size(LAYER* l, int batch_size)
-{
-    switch (l->type) {
-        case 'd': dense_set_batch_size(l->dense,batch_size); break;
-        case 'l': lstm_set_batch_size(l->lstm,batch_size); break;
-        case 't':
-            fflush(stdout);
-            fprintf(stderr,
-                "layer_set_batch_size: not supprted by transformer layer\n");
-            exit(-1);
-        break;
-        case 'n': negsample_set_batch_size(l->negsample,batch_size); break;
-    }
-}
-
 void layer_alloc_opt_state(LAYER* l, char optimizer)
 {
     switch (l->type) {
@@ -93,11 +68,11 @@ void layer_alloc_opt_state(LAYER* l, char optimizer)
             } else { /* 'a' adamw */
                 int ng = ld->use_bias ? 4 : 2;
                 fArr2D* g = allocmem(1,ng,fArr2D*);
-                g[0] = allocmem(ld->D,ld->S,float); /* mWx */
-                g[1] = allocmem(ld->D,ld->S,float); /* vWx */
+                g[0] = nnallocmem(ld->D,ld->S,float); /* mWx */
+                g[1] = nnallocmem(ld->D,ld->S,float); /* vWx */
                 if (ld->use_bias) {
-                    g[2] = allocmem(1,ld->S,float); /* mb */
-                    g[3] = allocmem(1,ld->S,float); /* vb */
+                    g[2] = nnallocmem(1,ld->S,float); /* mb */
+                    g[3] = nnallocmem(1,ld->S,float); /* vb */
                 }
                 l->opt_state = g;
                 l->num_opt_state = ng;
@@ -114,13 +89,13 @@ void layer_alloc_opt_state(LAYER* l, char optimizer)
                 fArr2D* g = allocmem(1,ng,fArr2D*);
                 for (int j = 0; j < 8; j++) {
                     int M = (j < 4) ? ll->D : ll->S;
-                    g[j]     = allocmem(M,ll->S,float); /* mX  */
-                    g[j + 8] = allocmem(M,ll->S,float); /* vXx */
+                    g[j]     = nnallocmem(M,ll->S,float); /* mX  */
+                    g[j + 8] = nnallocmem(M,ll->S,float); /* vXx */
                 }
                 if (ll->use_bias) {
                     for (int j = 0; j < 4; j++) {
-                        g[j + 16] = allocmem(1,ll->S,float); /* mb */
-                        g[j + 20] = allocmem(1,ll->S,float); /* vb */
+                        g[j + 16] = nnallocmem(1,ll->S,float); /* mb */
+                        g[j + 20] = nnallocmem(1,ll->S,float); /* vb */
                     }
                 }
                 l->opt_state = g;
@@ -141,8 +116,8 @@ void layer_alloc_opt_state(LAYER* l, char optimizer)
                 int ng = 20;
                 fArr2D* g = allocmem(1,ng,fArr2D*);
                 for (int j = 0; j < 10; j++) {
-                    g[j]      = allocmem(rows[j],cols[j],float); /* m */
-                    g[j + 10] = allocmem(rows[j],cols[j],float); /* v */
+                    g[j]      = nnallocmem(rows[j],cols[j],float); /* m */
+                    g[j + 10] = nnallocmem(rows[j],cols[j],float); /* v */
                 }
                 l->opt_state = g;
                 l->num_opt_state = ng;
@@ -155,6 +130,42 @@ void layer_alloc_opt_state(LAYER* l, char optimizer)
             l->num_opt_state = 0;
         }
         break;
+    }
+}
+
+void layer_free_opt_state(LAYER* l)
+{
+    if (l->opt_state == NULL) return;
+    
+    for (int i = 0; i < l->num_opt_state; i++)
+        nnfreemem(l->opt_state[i]);
+    freemem(l->opt_state);
+    l->opt_state = NULL;
+}
+
+void layer_free(LAYER* l)
+{
+    switch (l->type) {
+        case 'd': dense_free(l->dense); break;
+        case 'l': lstm_free(l->lstm); break;
+        case 't': transformer_free(l->transformer); freemem(l->out); break;
+        case 'n': negsample_free(l->negsample); break;
+    }
+    layer_free_opt_state(l);
+}
+
+void layer_set_batch_size(LAYER* l, int batch_size)
+{
+    switch (l->type) {
+        case 'd': dense_set_batch_size(l->dense,batch_size); break;
+        case 'l': lstm_set_batch_size(l->lstm,batch_size); break;
+        case 't':
+            fflush(stdout);
+            fprintf(stderr,
+                "layer_set_batch_size: not supprted by transformer layer\n");
+            exit(-1);
+        break;
+        case 'n': negsample_set_batch_size(l->negsample,batch_size); break;
     }
 }
 

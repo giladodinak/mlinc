@@ -132,6 +132,9 @@ void layer_set_batch_size(LAYER* l, int batch_size);
  */
 void layer_alloc_opt_state(LAYER* l, char optimizer);
 
+/* Frees the memory allocated by layer_alloc_opt_state */
+void layer_free_opt_state(LAYER* l);
+
 /* Applies one optimizer step. */
 void layer_update(LAYER* l, char optimizer,
                   float learning_rate, float weight_decay, int update_cnt);

@@ -9,7 +9,7 @@
 #include <math.h>
 #include <cuda_runtime.h>
 
-#include "cumem.h"
+#include "mem.h"
 #include "cuflt.h"
 #include "array.h"
 #include "activation.h"
@@ -154,12 +154,7 @@ static __global__ void add_vector_kernel(float* dst, const float* src, int n)
 
 extern "C" LSTM* lstm_create(int units, int stateful, int use_bias)
 {
-    LSTM* l = (LSTM*)calloc(1,sizeof(LSTM));
-    if (l == NULL) {
-        fprintf(stderr,"lstm_create: out of memory\n");
-        exit(1);
-    }
-
+    LSTM* l = (LSTM*) allocmem(1,1,LSTM);
     l->S = units;
     l->stateful = stateful ? 1 : 0;
     l->use_bias = use_bias ? 1 : 0;
