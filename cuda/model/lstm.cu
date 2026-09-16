@@ -231,7 +231,7 @@ extern "C" void lstm_init(LSTM* l, int input_dim, int batch_size, int training)
             l->gbc = (fVec)cuallocmem(1,l->S,float);
             l->gbo = (fVec)cuallocmem(1,l->S,float);
         }
-        l->params = (float*)cuallocmem(7,S,float);
+        l->params = (float*)cuallocmem(7,l->S,float);
     }
 }
 
