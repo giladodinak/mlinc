@@ -32,7 +32,7 @@ CFLAGS += -DUSE_CUDA -fno-omit-frame-pointer
 CFLAGS += -I$(CUDA_HOME)/include # Maybe required on some distros
 LIB_DIRS += -L$(CUDA_HOME)/lib64
 LIBS += -lcublas -lcudart 
-LIBS += -lstdc++  array.h uses Thread Local Storage
+LIBS += -lstdc++  # array.h uses Thread Local Storage
 
 NVFLAGS = -arch=$(CUDA_ARCH) -DUSE_CUDA -Drestrict=__restrict__ 
 NVFLAGS += $(CUINC_DIRS) $(INC_DIRS) -I$(CUDA_HOME)/include
