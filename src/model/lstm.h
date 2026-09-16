@@ -49,6 +49,7 @@ typedef struct lstm_s {
   fVec gbi;        /* Bias gradients [S] (use_bias && training)     */
   fVec gbc;        /* Bias gradients [S] (use_bias && training)     */
   fVec gbo;        /* Bias gradients [S] (use_bias && training)     */
+  float* params;   /* Parameters buffer                             */
 } LSTM;
 
 #ifdef __cplusplus

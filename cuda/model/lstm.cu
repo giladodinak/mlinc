@@ -9,8 +9,8 @@
 #include <math.h>
 #include <cuda_runtime.h>
 
+#include "float.h"
 #include "mem.h"
-#include "cuflt.h"
 #include "array.h"
 #include "activation.h"
 #include "lstm.h"
@@ -231,6 +231,7 @@ extern "C" void lstm_init(LSTM* l, int input_dim, int batch_size, int training)
             l->gbc = (fVec)cuallocmem(1,l->S,float);
             l->gbo = (fVec)cuallocmem(1,l->S,float);
         }
+        l->params = (float*)cuallocmem(7,S,float);
     }
 }
 
@@ -306,7 +307,9 @@ extern "C" void lstm_free(LSTM* l)
     cufreemem(l->gbc);
     cufreemem(l->gbo);
 
-    memfree(l);
+    cufreemem(l->params);
+
+    freemem(l);
 }
 
 extern "C" void lstm_reset(LSTM* l)
@@ -427,7 +430,7 @@ extern "C" void lstm_backward(LSTM* restrict l,
         cufltclr(l->gbo,S);
     }
 
-    float* tmp = (float*)cuallocmem(7,S,float);
+    float* tmp = l->params;
     float* dh_next = tmp + 0 * S;
     float* dc_next = tmp + 1 * S;
     float* do_     = tmp + 2 * S;
@@ -472,6 +475,4 @@ extern "C" void lstm_backward(LSTM* restrict l,
             addinnermul(dx[t],(fVec)do_,l->Wo,D,S);
         }
     }
-
-    cufreemem(tmp);
 }
