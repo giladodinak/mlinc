@@ -4,21 +4,20 @@
 #define LINEAR_H
 #include "arraytypes.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Updates all weights in array w[M][N], according to the corresponding
  * gradients in g[M][N], using linear update.
  * The rate of update is controlled by learning_rate, weight_decay.
  */
-static inline void linear_update(fArr2D w_/*[M][N]*/, fArr2D g_/*[M][N]*/,
-                                 int M, int N,
-                                 float learning_rate, float weight_decay)
-{
-    typedef float (*ArrMN)[N];
-    ArrMN w = (ArrMN) w_;
-    ArrMN g = (ArrMN) g_;
+void linear_update(fArr2D w_/*[M][N]*/, fArr2D g_/*[M][N]*/,
+                   int M, int N, float learning_rate, float weight_decay);
 
-    for (int i = 0; i < M; i++)
-        for (int j = 0; j < N; j++)
-            w[i][j] -= learning_rate * (g[i][j] + weight_decay * w[i][j]);
+
+#ifdef __cplusplus
 }
+#endif
 
 #endif

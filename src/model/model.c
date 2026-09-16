@@ -336,15 +336,15 @@ void model_fit(MODEL* m,
         
     fArr2D dy[L];  /* Gradients with respect to the inputs */
     for (int i = 0; i < L; i++) {
-        dy[i] = allocmem(layer_batch_size(&m->layer[i]),
-                         layer_output_dim(&m->layer[i]),float);
+        dy[i] = nnallocmem(layer_batch_size(&m->layer[i]),
+                           layer_output_dim(&m->layer[i]),float);
     }
     
     /* Allocate memory for one batch */
     typedef float (*ArrBD)[D];
     typedef float (*ArrBN)[Nt];
-    ArrBD x = (ArrBD) allocmem(B,D,float);    /* Array of samples      */
-    ArrBN yt = (ArrBN) allocmem(B,Nt,float);  /* Array of true outputs */
+    ArrBD x = (ArrBD) nnallocmem(B,D,float);    /* Array of samples      */
+    ArrBN yt = (ArrBN) nnallocmem(B,Nt,float);  /* Array of true outputs */
 
     /* Track training loss, accuracy and model improvement across epochs */
     float loss = 0;
@@ -552,7 +552,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     VecDx sdev = (VecDx) m->sdev;
     /* Allocate memory for one batch */
     typedef float (*ArrBD)[D];
-    ArrBD xb = (ArrBD) allocmem(B,D,float);    /* Array of samples      */
+    ArrBD xb = (ArrBD) nnallocmem(B,D,float); /* Array of samples */
 
     BATCH* b = batch_create(x,D,NULL,0,B,NULL,len,0);
     reset_state(m);
@@ -565,7 +565,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
             normalize(xb,B,D,mean,sdev,0); 
         model_batch_forward(m,xb,0,yp);
         if (m->loss_func == 'N') {
-            /* Full-vocabulary pass, then normalize to a distribution. */
+            /* Full-vocabulary pass, then normalize to a distribution */
             negsample_logits(m->layer[L - 1].negsample,yp[L - 1],
                              (fArr2D) y,cnt);
             softmax((fArr2D) y,cnt,No);
@@ -574,7 +574,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
             fltcpy((fArr2D) y,yp[L - 1],cnt * No);
         y += cnt;
     }
-    freemem(xb);
+    nnfreemem(xb);
     batch_free(b);
 }
 

@@ -52,4 +52,12 @@ static inline void fltcpy(void* restrict d, const void* restrict s, int n)
     memcpy(d,s,n * sizeof(float));
 }
 
+#ifdef USE_CUDA
+#define nnfltclr cufltclr
+#define nnfltcpy cufltcpy
+#else
+#define nnfltclr fltclr
+#define nnfltcpy fltcpy
+#endif
+
 #endif

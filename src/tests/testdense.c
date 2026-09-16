@@ -62,31 +62,42 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     /* Allocate memory for input gradients */
     fArr2D dy[L];
     for (int j = 0; j < L; j++)
-        dy[j] = allocmem(l[j]->B,l[j]->S,float);
+        dy[j] = nnallocmem(l[j]->B,l[j]->S,float);
 
+    fArr2D Xnn; /* Either X or copy of X in GPU memory */
+#ifdef USE_CUDA
+    Xnn = nnallocmem(M,D,float); /* GPU memory */
+    cufltcpy(Xnn,X,M * D);
+#else
+    Xnn = (fArr2D) X; /* CPU memory */
+#endif
+    
     float losses[epochs];
     
     for (int i = 0; i < epochs; i++) {
         fArr2D yp[L]; /* pointers to layers' prediction arrays */
+
         /* Forward pass */
-        yp[0] = dense_forward(l[0],X,0);
+        yp[0] = dense_forward(l[0],Xnn,0);
         for (int j = 1; j < L; j++)
             yp[j] = dense_forward(l[j],yp[j - 1],j);
-        /* Save final forward pass result */
-#ifdef USE_CUDA
-        cufltcpy(y,yp[L - 1],M * N);
-#else
-        fltcpy(y,yp[L - 1],M * N);
-#endif
+        nnfltcpy(y,yp[L - 1],M * N); /* Save final forward pass result */
+
         float loss = mean_square_error(y,yt,M,N);
         losses[i] = loss;
         printf("epoch %5d loss %10.3f\r",i+1,loss<999999?loss:999999);
         fflush(stdout);
+
         /* Backward pass */
-        dLdy_mean_square_error(y,yt,dy[L - 1],M,N);
+
+        float dyt[M][N];
+        dLdy_mean_square_error(y,yt,dyt,M,N);
+        nnfltcpy(dy[L - 1],dyt,M * N);
+
         for (int j = L - 1; j > 0; j--)
             dense_backward(l[j],dy[j],yp[j - 1],dy[j - 1],0);
-        dense_backward(l[0],dy[0],X,NULL,0);
+        dense_backward(l[0],dy[0],Xnn,NULL,0);
+
         /* Update weights */
         for (int j = 0; j < L; j++)
             dense_update_lin(l[j],learning_rate);
@@ -104,7 +115,10 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     printf("\n");
     for (int i = 0; i < L; i++) {
         dense_free(l[i]);
-        freemem(dy[i]);
+        nnfreemem(dy[i]);
+#ifdef USE_CUDA
+        cufreemem(Xnn);
+#endif
     }
 #ifdef HAS_PLOT
     {

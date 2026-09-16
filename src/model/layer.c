@@ -36,7 +36,7 @@ int layer_init(LAYER* l, int input_dim, int batch_size)
                 exit(-1);
             }
             transformer_init(tr,batch_size / tr->T,1,0.0);
-            l->out = allocmem(tr->BT,tr->D,float);
+            l->out = nnallocmem(tr->BT,tr->D,float);
             return tr->D;
         }
         case 'n':
@@ -148,7 +148,7 @@ void layer_free(LAYER* l)
     switch (l->type) {
         case 'd': dense_free(l->dense); break;
         case 'l': lstm_free(l->lstm); break;
-        case 't': transformer_free(l->transformer); freemem(l->out); break;
+        case 't': transformer_free(l->transformer); nnfreemem(l->out); break;
         case 'n': negsample_free(l->negsample); break;
     }
     layer_free_opt_state(l);

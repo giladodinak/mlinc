@@ -7,8 +7,8 @@
 #include <stdint.h>
 #include <cuda_runtime.h>
 
-#include "cumem.h"
-#include "cuflt.h"
+#include "mem.h"
+#include "float.h"
 #include "arraytypes.h"
 #include "array.h"
 #include "activation.h"
@@ -71,7 +71,7 @@ static __global__ void bias_gradient_kernel(float* gb,
 
 extern "C" DENSE* dense_create(int units, char* activation, int use_bias)
 {
-    DENSE* l = (DENSE*)calloc(1,sizeof(DENSE));
+    DENSE* l = (DENSE*)allocmem(1,1,DENSE);
     if (l == NULL) {
         fprintf(stderr,"dense_create: out of memory\n");
         exit(1);
@@ -87,7 +87,7 @@ extern "C" DENSE* dense_create(int units, char* activation, int use_bias)
     if (!strcasecmp("softmax",activation)) l->activation = 'S';
 
     if (l->activation == 0) {
-        free(l);
+        freemem(l);
         fflush(stdout);
         fprintf(stderr,"dense_create: invalid activation '%s'\n",activation);
         exit(-1);
@@ -156,7 +156,7 @@ extern "C" void dense_free(DENSE* l)
     cufreemem(l->b);
     cufreemem(l->gb);
 
-    free(l);
+    freemem(l);
 }
 
 extern "C" void dense_reset(DENSE* l)

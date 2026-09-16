@@ -1,10 +1,8 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 /* Function that updates neural network weights */
-#ifndef LINEAR_H
-#define LINEAR_H
-
 #include <cuda_runtime.h>
 #include "arraytypes.h"
+#include "linear.h"
 
 static __global__ void linear_update_kernel(float* w, const float* g,
                                             int n,
@@ -23,9 +21,9 @@ static __global__ void linear_update_kernel(float* w, const float* g,
  *
  * w and g must point to CUDA device memory.
  */
-static inline void linear_update(fArr2D w_/*[M][N]*/, fArr2D g_/*[M][N]*/,
-                                 int M, int N,
-                                 float learning_rate, float weight_decay)
+extern "C" void linear_update(fArr2D w_/*[M][N]*/, fArr2D g_/*[M][N]*/,
+                              int M, int N,
+                              float learning_rate, float weight_decay)
 {
     int n = M * N;
     int threads = 256;
@@ -34,4 +32,3 @@ static inline void linear_update(fArr2D w_/*[M][N]*/, fArr2D g_/*[M][N]*/,
         (float*)w_,(const float*)g_,n,learning_rate,weight_decay);
 }
 
-#endif
