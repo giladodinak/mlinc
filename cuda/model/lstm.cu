@@ -306,7 +306,7 @@ extern "C" void lstm_free(LSTM* l)
     cufreemem(l->gbc);
     cufreemem(l->gbo);
 
-    free(l);
+    memfree(l);
 }
 
 extern "C" void lstm_reset(LSTM* l)

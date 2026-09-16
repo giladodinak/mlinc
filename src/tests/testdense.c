@@ -116,10 +116,10 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
     for (int i = 0; i < L; i++) {
         dense_free(l[i]);
         nnfreemem(dy[i]);
-#ifdef USE_CUDA
-        cufreemem(Xnn);
-#endif
     }
+#ifdef USE_CUDA
+    cufreemem(Xnn);
+#endif
 #ifdef HAS_PLOT
     {
         #include "../plot/plot.h"
