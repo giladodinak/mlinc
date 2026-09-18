@@ -71,7 +71,6 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->BHT = l->B * l->H * l->T;
 
     l->training = training;
-    l->dropout_rate  = dropout_rate;
     
     l->Wq = allocmem(l->D,l->D,float);
     l->Wk = allocmem(l->D,l->D,float);
@@ -89,7 +88,11 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->Vh = allocmem(l->BHT,l->Dh,float);
 
     l->Att = allocmem(l->BHT,l->T,float);
-    l->AttMask = allocmem(l->BHT,l->T,float);
+    l->dropout = allocmem(l->B * l->H,1,DROPOUT*);
+    for (int i = 0; i < l->B * l->H; i++) {
+        l->dropout[i] = dropout_create(dropout_rate);
+        dropout_init(l->dropout[i],l->T,l->T);
+    }
 
     l->Scores = allocmem(l->T,l->T,float);
     l->Oh = allocmem(l->T,l->Dh,float);
@@ -160,7 +163,9 @@ void mha_free(MHA* l)
     freemem(l->Vh);
 
     freemem(l->Att);
-    freemem(l->AttMask);
+    for (int i = 0; i < l->B * l->H; i++)
+        dropout_free(l->dropout[i]);
+    freemem(l->dropout);
 
     freemem(l->Scores);
     freemem(l->Oh);

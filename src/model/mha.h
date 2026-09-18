@@ -26,7 +26,6 @@ typedef struct {
 
     int lookahead;      /* Causal masking, set at create time below  */
     int training;       /* 1 if training, 0 if inference             */
-    float dropout_rate; /* Fraction of attention weights to zero out */
 
     fArr2D Wq;  /* [D][D] */
     fArr2D Wk;  /* [D][D] */
@@ -48,7 +47,7 @@ typedef struct {
     fArr2D Vh;      /* [BHT][Dh] row (b*H+h)*T+t */
 
     fArr2D Att;     /* [BHT][T] row (b*H+h)*T+t */
-    fArr2D AttMask; /* [BHT][T] row (b*H+h)*T+t */
+    DROPOUT** dropout;  /* [B*H] */
 
     fArr2D Scores;  /* [T][T]   scratch, not persisted */
     fArr2D Oh;      /* [T][Dh]  scratch, not persisted */
@@ -236,7 +235,6 @@ static inline void mha_forward(MHA* restrict l,
 
     ArrTT Scores = (ArrTT) l->Scores;
     ArrBHTT Att = (ArrBHTT) l->Att;
-    ArrBHTT AttMask = (ArrBHTT) l->AttMask;
     ArrTDh Oh = (ArrTDh) l->Oh;
 
     ArrBTD Out = (ArrBTD) l->Out;
@@ -308,8 +306,8 @@ static inline void mha_forward(MHA* restrict l,
             /* Store this head's attention weights for backward */
             fltcpy(&Att[base],Scores,T * T);
 
-            if (training && l->training && l->dropout_rate > 0)
-                dropout(&Att[base],&AttMask[base],T,T,l->dropout_rate);
+            if (training && l->training && l->dropout[b * H + h]->rate > 0)
+                dropout_forward(l->dropout[b * H + h],&Att[base]);
 
             /* In Eq. 1: Attention @ V */
             matmul(Oh,&Att[base],&Vh[base],T,T,Dh);
@@ -526,7 +524,6 @@ static inline void mha_backward(MHA* restrict l,
     ArrBHTDh Vh = (ArrBHTDh) l->Vh;
 
     ArrBHTT Att = (ArrBHTT) l->Att;
-    ArrBHTT AttMask = (ArrBHTT) l->AttMask;
 
     ArrBTD Out = (ArrBTD) l->Out;
 
@@ -569,10 +566,8 @@ static inline void mha_backward(MHA* restrict l,
              * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
              * dScores /= sqrt(Dh)                  (reverse scaling)
              */
-            if (l->training && l->dropout_rate > 0)
-                for (int i = 0; i < T; i++)
-                    for (int j = 0; j < T; j++)
-                        dAtt[i][j] *= AttMask[base+i][j];
+            if (l->training && l->dropout[b * H + h]->rate > 0)
+                dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
 
             d_softmax(dScores,dAtt,&Att[base],T,T);
 

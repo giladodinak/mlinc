@@ -133,7 +133,10 @@ static LM* load_checkpoint(int argc, char** argv, char** load_file,
     if (m->N > 0) {
         *heads = m->tr[0].transformer->mha->H;
         *ffn_dim = m->tr[0].transformer->Dff;
-        *dropout = m->tr[0].transformer->dropout_rate;
+        if (m->tr[0].transformer && m->tr[0].transformer->dropout1)
+            *dropout = m->tr[0].transformer->dropout1->rate;
+        else
+            *dropout = 0;
     }
     printf("Resuming at epoch %d of %d, lr %g, seed %d\n",
            *start_epoch,*num_epochs,*learning_rate,st->lrng_seed);

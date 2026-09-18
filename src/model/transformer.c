@@ -61,7 +61,6 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
 
     l->B = B;
     l->BT = BT;
-    l->dropout_rate = dropout_rate;
     l->training = training;
 
     mha_init(l->mha,D,B,training,0);
@@ -88,8 +87,10 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
     l->db2 = allocmem(D,1,float);
 
     if (dropout_rate > 0) {
-        l->drop_mask1 = allocmem(BT,D,float);
-        l->drop_mask2 = allocmem(BT,D,float);
+        l->dropout1 = dropout_create(dropout_rate);
+        l->dropout2 = dropout_create(dropout_rate);
+        dropout_init(l->dropout1,D,BT);
+        dropout_init(l->dropout2,D,BT);
     }
 }
 
@@ -114,7 +115,7 @@ void transformer_free(TRANSFORMER* l)
     freemem(l->db1);
     freemem(l->dg2);
     freemem(l->db2);
-    freemem(l->drop_mask1);
-    freemem(l->drop_mask2);
+    dropout_free(l->dropout1);
+    dropout_free(l->dropout2);
     freemem(l);
 }
