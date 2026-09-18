@@ -303,14 +303,14 @@ static inline void mha_forward(MHA* restrict l,
             /* Compute attention probabilities - Softmax - in Eq. 1 */
             softmax(Scores,T,T);
 
-            /* Store this head's attention weights for backward */
+            /* Store this head's attention weights (pre-dropout) for backward */
             fltcpy(&Att[base],Scores,T * T);
 
             if (training && l->training && l->dropout[b * H + h]->rate > 0)
-                dropout_forward(l->dropout[b * H + h],&Att[base]);
+                dropout_forward(l->dropout[b * H + h],Scores);
 
             /* In Eq. 1: Attention @ V */
-            matmul(Oh,&Att[base],&Vh[base],T,T,Dh);
+            matmul(Oh,Scores,&Vh[base],T,T,Dh);
 
             /* Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
              * Out = Concat(Oh_0, ..., Oh_{H-1})
