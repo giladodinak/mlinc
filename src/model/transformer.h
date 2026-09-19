@@ -25,12 +25,6 @@
  * A complete decoder-only Transformer stacks multiple such layers,
  * preceded by token and positional embeddings and followed by a linear
  * projection to vocabulary logits.
- *
- * Notes:
- *   - The original paper uses ReLU. This implementation uses GELU instead.
- *
- *   - In the pepr the FFN use a bias term (Sec. 3.3. Eq. 2).
- *     This implementation omits the bias.
  */
 typedef struct {
     int B;              /* Batch size                                    */
@@ -39,7 +33,6 @@ typedef struct {
     int Dff;            /* FFN hidden dimension (typically 4*D)          */
     int BT;             /* B * T                                         */
     int training;       /* 1 if training, 0 if inference                 */
-    float dropout_rate; /* Sub-layer output dropout rate                 */
     MHA* mha;           /* Masked self-attention [BT][D]  -> [BT][D]     */
     DENSE* ffn1;        /* FFN first  layer      [BT][D]  -> [BT][Dff]   */
     DENSE* ffn2;        /* FFN second layer      [BT][Dff]-> [BT][D]     */
@@ -47,8 +40,8 @@ typedef struct {
     ADDNORM* norm2;     /* Add-Norm after FFN                            */
     fArr2D mha_out;     /* MHA projection output      [BT][D]            */
     fArr2D norm1_out;   /* Output of norm1            [BT][D]            */
-    fArr2D drop_mask1;  /* Dropout mask after MHA     [BT][D]            */
-    fArr2D drop_mask2;  /* Dropout mask after FFN     [BT][D]            */
+    DROPOUT* dropout1;  /* Dropout after MHA          [BT][D]            */
+    DROPOUT* dropout2;  /* Dropout after FFN          [BT][D]            */
     fArr2D d_norm2_in;  /* Grad w.r.t. ffn2 output / norm2 input [BT][D] */
     fArr2D d_ffn1_in;   /* Grad w.r.t. ffn1 input              [BT][Dff] */
     fArr2D d_norm1_in;  /* Grad w.r.t. mha output / norm1 input  [BT][D] */

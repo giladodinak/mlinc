@@ -17,39 +17,6 @@
 #include "array.h"
 #include "mha.h"
 
-static __global__ void scale_scores(float* Scores, const int* pad_mask,
-                                    int b, int T, int lookahead, float scale)
-{
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    int n = T * T;
-    if (k < n) {
-        int i = k / T;
-        int j = k % T;
-        float v = Scores[k] * scale;
-        /* Causal / lookahead masking (Sec. 3.2.3, Fig. 2 generalised).
-         *   lookahead <  0 : skip - fully bidirectional attention
-         *   lookahead == 0 : strictly causal (mask every future frame)
-         *   lookahead == L : allow L future frames, mask beyond that
-         * Position i attends to j only where j <= i + lookahead
-         */
-        if (lookahead >= 0 && j > i + lookahead) v = -1e9;
-        if (pad_mask != NULL && !pad_mask[b * T + j]) v = -1e9;
-        Scores[k] = v;
-    }
-}
-
-static __global__ void mask_kernel(float* x, const float* mask, int n)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) x[i] *= mask[i];
-}
-
-static __global__ void scale_kernel(float* x, int n, float scale)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) x[i] *= scale;
-}
-
 /* Creates a Multi-Head Attention layer.
  *
  * Allocates the MHA container and records its structural parameters.
@@ -71,7 +38,7 @@ static __global__ void scale_kernel(float* x, int n, float scale)
  */
 MHA* mha_create(int heads, int steps, int lookahead)
 {
-    MHA* l = (MHA*)allocmem(1,1,MHA);
+    MHA* l = (MHA*) allocmem(1,1,MHA);
     l->H = heads;
     l->T = steps;
     l->lookahead = lookahead;
@@ -115,7 +82,6 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->BHT = l->B * l->H * l->T;
 
     l->training = training;
-    l->dropout_rate = dropout_rate;
 
     l->Wq = (fArr2D) cuallocmem(l->D,l->D,float);
     l->Wk = (fArr2D) cuallocmem(l->D,l->D,float);
@@ -133,7 +99,11 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->Vh = (fArr2D) cuallocmem(l->BHT,l->Dh,float);
 
     l->Att = (fArr2D) cuallocmem(l->BHT,l->T,float);
-    l->AttMask = (fArr2D) cuallocmem(l->BHT,l->T,float);
+    l->dropout = (DROPOUT**) allocmem(l->B * l->H,1,DROPOUT*);
+    for (int i = 0; i < l->B * l->H; i++) {
+        l->dropout[i] = dropout_create(dropout_rate);
+        dropout_init(l->dropout[i],l->T,l->T);
+    }
 
     l->Scores = (fArr2D) cuallocmem(l->T,l->T,float);
     l->Oh = (fArr2D) cuallocmem(l->T,l->Dh,float);
@@ -156,8 +126,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
     rope_init(l->theta,l->Dh);
 
-    if (!training)
-        return;
+    if (!training) return;
 
     l->dOut = (fArr2D) cuallocmem(l->BT,l->D,float);
 
@@ -206,13 +175,16 @@ void mha_free(MHA* l)
     cufreemem(l->Vh);
 
     cufreemem(l->Att);
-    cufreemem(l->AttMask);
+    for (int i = 0; i < l->B * l->H; i++)
+        dropout_free(l->dropout[i]);
+    freemem(l->dropout);
 
     cufreemem(l->Scores);
     cufreemem(l->Oh);
 
     cufreemem(l->Out);
 
+    /* backward buffers */
     cufreemem(l->dOut);
 
     cufreemem(l->dQ);
@@ -236,6 +208,43 @@ void mha_free(MHA* l)
     cufreemem(l->Vh_cache);
 
     freemem(l);
+}
+
+static __global__ void scale_scores(float* x, int n, float scale)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= scale;
+}
+
+static __global__ void scale_and_mask_scores(float* Scores,
+                                             const int* pad_mask,
+                                             int b, int T,
+                                             int lookahead, float scale)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = T * T;
+    if (k < n) {
+        int i = k / T;
+        int j = k % T;
+        
+        float v;
+        
+        /* Causal / lookahead masking (Sec. 3.2.3, Fig. 2 generalised):
+         *   lookahead <  0 : skip - fully bidirectional attention
+         *   lookahead == 0 : strictly causal (mask every future frame)
+         *   lookahead == L : allow L future frames, mask beyond that
+         * Position i attends to j only where j <= i + lookahead
+         */
+        if (lookahead >= 0 && j > i + lookahead)
+            v = -1e9;
+        else
+        if (pad_mask != NULL && !pad_mask[b * T + j])
+            v = -1e9;
+        else
+            v = Scores[k] * scale;
+
+        Scores[k] = v;
+    }
 }
 
 /* mha_forward - forward pass of Multi-Head Attention (MHA) layer
@@ -336,7 +345,6 @@ void mha_forward(MHA* restrict l,
 
     ArrTT Scores = (ArrTT) l->Scores;
     ArrBHTT Att = (ArrBHTT) l->Att;
-    ArrBHTT AttMask = (ArrBHTT) l->AttMask;
     ArrTDh Oh = (ArrTDh) l->Oh;
 
     ArrBTD Out = (ArrBTD) l->Out;
@@ -344,7 +352,7 @@ void mha_forward(MHA* restrict l,
     float scale = 1.0 / sqrtf((float) Dh);
     int threads = 256;
     int blocks = (T * T + threads - 1) / threads;
-    
+
     /* Step 1 - Linear projections (in Eq. 1, Sec. 3.2.2):
      * Q = X @ Wq,  K = X @ Wk,  V = X @ Wv
      */
@@ -374,27 +382,28 @@ void mha_forward(MHA* restrict l,
             rope_apply((fArr2D)&Kh[base],l->theta,0,offset,T,Dh);
 
             /* Step 3 - Scaled dot-product attention (in Eq. 1, Sec. 3.2.1):
-             * Scores = Qh @ Kh.T / sqrt(Dh)
-             * Scores[i][j] = -1e9 for j > i + lookahead  (causal/lookahead mask)
+             * Scores  = Qh @ Kh.T
+             * Scores /= sqrt(Dh)
+             * Scores[i][j] = -1e9 for j > i + lookahead (causal/lookahead mask)
              * Att = softmax(Scores)
              * Oh  = Att @ Vh
              */
             matmulT(Scores,&Qh[base],&Kh[base],T,Dh,T);
 
-            scale_scores<<<blocks,threads>>>(
+            scale_and_mask_scores<<<blocks,threads>>>(
                    (float*) Scores,(const int *) pad_mask,b,T,lookahead,scale);
 
             /* Compute attention probabilities - Softmax - in Eq. 1 */
             softmax(Scores,T,T);
 
-            /* Store this head's attention weights for backward */
+            /* Store this head's attention weights (pre-dropout) for backward */
             cufltcpy(&Att[base],Scores,T * T);
 
-            if (training && l->training && l->dropout_rate > 0)
-                dropout(&Att[base],&AttMask[base],T,T,l->dropout_rate);
+            if (training && l->training && l->dropout[b * H + h]->rate > 0)
+                dropout_forward(l->dropout[b * H + h],Scores);
 
             /* In Eq. 1: Attention @ V */
-            matmul(Oh,&Att[base],&Vh[base],T,T,Dh);
+            matmul(Oh,Scores,&Vh[base],T,T,Dh);
 
             /* Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
              * Out = Concat(Oh_0, ..., Oh_{H-1})
@@ -475,7 +484,7 @@ void mha_forward_step(MHA* restrict l,
     int n = offset + 1;    /* Valid keys so far           */
     if (n > T) n = T;      /* Buffer is full              */
 
-    float scale = 1.0 / sqrtf((float)Dh);
+    float scale = 1.0 / sqrtf((float) Dh);
 
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
@@ -487,17 +496,19 @@ void mha_forward_step(MHA* restrict l,
         cufltcpy(qh,&Q[0][h * Dh],Dh);
         cufltcpy(kh,&K[0][h * Dh],Dh);
 
+        /* RoPE-rotate the new token's Q and K at absolute position offset */
         rope_apply((fArr2D)qh,l->theta,0,offset,1,Dh);
         rope_apply((fArr2D)kh,l->theta,0,offset,1,Dh);
 
+        /* Store rotated K and raw V into the ring at this slot */
         cufltcpy(&Kc[hbase + slot][0],kh,Dh);
         cufltcpy(&Vc[hbase + slot][0],&V[0][h * Dh],Dh);
 
+        /* Attention of the new token over the n valid cached keys */
         matmulT(l->Scores,(fArr2D) qh,&Kc[hbase],1,Dh,n);
-        scale_kernel<<<blocks,threads>>>((float*)l->Scores,n,scale);
+        scale_scores<<<blocks,threads>>>((float*)l->Scores,n,scale);
         softmax(l->Scores,1,n);
         matmul(l->Oh,l->Scores,&Vc[hbase],1,n,Dh);
-
         cufltcpy(&Out[0][h * Dh],l->Oh,Dh);
     }
 
@@ -505,6 +516,48 @@ void mha_forward_step(MHA* restrict l,
         matmul(Y,Out,Wo,1,D,D);
 }
 
+/* mha_backward - backward pass of Multi-Head Attention (MHA) layer.
+ *
+ * Computes gradients of the loss with respect to weights and inputs,
+ * reversing each step of mha_forward in order.
+ *
+ * Parameters:
+ *   l   - MHA layer
+ *   dY  - gradient of loss w.r.t. MHA output [BT][D]
+ *   X   - original MHA input [BT][D]
+ *   dX  - gradient of loss w.r.t. MHA input [BT][D], or NULL
+ *   lyr - layer index (informational)
+ *
+ * Reads back the per-(b,h) Qh, Kh, Vh, and Att stored by mha_forward
+ * for the same (b,h) pair, rather than recomputing them, so the values
+ * used here are guaranteed identical to what forward actually produced.
+ *
+ * Gradient steps (reverse of forward):
+ *
+ *   Step 4 backward - output projection (reverse of Y = Out @ Wo):
+ *     gWo  = Out.T @ dY
+ *     dOut = dY @ Wo.T
+ *
+ *   Step 3 backward - scaled dot-product attention, per (b,h):
+ *     (a) reverse Oh = Att @ Vh:
+ *           dVh  = Att.T @ dOh
+ *           dAtt = dOh @ Vh.T
+ *     (b) reverse Att = softmax(Scores):
+ *           dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
+ *           dScores /= sqrt(Dh)                  (reverse scaling)
+ *     (c) reverse Scores = Qh @ Kh.T:
+ *           dQh = dScores @ Kh
+ *           dKh = dScores.T @ Qh
+ *
+ *   Step 2 backward - accumulate head gradients into full tensors:
+ *     dQ[b*T+t][h*Dh+k] += dQh[t][k]
+ *     dK[b*T+t][h*Dh+k] += dKh[t][k]
+ *     dV[b*T+t][h*Dh+k] += dVh[t][k]
+ *
+ *   Step 1 backward - linear projections (reverse of Q=X@Wq, K=X@Wk, V=X@Wv):
+ *     gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
+ *     dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
+ */
 void mha_backward(MHA* restrict l,
                   fArr2D restrict dY/*[BT][D]*/,
                   const fArr2D restrict X/*[BT][D]*/,
@@ -512,6 +565,8 @@ void mha_backward(MHA* restrict l,
                   int lyr)
 {
     (void) lyr;
+    if (!l->training) return;
+
     const int B = l->B;
     const int T = l->T;
     const int D = l->D;
@@ -555,9 +610,10 @@ void mha_backward(MHA* restrict l,
     ArrBHTDh Vh = (ArrBHTDh) l->Vh;
 
     ArrBHTT Att = (ArrBHTT) l->Att;
-    ArrBHTT AttMask = (ArrBHTT) l->AttMask;
 
     ArrBTD Out = (ArrBTD) l->Out;
+
+    float scale = 1.0 / sqrtf((float) Dh);
 
     int threads = 256;
     int blocks = (T * T + threads - 1) / threads;
@@ -592,22 +648,31 @@ void mha_backward(MHA* restrict l,
             /* Step 3a backward - reverse Oh = Att @ Vh:
              * dVh  = Att.T @ dOh
              * dAtt = dOh @ Vh.T
+             *
+             * Note that the stored Att containts the pre-dropout values,
+             * whereas dVh calculation uses the post-dropout values, which
+             * can be resoncstructed by applying the dropout mask.
              */
-            Tmatmul(dVh,&Att[base],dOh,T,T,Dh);
+            if (l->dropout[b * H + h]->rate > 0) {
+                /* Use Scroes as scratch buffer */
+                dropout_backward(l->dropout[b * H + h],&Att[base],l->Scores);
+                Tmatmul(dVh,l->Scores,dOh,T,T,Dh);
+            }
+            else
+                Tmatmul(dVh,&Att[base],dOh,T,T,Dh);
+
             matmulT(dAtt,dOh,&Vh[base],T,Dh,T);
 
             /* Step 3b backward - reverse Att = softmax(Scores):
              * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
              * dScores /= sqrt(Dh)                  (reverse scaling)
              */
-            if (l->training && l->dropout_rate > 0)
-                mask_kernel<<<blocks,threads>>>(
-                             (float*)dAtt,(const float*)&AttMask[base],T * T);
+            if (l->dropout[b * H + h]->rate > 0)
+                dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
 
             d_softmax(dScores,dAtt,&Att[base],T,T);
 
-            float s = 1.0 / sqrtf((float)Dh);
-            scale_kernel<<<blocks,threads>>>((float*)dScores,T * T,s);
+            scale_scores<<<blocks,threads>>>((float*)dScores,T * T,scale);
 
             /* Step 3c backward - reverse Scores = Qh @ Kh.T:
              * dQh = dScores @ Kh
@@ -620,10 +685,8 @@ void mha_backward(MHA* restrict l,
             rope_apply((fArr2D)dQh,l->theta,1,0,T,Dh);
             rope_apply((fArr2D)dKh,l->theta,1,0,T,Dh);
 
-            /* Step 2 backward - accumulate head gradients into full tensors:
-             * dQ[b*T+t][h*Dh+k] += dQh[t][k]
-             * dK[b*T+t][h*Dh+k] += dKh[t][k]
-             * dV[b*T+t][h*Dh+k] += dVh[t][k]
+            /* Step 2 backward - concatenate head gradients
+             * dQ dimentsions B x T x D dQh dimensions B x T x Dh
              */
             for (int t = 0; t < T; t++) {
                 int r = b * T + t;
@@ -634,6 +697,10 @@ void mha_backward(MHA* restrict l,
         }
     }
 
+    /* Step 1 backward - reverse Q=X@Wq, K=X@Wk, V=X@Wv:
+     * gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
+     * dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
+     */
     cufltclr(gWq,D * D);
     cufltclr(gWk,D * D);
     cufltclr(gWv,D * D);

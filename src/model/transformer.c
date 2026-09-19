@@ -1,6 +1,13 @@
 /* Copyright (c) 2026 Gilad Odinak */
-/* Decoder-only Transformer layer implementation                           */
-/* Reference: Attention Is All You Need https://arxiv.org/pdf/1706.03762v7 */
+/* Decoder-only Transformer layer implementation
+ *
+ * Reference: Attention Is All You Need https://arxiv.org/pdf/1706.03762v7 
+ *
+ * Notes:
+ *   - The original paper uses ReLU. This implementation uses GELU instead.
+ *   - In the paper the FFN use a bias term (Sec. 3.3. Eq. 2),
+ *     This implementation omits the bias.
+ */
 #include <string.h>
 #include "float.h"
 #include "mem.h"
@@ -64,8 +71,7 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
 
     l->B = B;
     l->BT = BT;
-    l->dropout_rate = dropout_rate;
-    l->training = training;
+    l->training = training ? 1 : 0;
 
     mha_init(l->mha,D,B,training,0);
     addnorm_init(l->norm1,D,BT);
@@ -91,8 +97,10 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
     l->db2 = allocmem(D,1,float);
 
     if (dropout_rate > 0) {
-        l->drop_mask1 = allocmem(BT,D,float);
-        l->drop_mask2 = allocmem(BT,D,float);
+        l->dropout1 = dropout_create(dropout_rate);
+        l->dropout2 = dropout_create(dropout_rate);
+        dropout_init(l->dropout1,D,BT);
+        dropout_init(l->dropout2,D,BT);
     }
 }
 
@@ -100,11 +108,16 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
  */
 void transformer_free(TRANSFORMER* l)
 {
+    if (l == NULL) return;
+
     dense_free(l->ffn1);
     dense_free(l->ffn2);
     addnorm_free(l->norm1);
     addnorm_free(l->norm2);
+    dropout_free(l->dropout1);
+    dropout_free(l->dropout2);
     mha_free(l->mha);
+
     freemem(l->mha_out);
     freemem(l->norm1_out);
     freemem(l->d_norm2_in);
@@ -117,8 +130,7 @@ void transformer_free(TRANSFORMER* l)
     freemem(l->db1);
     freemem(l->dg2);
     freemem(l->db2);
-    freemem(l->drop_mask1);
-    freemem(l->drop_mask2);
+
     freemem(l);
 }
 
@@ -164,44 +176,34 @@ void transformer_forward(TRANSFORMER* restrict l,
                          fArr2D Y /*[BT][D]*/,
                          int lyr)
 {
-    const int BT = l->BT;
-    const int D  = l->D;
-
-    typedef float (*ArrBTD)[D];
-
-    ArrBTD mha_out = (ArrBTD) l->mha_out;
-    ArrBTD drop_mask1 = (ArrBTD) l->drop_mask1;
-    ArrBTD norm1_out = (ArrBTD) l->norm1_out;
-    ArrBTD drop_mask2 = (ArrBTD) l->drop_mask2;
-
     /* Step 1 - Masked multi-head self-attention (Sec. 3.2.3):
      * mha_out = MaskedMHA(X)
      * mha_out = dropout(mha_out)
      */
-    mha_forward(l->mha, X, pad_mask,mha_out,0,training,lyr);
-    if (training && l->training && l->dropout_rate > 0)
-        dropout(mha_out,drop_mask1,BT,D,l->dropout_rate);
+    mha_forward(l->mha,X,pad_mask,l->mha_out,0,training,lyr);
+    if (training && l->training && l->dropout1 != NULL)
+        dropout_forward(l->dropout1,l->mha_out);
 
     /* Step 2 - First residual add + layer norm (Sec. 3.1):
      * norm1_out = LayerNorm(X + mha_out)
      */
-    addnorm_forward(l->norm1,X,mha_out,norm1_out);
+    addnorm_forward(l->norm1,X,l->mha_out,l->norm1_out);
 
     /* Step 3 - Position-wise feed-forward network (Sec. 3.3):
      * ffn1_out = gelu(norm1_out @ Wx1)
      * ffn2_out = ffn1_out @ Wx2
      * ffn2_out = dropout(ffn2_out)
      */
-    fArr2D ffn1_out = dense_forward(l->ffn1,norm1_out,lyr);
+    fArr2D ffn1_out = dense_forward(l->ffn1,l->norm1_out,lyr);
     fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,lyr);
 
-    if (training && l->training && l->dropout_rate > 0)
-        dropout(ffn2_out,drop_mask2,BT,D,l->dropout_rate);
+    if (training && l->training && l->dropout2 != NULL)
+        dropout_forward(l->dropout2,ffn2_out);
 
     /* Step 4 - Second residual add + layer norm (Sec. 3.1):
      * Y = LayerNorm(norm1_out + ffn2_out)
      */
-    addnorm_forward(l->norm2,norm1_out,ffn2_out,Y);
+    addnorm_forward(l->norm2,l->norm1_out,ffn2_out,Y);
 }
 
 /* transformer_forward_step - single-token cached forward for decoding.
@@ -222,23 +224,24 @@ void transformer_forward_step(TRANSFORMER* restrict l,
                               fArr2D Y /*[1][D]*/,
                               int lyr)
 {
-    const int D = l->D;
-    typedef float (*ArrBTD)[D];
-    ArrBTD mha_out = (ArrBTD) l->mha_out;
-    ArrBTD norm1_out = (ArrBTD) l->norm1_out;
-
     /* Masked self-attention for the single token via the KV cache */
-    mha_forward_step(l->mha,X,mha_out,offset,lyr);
+    mha_forward_step(l->mha,X,l->mha_out,offset,lyr);
 
-    /* Residual + norm (one row; sub-layer B must be 1). */
-    addnorm_forward(l->norm1,X,mha_out,norm1_out);
+    /* Residual + norm (one row; sub-layer B must be 1) */
+    addnorm_forward(l->norm1,X,l->mha_out,l->norm1_out);
 
-    /* FFN (one row). */
-    fArr2D ffn1_out = dense_forward(l->ffn1,norm1_out,lyr);
+    /* FFN (one row) */
+    fArr2D ffn1_out = dense_forward(l->ffn1,l->norm1_out,lyr);
     fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,lyr);
 
-    /* Residual + norm. */
-    addnorm_forward(l->norm2,norm1_out,ffn2_out,Y);
+    /* Residual + norm */
+    addnorm_forward(l->norm2,l->norm1_out,ffn2_out,Y);
+}
+
+static inline void transformer_add(fArr2D a1, fArr2D a2, int BT, int D)
+{
+    for (int i = 0; i < BT * D; i++)
+        ((float*) a1)[i] += ((float*) a2)[i];
 }
 
 /* transformer_backward - backward pass of a decoder-only transformer layer.
@@ -322,8 +325,8 @@ void transformer_backward(TRANSFORMER* restrict l,
      * d_ffn2_in = d_norm2_in * drop_mask2   (residual branch preserved)
      */
     fArr2D d_ffn2_in = l->d_ffn2_in;
-    if (l->training && l->dropout_rate > 0)
-        apply_dropout_mask(d_norm2_in,l->drop_mask2,d_ffn2_in,BT,D);
+    if (l->training && l->dropout2 != NULL)
+        dropout_backward(l->dropout2,d_norm2_in,d_ffn2_in);
     else
         d_ffn2_in = (fArr2D) d_norm2_in;
 
@@ -343,8 +346,7 @@ void transformer_backward(TRANSFORMER* restrict l,
      * d_norm1_in += d_norm2_in
      * (norm1_out feeds both the FFN branch and the AddNorm2 residual)
      */
-    for (int i = 0; i < BT * D; i++)
-        ((float*) d_norm1_in)[i] += ((float*) d_norm2_in)[i];
+    transformer_add(l->d_norm1_in,l->d_norm2_in,BT,D);
 
     /* Step 2 backward - first residual add + layer norm
      * (reverse of norm1_out = LayerNorm(X + mha_out)):
@@ -361,12 +363,13 @@ void transformer_backward(TRANSFORMER* restrict l,
      *   (X feeds both the MHA branch and the AddNorm1 residual)
      */
     fArr2D d_mha_masked = l->d_mha_masked;
-    if (l->training && l->dropout_rate > 0)
-        apply_dropout_mask(d_mha_out,l->drop_mask1,d_mha_masked,BT,D);
+    if (l->training && l->dropout1 != NULL)
+        dropout_backward(l->dropout1,d_mha_out,d_mha_masked);
     else
-        d_mha_masked = d_mha_out;
+        d_mha_masked = l->d_mha_out;
 
     mha_backward(l->mha,d_mha_masked,X,dX,lyr);
+
     if (dX != NULL) {
         for (int i = 0; i < BT * D; i++)
             ((float*) dX)[i] += ((float*) d_mha_out)[i];

@@ -32,7 +32,7 @@
  *     sub-layer's own header.
  *   - The transformer's forward/backward scratch buffers are (re)allocated
  *     here, mirroring transformer_init(): backward/gradient buffers only when
- *     training is non-zero, and dropout masks only when dropout_rate > 0.
+ *     training is non-zero, and dropout layers only when dropout_rate > 0.
  */
 TRANSFORMER* read_transformer(FILE* fp)
 {
@@ -53,7 +53,6 @@ TRANSFORMER* read_transformer(FILE* fp)
     l->Dff = Dff;
     l->BT = B * T;
     l->training = (training) ? 1 : 0;
-    l->dropout_rate = dropout_rate;
 
     /* Sub-layers (order must match write_transformer) */
     l->mha = read_mha(fp);
@@ -99,9 +98,11 @@ TRANSFORMER* read_transformer(FILE* fp)
         l->dg2 = allocmem(l->D,1,float);
         l->db2 = allocmem(l->D,1,float);
 
-        if (l->dropout_rate > 0) {
-            l->drop_mask1 = allocmem(l->BT,l->D,float);
-            l->drop_mask2 = allocmem(l->BT,l->D,float);
+        if (dropout_rate > 0) {
+            l->dropout1 = dropout_create(dropout_rate);
+            l->dropout2 = dropout_create(dropout_rate);
+            dropout_init(l->dropout1,l->D,l->BT);
+            dropout_init(l->dropout2,l->D,l->BT);
         }
     }
     return l;
@@ -131,7 +132,7 @@ err: /* error exit - free only the sub-layers already created, then self */
 int write_transformer(const TRANSFORMER* l, int final, FILE* fp)
 {
     int training = final ? 0 : l->training;
-    float dropout_rate = final ? 0.0f : l->dropout_rate;
+    float dropout_rate = final || l->dropout1 == NULL ? 0.0 : l->dropout1->rate;
     int cnt = fprintf(fp,"TRANSFORMER B %d T %d D %d Dff %d"
                          " training %d dropout %.9g\n",
                       l->B,l->T,l->D,l->Dff,training,dropout_rate);

@@ -69,6 +69,7 @@ static __global__ void rope_apply_kernel(float* x,
         x[t * Dh + 2 * i + 1] = x0 * sin_a + x1 * cos_a;
     }
 }
+
 static inline void rope_apply(fArr2D x/*[T][Dh]*/,
                               const float* theta,
                               int inverse,

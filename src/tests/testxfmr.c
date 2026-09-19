@@ -330,6 +330,7 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
     const int BT = l_train->BT;
     const int D  = l_train->D;
 
+    /* CPU memory (see below) */
     float X[BT][D];
     float Y1[BT][D];
     float Y2[BT][D];
@@ -338,11 +339,19 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
         for (int j = 0; j < D; j++)
             X[i][j] = urand(-1.0f,1.0f);
 
+    /* Either CPU or GPU memory */
+    fArr2D Xnn  = nnallocmem(BT,D,float);
+    fArr2D Y1nn = nnallocmem(BT,D,float);
+    fArr2D Y2nn = nnallocmem(BT,D,float);
+    nnfltcpy(Xnn,X,BT * D);
+
     /* Training: two passes should differ */
-    fltclr(Y1,BT * D);
-    transformer_forward_host(l_train,(fArr2D) X,(fArr2D) Y1,BT,D);
-    fltclr(Y2,BT * D);
-    transformer_forward_host(l_train,(fArr2D) X,(fArr2D) Y2,BT,D);
+    nnfltclr(Y1nn,BT * D);
+    transformer_forward(l_train,Xnn,NULL,1,Y1nn,0);
+    nnfltcpy(Y1,Y1nn,BT * D);
+    nnfltclr(Y2nn,BT * D);
+    transformer_forward(l_train,Xnn,NULL,1,Y2nn,0);
+    nnfltcpy(Y2,Y2nn,BT * D);
 
     float diff = 0;
     for (int i = 0; i < BT; i++)
@@ -351,14 +360,16 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
     if (diff < 1e-6f) {
         printf("FAIL dropout: training passes produced identical outputs\n");
         failures++;
-        return;
+        goto Exit;
     }
 
     /* Inference: two passes must be identical */
-    fltclr(Y1,BT * D);
-    transformer_forward_host(l_infer,(fArr2D) X,(fArr2D) Y1,BT,D);
-    fltclr(Y2,BT * D);
-    transformer_forward_host(l_infer,(fArr2D) X,(fArr2D) Y2,BT,D);
+    nnfltclr(Y1nn,BT * D);
+    transformer_forward(l_infer,Xnn,NULL,1,Y1nn,0);
+    nnfltcpy(Y1,Y1nn,BT * D);
+    nnfltclr(Y2nn,BT * D);
+    transformer_forward(l_infer,Xnn,NULL,1,Y2nn,0);
+    nnfltcpy(Y2,Y2nn,BT * D);
 
     diff = 0;
     for (int i = 0; i < BT; i++)
@@ -367,10 +378,14 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
     if (diff > 0.0f) {
         printf("FAIL dropout: inference passes produced different outputs\n");
         failures++;
-        return;
+        goto Exit;
     }
 
     printf("PASS\n");
+Exit:
+    nnfreemem(Xnn);
+    nnfreemem(Y1nn);
+    nnfreemem(Y2nn);
 }
 
 void smoke_test(void)
@@ -632,7 +647,7 @@ int main(void)
 
     failures = 0;
     smoke_test();
-//  training_test();
+    training_test();
 
     if (failures == 0)
         printf("\nALL TESTS PASSED\n");

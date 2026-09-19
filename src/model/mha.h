@@ -21,7 +21,6 @@ typedef struct {
 
     int lookahead;      /* Causal masking, set at create time below  */
     int training;       /* 1 if training, 0 if inference             */
-    float dropout_rate; /* Fraction of attention weights to zero out */
 
     fArr2D Wq;  /* [D][D] */
     fArr2D Wk;  /* [D][D] */
@@ -43,7 +42,7 @@ typedef struct {
     fArr2D Vh;      /* [BHT][Dh] row (b*H+h)*T+t */
 
     fArr2D Att;     /* [BHT][T] row (b*H+h)*T+t */
-    fArr2D AttMask; /* [BHT][T] row (b*H+h)*T+t */
+    DROPOUT** dropout;  /* [B*H] */
 
     fArr2D Scores;  /* [T][T]   scratch, not persisted */
     fArr2D Oh;      /* [T][Dh]  scratch, not persisted */
@@ -159,39 +158,11 @@ void mha_free(MHA* l);
  *               during inference/generation (no dropout, deterministic).
  *   lyr       : Layer index.
  *
- * Causal / lookahead masking is fixed per layer and taken from
- * l->lookahead (set in mha_create): < 0 bidirectional, 0 strictly causal,
- * L causal with L frames of future context. Position i may attend to
- * position j only when j <= i + l->lookahead. Independent of pad_mask.
- *
- * Computation (per head h, per batch item b):
- *
- *   Step 1 - Linear projections (in Eq. 1, Sec. 3.2.2):
- *     Q = X @ Wq,  K = X @ Wk,  V = X @ Wv
- *
- *   Step 2 - Split into heads (Sec. 3.2.2):
- *     Qh = Q[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
- *     Kh = K[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
- *     Vh = V[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
- *
- *   Step 3 - Scaled dot-product attention (in Eq. 1, Sec. 3.2.1):
- *     Scores = Qh @ Kh.T / sqrt(Dh)
- *     Scores[i][j] = -1e9 for j > i + lookahead  (causal/lookahead mask)
- *     Att = softmax(Scores)           (row-wise)
- *     Oh  = Att @ Vh
- *
- *   Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
- *     Out = Concat(Oh_0, ..., Oh_{H-1})
- *     Y   = Out @ Wo if Y != NULL
- *
  * Notes: 
  *  1. Padding is not allowed at the beginning of a sequence;
  *     only trailing (right-aligned) padding is supported.
  *  2. Offset is used when training overlapping windows:
  *     each batch's start position advances by the window stride.
- *  3. Qh, Kh, Vh, and Att are stored per (b,h) pair for the whole
- *     batch, so that mha_backward can read back exactly what forward
- *     computed for each (b,h) without recomputing it.
  *
  * Reference:
  *   - Vaswani et al., "Attention Is All You Need", 2017
@@ -206,15 +177,7 @@ void mha_forward(MHA* restrict l,
 
 /* mha_forward_step - single-token cached forward (B=1, inference only).
  *
- * Processes one token at absolute position 'offset': projects Q/K/V, RoPE-
- * rotates Q and K, appends the rotated K and V to per-head ring buffers
- * (slot = offset % T), and attends the query over the last min(offset+1, T)
- * cached keys, writing [1][D] to Y.
- *
- * Keys are cached already rotated, so attention over the ring is correct
- * without re-rotating (RoPE depends only on position differences). offset 0
- * starts a fresh sequence. Causal masking is implicit (cached keys are all at
- * positions <= offset).
+ * Processes one token at absolute position 'offset'.
  *
  * Parameters:
  *   l      - MHA layer
@@ -234,35 +197,12 @@ void mha_forward_step(MHA* restrict l,
  * Computes gradients of the loss with respect to weights and inputs,
  * reversing each step of mha_forward in order.
  *
- * Reads back the per-(b,h) Qh, Kh, Vh, and Att stored by mha_forward
- * for the same (b,h) pair, rather than recomputing them, so the values
- * used here are guaranteed identical to what forward actually produced.
- *
- * Gradient steps (reverse of forward):
- *
- *   Step 4 backward - output projection (reverse of Y = Out @ Wo):
- *     gWo  = Out.T @ dY
- *     dOut = dY @ Wo.T
- *
- *   Step 3 backward - scaled dot-product attention, per (b,h):
- *     (a) reverse Oh = Att @ Vh:
- *           dVh  = Att.T @ dOh
- *           dAtt = dOh @ Vh.T
- *     (b) reverse Att = softmax(Scores):
- *           dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
- *           dScores /= sqrt(Dh)                  (reverse scaling)
- *     (c) reverse Scores = Qh @ Kh.T:
- *           dQh = dScores @ Kh
- *           dKh = dScores.T @ Qh
- *
- *   Step 2 backward - accumulate head gradients into full tensors:
- *     dQ[b*T+t][h*Dh+k] += dQh[t][k]
- *     dK[b*T+t][h*Dh+k] += dKh[t][k]
- *     dV[b*T+t][h*Dh+k] += dVh[t][k]
- *
- *   Step 1 backward - linear projections (reverse of Q=X@Wq, K=X@Wk, V=X@Wv):
- *     gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
- *     dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
+ * Parameters:
+ *   l   - MHA layer
+ *   dY  - gradient of loss w.r.t. MHA output [BT][D]
+ *   X   - original MHA input [BT][D]
+ *   dX  - gradient of loss w.r.t. MHA input [BT][D], or NULL
+ *   lyr - layer index (informational)
  */
 void mha_backward(MHA* restrict l,
                   fArr2D restrict dY /*[BT][D]*/,

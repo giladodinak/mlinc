@@ -21,7 +21,7 @@
  * range[1] - highest input (x) value (exclusive)
  * range[2] - increment between x values
  */
-inline float f(float x) { return 0.6 * (sin(x) + 0.4 * sin(1.6 + 1.5 * x)); }
+static inline float f(float x) { return 0.6 * (sin(x) + 0.4 * sin(1.6 + 1.5 * x)); }
 int test_lstm(const float range[3], const int layers[], int layers_cnt,
                           float learning_rate, float weight_decay, int epochs)
 {    
