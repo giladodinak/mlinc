@@ -1,4 +1,4 @@
-/* Copyright (c) 2026 Gilad Odinak */
+
 /* Tests for the decoder-only transformer layer */
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,19 +29,6 @@ static void transformer_forward_host(TRANSFORMER* l,
     nnfltcpy(Y,Ynn,BT * D);
     nnfreemem(Xnn);
     nnfreemem(Ynn);
-}
-
-/* Reads/writes one float in CPU or GPU memory */
-static inline float nnfltget(const float* p)
-{
-    float v;
-    nnfltcpy(&v,p,1);
-    return v;
-}
-
-static inline void nnfltset(float* p,float v)
-{
-    nnfltcpy(p,&v,1);
 }
 
 /* Loss is L = sum(dY * Y) */
@@ -80,34 +67,34 @@ static inline float numerical_grad_input(float* w,TRANSFORMER* l,
     return (Lp - Ln) / (2 * EPS);
 }
 
-/* Compute numerical gradient for a single backend weight element */
-static inline float numerical_grad_weight(float* w,TRANSFORMER* l,
-                                          float* X,
-                                          const float* dY,
-                                          fArr2D Xnn,fArr2D Ynn,
-                                          int BT,int D)
-{
-    const float EPS = 1e-3f;
-    float old = nnfltget(w);
-    nnfltset(w,old + EPS);
-    float Lp = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
-    nnfltset(w,old - EPS);
-    float Ln = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
-    nnfltset(w,old);
-    return (Lp - Ln) / (2 * EPS);
-}
-
 /* Check all elements of a weight matrix against their analytical gradients */
 static int check_weight(fArr2D W,fArr2D gW,int rows,int cols,
                         const char* name,TRANSFORMER* l,float* X,
                         const float* dY,fArr2D Xnn,fArr2D Ynn,
                         int BT,int D,float TOL)
 {
-    float* w  = (float*) W;
-    float* gw = (float*) gW;
-    for (int k = 0; k < rows * cols; k++) {
-        float num = numerical_grad_weight(&w[k],l,X,dY,Xnn,Ynn,BT,D);
-        float grad = nnfltget(&gw[k]);
+    const float EPS = 1e-3f;
+    const int n = rows * cols;
+    float w[n];
+    float gw[n];
+
+    /* Keep host copies for finite-difference perturbations/comparisons. */
+    nnfltcpy(w,W,n);
+    nnfltcpy(gw,gW,n);
+
+    for (int k = 0; k < n; k++) {
+        float old = w[k];
+        w[k] = old + EPS;
+        nnfltcpy(W,w,n);
+        float Lp = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
+        w[k] = old - EPS;
+        nnfltcpy(W,w,n);
+        float Ln = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
+        w[k] = old;
+        nnfltcpy(W,w,n);
+
+        float num = (Lp - Ln) / (2 * EPS);
+        float grad = gw[k];
         if (fabsf(num - grad) > TOL) {
             printf("FAIL %s[%d][%d]: expected=%g calculated=%g\n",
                    name,k / cols,k % cols,num,grad);

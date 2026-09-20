@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <math.h>
 #include <time.h>
+#include <string.h>
+#include "float.h"
 #include "mem.h"
 #include "random.h"
 #include "arraytypes.h"
@@ -19,18 +21,19 @@ void test_mha_zero_forward(MHA* m)
     int BT = m->BT;
     int D  = m->D;
 
-    float X[BT][D];
+    fArr2D nnX = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nnY = (fArr2D) nnallocmem(BT,D,float);
     float Y[BT][D];
 
-    fltclr(X,BT*D);
-    fltclr(Y,BT*D);
-    fltclr(m->Wq,D*D);
-    fltclr(m->Wk,D*D);
-    fltclr(m->Wv,D*D);
-    fltclr(m->Wo,D*D);
+    nnfltclr(nnX,BT*D);
+    nnfltclr(nnY,BT*D);
+    nnfltclr(m->Wq,D*D);
+    nnfltclr(m->Wk,D*D);
+    nnfltclr(m->Wv,D*D);
+    nnfltclr(m->Wo,D*D);
 
-    mha_forward(m,X,NULL,Y,0,0,0);
-
+    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    nnfltcpy(Y,nnY,BT*D);
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
             if (fabsf(Y[i][j]) > 1e-9f) {
@@ -41,6 +44,8 @@ void test_mha_zero_forward(MHA* m)
     }
 
     printf("  OK\n");
+    nnfreemem(nnX);
+    nnfreemem(nnY);
 }
 
 void test_mha_attention_active(MHA* m)
@@ -54,27 +59,30 @@ void test_mha_attention_active(MHA* m)
 
     float X[BT][D];
     float Y[BT][D];
-
-    typedef float (*ArrDD)[D];
-    ArrDD Wq = (ArrDD) m->Wq;
-    ArrDD Wk = (ArrDD) m->Wk;
-    ArrDD Wv = (ArrDD) m->Wv;
-    ArrDD Wo = (ArrDD) m->Wo;
+    float Wq[D][D];
+    float Wk[D][D];
+    float Wv[D][D];
+    float Wo[D][D];
 
     /* Set Wq,Wk,Wv,Wo to identity */
-    fltclr(m->Wq,D * D);
-    fltclr(m->Wk,D * D);
-    fltclr(m->Wv,D * D);
-    fltclr(m->Wo,D * D);
+    fltclr(Wq,D * D);
+    fltclr(Wk,D * D);
+    fltclr(Wv,D * D);
+    fltclr(Wo,D * D);
     for (int i = 0; i < D; i++) {
         Wq[i][i] = 1.0f;
         Wk[i][i] = 1.0f;
         Wv[i][i] = 1.0f;
         Wo[i][i] = 1.0f;
     }
+    nnfltcpy(m->Wq,Wq,D * D);
+    nnfltcpy(m->Wk,Wk,D * D);
+    nnfltcpy(m->Wv,Wv,D * D);
+    nnfltcpy(m->Wo,Wo,D * D);
 
     /* Fill X with small random values,then set token 0 of each batch
-     * to a large distinctive value so it dominates dot-product scores */
+     * to a large distinctive value so it dominates dot-product scores
+     */
     for (int b = 0; b < B; b++) {
         for (int t = 0; t < T; t++) {
             for (int j = 0; j < D; j++)
@@ -85,8 +93,12 @@ void test_mha_attention_active(MHA* m)
             X[b * T + 0][j] = 3.0f;
     }
 
-    fltclr(Y,BT * D);
-    mha_forward(m,X,NULL,Y,0,0,0);
+    fArr2D nnX = nnallocmem(BT,D,float);
+    fArr2D nnY = nnallocmem(BT,D,float);
+    nnfltcpy(nnX,X,BT * D);
+    nnfltclr(nnY,BT * D);
+    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    nnfltcpy(Y,nnY,BT * D);
 
     /* With identity weights and token 0 dominant,token 0's output
      * should be close to its own input value (self-attention dominates)
@@ -114,6 +126,8 @@ void test_mha_attention_active(MHA* m)
         exit(1);
     }
 
+    nnfreemem(nnX);
+    nnfreemem(nnY);
     printf("  OK\n");
 }
 
@@ -122,10 +136,13 @@ float mha_loss(MHA* m,fArr2D X)
     int BT = m->BT;
     int D  = m->D;
 
+    fArr2D Ynn = nnallocmem(BT,D,float);
     float Y[BT][D];
-    fltclr(Y,BT * D);
+    nnfltclr(Ynn,BT * D);
 
-    mha_forward(m,X,NULL,Y,0,0,0);
+    mha_forward(m,X,NULL,Ynn,0,0,0);
+    nnfltcpy(Y,Ynn,BT * D);
+    nnfreemem(Ynn);
 
     float L = 0;
     for (int i = 0; i < BT; i++)
@@ -143,42 +160,60 @@ void test_mha_finite_diff(MHA* m)
     int D  = m->D;
 
     float X[BT][D];
-    float Y[BT][D];
     float dX[BT][D];
     float dY[BT][D];
+    float Wq[D][D];
+    float Wk[D][D];
+    float Wv[D][D];
+    float Wo[D][D];
+    float gWq[D][D];
+    float gWk[D][D];
+    float gWv[D][D];
+    float gWo[D][D];
 
-    typedef float (*ArrDD)[D];
-
-    ArrDD Wq = (ArrDD) m->Wq;
-    ArrDD Wk = (ArrDD) m->Wk;
-    ArrDD Wv = (ArrDD) m->Wv;
-    ArrDD Wo = (ArrDD) m->Wo;
-    ArrDD gWq = (ArrDD) m->gWq;
-    ArrDD gWk = (ArrDD) m->gWk;
-    ArrDD gWv = (ArrDD) m->gWv;
-    ArrDD gWo = (ArrDD) m->gWo;
-
-    fltclr(Y,BT * D);
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
             X[i][j]  = urand(-1.0,1.0);
-            dX[i][j] = 0;
             dY[i][j] = 1;   /* dL/dY = 1 */
         }
     }
 
-    mha_forward(m,X,NULL,Y,0,0,0);
-    mha_backward(m,dY,X,dX,0);
+    fArr2D nnX  = nnallocmem(BT,D,float);
+    fArr2D nnY  = nnallocmem(BT,D,float);
+    fArr2D nndX = nnallocmem(BT,D,float);
+    fArr2D nndY = nnallocmem(BT,D,float);
+    nnfltcpy(nnX,X,BT * D);
+    nnfltcpy(nndY,dY,BT * D);
+    nnfltclr(nnY,BT * D);
+    nnfltclr(nndX,BT * D);
+
+    /* Keep host copies of weights for finite-difference perturbations. */
+    nnfltcpy(Wq,m->Wq,D * D);
+    nnfltcpy(Wk,m->Wk,D * D);
+    nnfltcpy(Wv,m->Wv,D * D);
+    nnfltcpy(Wo,m->Wo,D * D);
+
+    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    mha_backward(m,nndY,nnX,nndX,0);
+
+    nnfltcpy(dX,nndX,BT * D);
+    nnfltcpy(gWq,m->gWq,D * D);
+    nnfltcpy(gWk,m->gWk,D * D);
+    nnfltcpy(gWv,m->gWv,D * D);
+    nnfltcpy(gWo,m->gWo,D * D);
 
     /* Check dX */
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
             float old = X[i][j];
             X[i][j] = old + EPS;
-            float Lp = mha_loss(m,X);
+            nnfltcpy(nnX,X,BT * D);
+            float Lp = mha_loss(m,nnX);
             X[i][j] = old - EPS;
-            float Ln = mha_loss(m,X);
+            nnfltcpy(nnX,X,BT * D);
+            float Ln = mha_loss(m,nnX);
             X[i][j] = old;
+            nnfltcpy(nnX,X,BT * D);
 
             float num = (Lp - Ln) / (2 * EPS);
             float ana = dX[i][j];
@@ -195,10 +230,13 @@ void test_mha_finite_diff(MHA* m)
         for (int j = 0; j < D; j++) {
             float old = Wq[i][j];
             Wq[i][j] = old + EPS;
-            float Lp = mha_loss(m,X);
+            nnfltcpy(m->Wq,Wq,D * D);
+            float Lp = mha_loss(m,nnX);
             Wq[i][j] = old - EPS;
-            float Ln = mha_loss(m,X);
+            nnfltcpy(m->Wq,Wq,D * D);
+            float Ln = mha_loss(m,nnX);
             Wq[i][j] = old;
+            nnfltcpy(m->Wq,Wq,D * D);
 
             float num = (Lp - Ln) / (2 * EPS);
             float ana = gWq[i][j];
@@ -215,10 +253,13 @@ void test_mha_finite_diff(MHA* m)
         for (int j = 0; j < D; j++) {
             float old = Wk[i][j];
             Wk[i][j] = old + EPS;
-            float Lp = mha_loss(m,X);
+            nnfltcpy(m->Wk,Wk,D * D);
+            float Lp = mha_loss(m,nnX);
             Wk[i][j] = old - EPS;
-            float Ln = mha_loss(m,X);
+            nnfltcpy(m->Wk,Wk,D * D);
+            float Ln = mha_loss(m,nnX);
             Wk[i][j] = old;
+            nnfltcpy(m->Wk,Wk,D * D);
 
             float num = (Lp - Ln) / (2 * EPS);
             float ana = gWk[i][j];
@@ -235,10 +276,13 @@ void test_mha_finite_diff(MHA* m)
         for (int j = 0; j < D; j++) {
             float old = Wv[i][j];
             Wv[i][j] = old + EPS;
-            float Lp = mha_loss(m,X);
+            nnfltcpy(m->Wv,Wv,D * D);
+            float Lp = mha_loss(m,nnX);
             Wv[i][j] = old - EPS;
-            float Ln = mha_loss(m,X);
+            nnfltcpy(m->Wv,Wv,D * D);
+            float Ln = mha_loss(m,nnX);
             Wv[i][j] = old;
+            nnfltcpy(m->Wv,Wv,D * D);
 
             float num = (Lp - Ln) / (2 * EPS);
             float ana = gWv[i][j];
@@ -255,10 +299,13 @@ void test_mha_finite_diff(MHA* m)
         for (int j = 0; j < D; j++) {
             float old = Wo[i][j];
             Wo[i][j] = old + EPS;
-            float Lp = mha_loss(m,X);
+            nnfltcpy(m->Wo,Wo,D * D);
+            float Lp = mha_loss(m,nnX);
             Wo[i][j] = old - EPS;
-            float Ln = mha_loss(m,X);
+            nnfltcpy(m->Wo,Wo,D * D);
+            float Ln = mha_loss(m,nnX);
             Wo[i][j] = old;
+            nnfltcpy(m->Wo,Wo,D * D);
 
             float num = (Lp - Ln) / (2 * EPS);
             float ana = gWo[i][j];
@@ -270,14 +317,21 @@ void test_mha_finite_diff(MHA* m)
         }
     }
 
+    nnfreemem(nnX);
+    nnfreemem(nnY);
+    nnfreemem(nndX);
+    nnfreemem(nndY);
     printf("  OK\n");
 }
 
 float softmax_loss(fArr2D Scores,fArr2D dAtt_,int T)
 {
     float Att[T][T];
-    fltcpy(Att,Scores,T * T);
-    softmax(Att,T,T);
+    fArr2D nnAtt = nnallocmem(T,T,float);
+    nnfltcpy(nnAtt,Scores,T * T);
+    softmax(nnAtt,T,T);
+    nnfltcpy(Att,nnAtt,T * T);
+    nnfreemem(nnAtt);
 
     typedef float (*ArrTT)[T];
     const ArrTT dAtt = (ArrTT) dAtt_;
@@ -285,7 +339,7 @@ float softmax_loss(fArr2D Scores,fArr2D dAtt_,int T)
     float L = 0;
     for (int i = 0; i < T; i++)
         for (int j = 0; j < T; j++)
-        L += Att[i][j] * dAtt[i][j];
+            L += Att[i][j] * dAtt[i][j];
 
     return L;
 }
@@ -298,7 +352,6 @@ void test_d_softmax(void)
     float Scores[T][T];
     float dAtt[T][T];
     float dScores[T][T];
-    float Att[T][T];
 
     for (int i = 0; i < T; i++) {
         for (int j = 0; j < T; j++) {
@@ -307,20 +360,23 @@ void test_d_softmax(void)
         }
     }
 
-    memcpy(Att,Scores,sizeof(Scores));
-    softmax((fArr2D)Att,T,T);
-
-    memcpy(dScores,dAtt,sizeof(dAtt));
-    d_softmax(dScores,dAtt,Att,T,T);
+    fArr2D nnAtt = nnallocmem(T,T,float);
+    fArr2D nndAtt = nnallocmem(T,T,float);
+    fArr2D nndScores = nnallocmem(T,T,float);
+    nnfltcpy(nnAtt,Scores,T * T);
+    nnfltcpy(nndAtt,dAtt,T * T);
+    softmax(nnAtt,T,T);
+    d_softmax(nndScores,nndAtt,nnAtt,T,T);
+    nnfltcpy(dScores,nndScores,T * T);
 
     for (int i = 0; i < T; i++) {
         for (int j = 0; j < T; j++) {
 
             float old = Scores[i][j];
             Scores[i][j] = old + EPS;
-            float Lp = softmax_loss(Scores,dAtt,T);
+            float Lp = softmax_loss((fArr2D)Scores,(fArr2D)dAtt,T);
             Scores[i][j] = old - EPS;
-            float Ln = softmax_loss(Scores,dAtt,T);
+            float Ln = softmax_loss((fArr2D)Scores,(fArr2D)dAtt,T);
             Scores[i][j] = old;
 
             float num = (Lp - Ln) / (2 * EPS);
@@ -334,6 +390,9 @@ void test_d_softmax(void)
         }
     }
 
+    nnfreemem(nnAtt);
+    nnfreemem(nndAtt);
+    nnfreemem(nndScores);
     printf("  OK\n");
 }
 
@@ -347,29 +406,34 @@ void test_mask(MHA* m)
 
     float X[BT][D];
     float Y[BT][D];
-
-    typedef float (*ArrDD)[D];
-    typedef float (*ArrTT)[T];
+    float Wq[D][D];
+    float Wk[D][D];
+    float Scores[T][T];
 
     for (int i = 0; i < BT; i++)
         for (int j = 0; j < D; j++)
             X[i][j] = urand(-0.1,0.1);
 
-    fltclr(m->Wq,D * D);
-    fltclr(m->Wk,D * D);
-    fltclr(m->Wv,D * D);
-    fltclr(m->Wo,D * D);
+    nnfltclr(m->Wq,D * D);
+    nnfltclr(m->Wk,D * D);
+    nnfltclr(m->Wv,D * D);
+    nnfltclr(m->Wo,D * D);
 
-    ArrDD Wq = (ArrDD) m->Wq;
-    ArrDD Wk = (ArrDD) m->Wk;    
+    fltclr(Wq,D * D);
+    fltclr(Wk,D * D);
     for (int i = 0; i < D / 2; i++) {
         Wq[i][i] = 1;
         Wk[i][i] = 1;
     }
+    nnfltcpy(m->Wq,Wq,D * D);
+    nnfltcpy(m->Wk,Wk,D * D);
 
-    mha_forward(m,X,NULL,Y,0,0,0);
-
-    ArrTT Scores = (ArrTT) m->Scores;
+    fArr2D nnX = nnallocmem(BT,D,float);
+    fArr2D nnY = nnallocmem(BT,D,float);
+    nnfltcpy(nnX,X,BT * D);
+    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    nnfltcpy(Y,nnY,BT * D);
+    nnfltcpy(Scores,m->Scores,T * T);
 
     float masked_sum = 0;
     float unmasked_sum = 0;
@@ -389,6 +453,9 @@ void test_mask(MHA* m)
         printf("FAIL mask: unmasked positions sum = 0,attention not active\n");
     if (masked_sum != 0 || unmasked_sum == 0)
         exit(1);
+
+    nnfreemem(nnX);
+    nnfreemem(nnY);
     printf("  OK\n");
 }
 
@@ -403,6 +470,7 @@ void test_padding_mask(MHA* m)
 
     float X[BT][D];
     float Y[BT][D];
+    float Scores[T][T];
 
     for (int i = 0; i < BT; i++)
         for (int j = 0; j < D; j++)
@@ -416,10 +484,19 @@ void test_padding_mask(MHA* m)
     pad_mask[(B - 1) * T + (T - 2)] = 0;
     pad_mask[(B - 1) * T + (T - 1)] = 0;
 
-    mha_forward(m,X,pad_mask,Y,0,0,0);
+    fArr2D nnX = nnallocmem(BT,D,float);
+    fArr2D nnY = nnallocmem(BT,D,float);
+    iVec nn_pad_mask = (iVec) nnallocmem(BT,1,int);
+    nnfltcpy(nnX,X,BT * D);
+#ifdef USE_CUDA
+    cudaMemcpy(nn_pad_mask,pad_mask,BT * sizeof(int),cudaMemcpyDefault);
+#else
+    memcpy(nn_pad_mask,pad_mask,BT * sizeof(int));
+#endif
 
-    typedef float (*ArrTT)[T];
-    ArrTT Scores = (ArrTT)m->Scores;
+    mha_forward(m,nnX,nn_pad_mask,nnY,0,0,0);
+    nnfltcpy(Y,nnY,BT * D);
+    nnfltcpy(Scores,m->Scores,T * T);
 
     float padded_sum = 0;
     float unpadded_sum = 0;
@@ -439,6 +516,10 @@ void test_padding_mask(MHA* m)
         printf("FAIL pad mask: unpadded positions sum = 0,attention not active\n");
     if (padded_sum != 0 || unpadded_sum == 0)
         exit(1);
+
+    nnfreemem(nnX);
+    nnfreemem(nnY);
+    nnfreemem(nn_pad_mask);
     printf("  OK\n");
 }
 
@@ -454,26 +535,32 @@ void test_rope_relative_invariance(MHA* m)
     float Y1[BT][D];
     float Y2[BT][D];
 
-    typedef float (*ArrBHTT)[T];
-
     for (int i = 0; i < BT; i++)
         for (int j = 0; j < D; j++)
             X[i][j] = urand(-1.0f,1.0f);
 
+    fArr2D nnX = nnallocmem(BT,D,float);
+    fArr2D nnY1 = nnallocmem(BT,D,float);
+    fArr2D nnY2 = nnallocmem(BT,D,float);
+    nnfltcpy(nnX,X,BT * D);
+
     /* Forward with offset=0 */
-    fltclr(Y1,BT * D);
-    mha_forward(m,X,NULL,Y1,0,0,0);
+    nnfltclr(nnY1,BT * D);
+    mha_forward(m,nnX,NULL,nnY1,0,0,0);
+    nnfltcpy(Y1,nnY1,BT * D);
 
     /* Save Att from offset=0 run */
     float Att1[m->BHT][T];
-    fltcpy(Att1,m->Att,m->BHT * T);
+    nnfltcpy(Att1,m->Att,m->BHT * T);
 
     /* Forward with offset */
     int offset = (int) urand(0,1000000);
-    fltclr(Y2,BT * D);
-    mha_forward(m,X,NULL,Y2,offset,0,0);
+    nnfltclr(nnY2,BT * D);
+    mha_forward(m,nnX,NULL,nnY2,offset,0,0);
+    nnfltcpy(Y2,nnY2,BT * D);
 
-    ArrBHTT Att2 = (ArrBHTT) m->Att;
+    float Att2[m->BHT][T];
+    nnfltcpy(Att2,m->Att,m->BHT * T);
 
     /* Check Att: relative position invariance means attention weights
      * must be identical regardless of absolute position offset */
@@ -497,6 +584,9 @@ void test_rope_relative_invariance(MHA* m)
         exit(1);
     }
 
+    nnfreemem(nnX);
+    nnfreemem(nnY1);
+    nnfreemem(nnY2);
     printf("  OK\n");
 }
 
@@ -516,17 +606,26 @@ void test_mha_forward_step(MHA* m)
         for (int d = 0; d < D; d++)
             X[t][d] = urand(-1,1);
 
-    fltclr(Y,T * D);
-    fltclr(Ys,T * D);
+    fArr2D nnX = nnallocmem(T,D,float);
+    fArr2D nnY = nnallocmem(T,D,float);
+    fArr2D nnYs = nnallocmem(T,D,float);
+    nnfltcpy(nnX,X,T * D);
+    nnfltclr(nnY,T * D);
+    nnfltclr(nnYs,T * D);
 
     /* Full causal forward */
-    mha_forward(m,X,NULL,Y,0,0,0);
+    mha_forward(m,nnX,NULL,nnY,0,0,0);
 
     /* The cached single-token forward must produce the same output row
      * at every position as the full causal forward above
      */
     for (int t = 0; t < T; t++)
-        mha_forward_step(m,(fArr2D)&X[t],(fArr2D)&Ys[t],t,0);
+        mha_forward_step(m,
+                         (fArr2D)((float*)nnX + t * D),
+                         (fArr2D)((float*)nnYs + t * D),t,0);
+
+    nnfltcpy(Y,nnY,T * D);
+    nnfltcpy(Ys,nnYs,T * D);
 
     for (int t = 0; t < T; t++) {
         for (int d = 0; d < D; d++) {
@@ -539,6 +638,9 @@ void test_mha_forward_step(MHA* m)
         }
     }
 
+    nnfreemem(nnX);
+    nnfreemem(nnY);
+    nnfreemem(nnYs);
     printf("  OK\n");
 }
 
@@ -602,4 +704,3 @@ int main(void)
     printf("\nALL TESTS PASSED\n");
     return 0;
 }
-

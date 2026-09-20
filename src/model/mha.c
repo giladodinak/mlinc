@@ -236,7 +236,7 @@ static inline void scale_and_mask_scores(fArr2D Scores_/*[T][T]*/,
      * Position i attends to j only where j <= i + lookahead
      */
     if (lookahead >= 0) {
-        for (int i = 0; i < b; i++)
+        for (int i = 0; i < T; i++)
             for (int j = i + lookahead + 1; j < T; j++)
                 Scores[i][j] = -1e9f;
     }
