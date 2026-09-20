@@ -7,6 +7,7 @@
 #include <time.h>
 #include "mem.h"
 #include "float.h"
+#include "etime.h"
 #include "random.h"
 #include "array.h"
 #include "loss.h"
@@ -458,18 +459,20 @@ static void transformer_update(TRANSFORMER* l,int D,int DFF,float lr)
 void training_test(void)
 {
     printf("Test: training multi layer transformer\n");
-
     const int K = 32;     /* vocabulary size = cycle length    */
-    const int T = 32;     /* sequence length (one full cycle)  */
-    const int D = 64;     /* model dimension                   */
-    const int DFF = 256;  /* FFN hidden dimension              */
-    const int H = 4;      /* attention heads                   */
+    const int T = 1024;   /* sequence length (one full cycle)  */
+    const int D = 256;    /* model dimension                   */
+    const int DFF = 1024; /* FFN hidden dimension              */
+    const int H = 8;      /* attention heads                   */
     const int NLYR = 3;   /* number of transformer layers      */
     const int B = 4;      /* batch size                        */
     const int BT = (B*T); /* flattened batch*seq dimension     */
 
-    const int EPOCHS = 1000;
-    const float LR = 3e-3f;
+    const int EPOCHS = 40;
+    const float LR = 0.15;
+
+    typedef float (*ArrBTD)[D];
+    typedef float (*ArrBTK)[K];
 
     /* Fixed random token embeddings [K][D] */
     float E[K][D];
@@ -479,8 +482,8 @@ void training_test(void)
 
     /* Build B sequences,each of length T. The first half of the batch
      * cycles forward (+1),the second half backward (-1). The successor
-     * of a token depends on the sequence direction,which is only
-     * inferable from context,so attention is required to solve the task.
+     * of a token depends on the sequence direction, which is only
+     * inferable from context, so attention is required to solve the task.
      * Input token at position t in batch b: (b + dir*t) % K
      * Target token (next token): (b + dir*(t + 1)) % K
      */
@@ -495,13 +498,13 @@ void training_test(void)
     }
 
     /* Input embeddings X[BT][D] */
-    float X[BT][D];
+    ArrBTD X = (ArrBTD) allocmem(BT,D,float);
     for (int b = 0; b < B; b++)
         for (int t = 0; t < T; t++)
             fltcpy(X[b*T+t],E[tok_in[b][t]],D);
 
     /* One-hot targets yt[BT][K] for cross-entropy loss */
-    float yt[BT][K];
+    ArrBTK yt = (ArrBTK) allocmem(BT,K,float);
     fltclr(yt,BT * K);
     for (int b = 0; b < B; b++)
         for (int t = 0; t < T; t++)
@@ -530,6 +533,11 @@ void training_test(void)
     fArr2D dy_out = nnallocmem(BT,K,float);
     nnfltcpy(act[0],X,BT * D);
 
+    ArrBTK yph = (ArrBTK) allocmem(BT,K,float);
+    ArrBTK dyh = (ArrBTK) allocmem(BT,K,float);
+    ArrBTK probs = (ArrBTK) allocmem(BT,K,float);
+ 
+    double start_time = current_time();
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
 
         /* Forward pass */
@@ -539,16 +547,15 @@ void training_test(void)
 
         fArr2D yp = dense_forward(out,act[NLYR],0);
 
-        float yph[BT][K];
         nnfltcpy(yph,yp,BT * K);
         float loss = cross_entropy_loss((fArr2D)yph,(fArr2D)yt,BT,K);
-        printf("epoch %5d  loss %8.4f\r",epoch + 1,loss / BT);
+        int sec = (int) elapsed_time(start_time);
+        printf("epoch %5d  loss %8.4f %3d seconds\r",epoch + 1,loss / BT,sec);
         fflush(stdout);
 
         /* Backward pass */
 
         /* Gradient of softmax + cross-entropy: dy = (yp - yt) / BT */
-        float dyh[BT][K];
         dLdy_cross_entropy_loss((fArr2D)yph,(fArr2D)yt,(fArr2D)dyh,BT,K);
         nnfltcpy(dy_out,dyh,BT * K);
 
@@ -581,12 +588,11 @@ void training_test(void)
         transformer_forward(layers[i],act[i],NULL,1,act[i + 1],0);
     fArr2D yp = dense_forward(out,act[NLYR],0);
 
-    float probs[BT][K];
     nnfltcpy(probs,yp,BT * K);
 
     int correct = 0;
     int counted = 0;
-    /* Skip t == 0: with no context the direction is unknowable there */
+    /* Skip t == 0: with no context the direction is unknowable */
     for (int b = 0; b < B; b++)
     for (int t = 1; t < T; t++) {
         int bt = b * T + t;
@@ -615,10 +621,14 @@ void training_test(void)
     if (acc < 99) {
         printf("FAIL: predicted tokens differ from expected tokens\n");
         failures++;
-        return;
     }
-
-    printf("PASS\n");
+    else
+        printf("PASS\n");
+    freemem(X);
+    freemem(yt);
+    freemem(yph);
+    freemem(dyh);
+    freemem(probs);
 }
 
 int main(void)

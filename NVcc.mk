@@ -41,7 +41,7 @@ ifeq ($(DEBUG),)    # DEBUG is blank - not debug
 XCOMPILER = -Xcompiler=-O3,-march=$(MARCH),-ffast-math,-fno-omit-frame-pointer
 NVFLAGS += -O3 --use_fast_math $(XCOMPILER)
 else
-NVFLAGS += -g -G
+NVFLAGS += -g -lineinfo
 endif
 
 ifneq ($(PROFILE),) # PROFILE is not blank - add profilng support

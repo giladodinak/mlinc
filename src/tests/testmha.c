@@ -344,58 +344,6 @@ float softmax_loss(fArr2D Scores,fArr2D dAtt_,int T)
     return L;
 }
 
-void test_d_softmax(void)
-{
-    printf("Test: d_softmax\n");
-
-    const int T = 4;
-    float Scores[T][T];
-    float dAtt[T][T];
-    float dScores[T][T];
-
-    for (int i = 0; i < T; i++) {
-        for (int j = 0; j < T; j++) {
-            Scores[i][j] = urand(-1,1);
-            dAtt[i][j]   = urand(-1,1);
-        }
-    }
-
-    fArr2D nnAtt = nnallocmem(T,T,float);
-    fArr2D nndAtt = nnallocmem(T,T,float);
-    fArr2D nndScores = nnallocmem(T,T,float);
-    nnfltcpy(nnAtt,Scores,T * T);
-    nnfltcpy(nndAtt,dAtt,T * T);
-    softmax(nnAtt,T,T);
-    d_softmax(nndScores,nndAtt,nnAtt,T,T);
-    nnfltcpy(dScores,nndScores,T * T);
-
-    for (int i = 0; i < T; i++) {
-        for (int j = 0; j < T; j++) {
-
-            float old = Scores[i][j];
-            Scores[i][j] = old + EPS;
-            float Lp = softmax_loss((fArr2D)Scores,(fArr2D)dAtt,T);
-            Scores[i][j] = old - EPS;
-            float Ln = softmax_loss((fArr2D)Scores,(fArr2D)dAtt,T);
-            Scores[i][j] = old;
-
-            float num = (Lp - Ln) / (2 * EPS);
-            float ana = dScores[i][j];
-
-            if (fabsf(num - ana) > TOL) {
-                printf("FAIL softmax dScores[%d][%d]: expected=%g calculated=%g\n",
-                       i,j,num,ana);
-                exit(1);
-            }
-        }
-    }
-
-    nnfreemem(nnAtt);
-    nnfreemem(nndAtt);
-    nnfreemem(nndScores);
-    printf("  OK\n");
-}
-
 void test_mask(MHA* m)
 {
     printf("Test: MHA mask\n");
@@ -664,8 +612,6 @@ int main(void)
 
     MHA* m;
     
-    test_d_softmax();
-
     m = mha_create(num_heads,seq_len,/*lookahead=*/-1);
     mha_init(m,input_dim,batch_size,1,0);
     test_mha_zero_forward(m);

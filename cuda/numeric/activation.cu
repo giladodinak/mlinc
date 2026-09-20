@@ -54,6 +54,7 @@ static __global__ void softmax_kernel(float* a, int K)
     }
 
     float m = tmp[0];
+    __syncthreads();
     float sum = 0.0f;
     for (int i = tid; i < K; i += blockDim.x) {
         float e = expf(p[i] - m);

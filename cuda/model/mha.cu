@@ -99,10 +99,13 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->Vh = (fArr2D) cuallocmem(l->BHT,l->Dh,float);
 
     l->Att = (fArr2D) cuallocmem(l->BHT,l->T,float);
-    l->dropout = (DROPOUT**) allocmem(l->B * l->H,1,DROPOUT*);
-    for (int i = 0; i < l->B * l->H; i++) {
-        l->dropout[i] = dropout_create(dropout_rate);
-        dropout_init(l->dropout[i],l->T,l->T);
+
+    if (dropout_rate > 0) {
+        l->dropout = (DROPOUT**) allocmem(l->B * l->H,1,DROPOUT*);
+        for (int i = 0; i < l->B * l->H; i++) {
+            l->dropout[i] = dropout_create(dropout_rate);
+            dropout_init(l->dropout[i],l->T,l->T);
+        }
     }
 
     l->Scores = (fArr2D) cuallocmem(l->T,l->T,float);
@@ -175,9 +178,12 @@ void mha_free(MHA* l)
     cufreemem(l->Vh);
 
     cufreemem(l->Att);
-    for (int i = 0; i < l->B * l->H; i++)
-        dropout_free(l->dropout[i]);
-    freemem(l->dropout);
+
+    if (l->dropout != NULL) {
+        for (int i = 0; i < l->B * l->H; i++)
+            dropout_free(l->dropout[i]);
+        freemem(l->dropout);
+    }
 
     cufreemem(l->Scores);
     cufreemem(l->Oh);
@@ -399,8 +405,9 @@ void mha_forward(MHA* restrict l,
             /* Store this head's attention weights (pre-dropout) for backward */
             cufltcpy(&Att[base],Scores,T * T);
 
-            if (training && l->training && l->dropout[b * H + h]->rate > 0)
-                dropout_forward(l->dropout[b * H + h],Scores);
+            if (training && l->training)
+                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
+                    dropout_forward(l->dropout[b * H + h],Scores);
 
             /* In Eq. 1: Attention @ V */
             matmul(Oh,Scores,&Vh[base],T,T,Dh);
@@ -653,7 +660,7 @@ void mha_backward(MHA* restrict l,
              * whereas dVh calculation uses the post-dropout values, which
              * can be resoncstructed by applying the dropout mask.
              */
-            if (l->dropout[b * H + h]->rate > 0) {
+            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                 /* Use Scroes as scratch buffer */
                 dropout_backward(l->dropout[b * H + h],&Att[base],l->Scores);
                 Tmatmul(dVh,l->Scores,dOh,T,T,Dh);
@@ -667,7 +674,7 @@ void mha_backward(MHA* restrict l,
              * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
              * dScores /= sqrt(Dh)                  (reverse scaling)
              */
-            if (l->dropout[b * H + h]->rate > 0)
+            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
                 dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
 
             d_softmax(dScores,dAtt,&Att[base],T,T);
