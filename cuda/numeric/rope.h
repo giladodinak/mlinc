@@ -44,12 +44,13 @@ static inline void rope_init(float* theta, int Dh)
  *   offset  : Position of the first token in x
  *   T       : Sequence length (number of rows)
  *   Dh      : Head dimension (number of columns, must be even)
+ *   ld      : Leading dimension; physical row stride of x, in floats
  */
-static __global__ void rope_apply_kernel(float* x,
-                                         const float* theta,
-                                         int inverse,
-                                         int offset,
-                                         int T, int Dh)
+static __global__ void rope_apply_kernel_ld(float* x,
+                                            const float* theta,
+                                            int inverse,
+                                            int offset,
+                                            int T, int Dh, int ld)
 {
     float sign = inverse ? -1.0 : 1.0;
     int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -63,11 +64,24 @@ static __global__ void rope_apply_kernel(float* x,
         double angle = ((double)offset + t) * (double)theta[i];
         float cos_a = (float)cos(angle);
         float sin_a = sign * (float)sin(angle);
-        float x0 = x[t * Dh + 2 * i];
-        float x1 = x[t * Dh + 2 * i + 1];
-        x[t * Dh + 2 * i]     = x0 * cos_a - x1 * sin_a;
-        x[t * Dh + 2 * i + 1] = x0 * sin_a + x1 * cos_a;
+        float x0 = x[t * ld + 2 * i];
+        float x1 = x[t * ld + 2 * i + 1];
+        x[t * ld + 2 * i]     = x0 * cos_a - x1 * sin_a;
+        x[t * ld + 2 * i + 1] = x0 * sin_a + x1 * cos_a;
     }
+}
+
+static inline void rope_apply_ld(fArr2D x/*[T][Dh]*/,
+                                 const float* theta,
+                                 int inverse,
+                                 int offset,
+                                 int T, int Dh, int ld)
+{
+    int n = T * (Dh / 2);
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    rope_apply_kernel_ld<<<blocks,threads>>>(
+        (float*)x,theta,inverse,offset,T,Dh,ld);
 }
 
 static inline void rope_apply(fArr2D x/*[T][Dh]*/,
@@ -76,10 +90,7 @@ static inline void rope_apply(fArr2D x/*[T][Dh]*/,
                               int offset,
                               int T, int Dh)
 {
-    int n = T * (Dh / 2);
-    int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-    rope_apply_kernel<<<blocks,threads>>>((float*)x,theta,inverse,offset,T,Dh);
+    rope_apply_ld(x,theta,inverse,offset,T,Dh,Dh);
 }
 
 #endif

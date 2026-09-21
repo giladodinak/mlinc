@@ -7,6 +7,7 @@
  */
 #include <stdio.h>
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include "mem.h"
 #include "cuflt.h"
 #include "random.h"
@@ -94,9 +95,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
     l->theta = (fVec) cuallocmem(1,l->Dh / 2,float);
 
-    l->Qh = (fArr2D) cuallocmem(l->BHT,l->Dh,float);
-    l->Kh = (fArr2D) cuallocmem(l->BHT,l->Dh,float);
-    l->Vh = (fArr2D) cuallocmem(l->BHT,l->Dh,float);
+    /* Not used: l->Qh l->Kh l->Vh */
 
     l->Att = (fArr2D) cuallocmem(l->BHT,l->T,float);
 
@@ -109,7 +108,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     }
 
     l->Scores = (fArr2D) cuallocmem(l->T,l->T,float);
-    l->Oh = (fArr2D) cuallocmem(l->T,l->Dh,float);
+    /* Not used: l->Oh */
 
     l->Out = (fArr2D) cuallocmem(l->BT,l->D,float);
 
@@ -137,11 +136,9 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->dK = (fArr2D) cuallocmem(l->BT,l->D,float);
     l->dV = (fArr2D) cuallocmem(l->BT,l->D,float);
 
-    l->dQh = (fArr2D) cuallocmem(l->T,l->Dh,float);
-    l->dKh = (fArr2D) cuallocmem(l->T,l->Dh,float);
-    l->dVh = (fArr2D) cuallocmem(l->T,l->Dh,float);
+    /* Not used: l->dQh l->dKh l->dVh */
 
-    l->dOh = (fArr2D) cuallocmem(l->T,l->Dh,float);
+    /* Not used: l->dOh */
     l->dAtt = (fArr2D) cuallocmem(l->T,l->T,float);
     l->dScores = (fArr2D) cuallocmem(l->T,l->T,float);
 
@@ -173,10 +170,6 @@ void mha_free(MHA* l)
 
     cufreemem(l->theta);
 
-    cufreemem(l->Qh);
-    cufreemem(l->Kh);
-    cufreemem(l->Vh);
-
     cufreemem(l->Att);
 
     if (l->dropout != NULL) {
@@ -186,7 +179,6 @@ void mha_free(MHA* l)
     }
 
     cufreemem(l->Scores);
-    cufreemem(l->Oh);
 
     cufreemem(l->Out);
 
@@ -197,11 +189,6 @@ void mha_free(MHA* l)
     cufreemem(l->dK);
     cufreemem(l->dV);
 
-    cufreemem(l->dQh);
-    cufreemem(l->dKh);
-    cufreemem(l->dVh);
-
-    cufreemem(l->dOh);
     cufreemem(l->dAtt);
     cufreemem(l->dScores);
 
@@ -216,12 +203,14 @@ void mha_free(MHA* l)
     freemem(l);
 }
 
+/* Multiplies all elemensts of x by scale */
 static __global__ void scale_scores(float* x, int n, float scale)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[i] *= scale;
 }
 
+/* Multiplies all elemensts of x by scale, then apply masks */
 static __global__ void scale_and_mask_scores(float* Scores,
                                              const int* pad_mask,
                                              int b, int T,
@@ -305,9 +294,10 @@ static __global__ void scale_and_mask_scores(float* Scores,
  *     only trailing (right-aligned) padding is supported.
  *  2. Offset is used when training overlapping windows:
  *     each batch's start position advances by the window stride.
- *  3. Qh, Kh, Vh, and Att are stored per (b,h) pair for the whole
- *     batch, so that mha_backward can read back exactly what forward
- *     computed for each (b,h) without recomputing it.
+ *  3. Q, K, and V stay in their natural [B*T][D] storage.  A head is a
+ *     strided view Q[b,t,h,:], K[b,t,h,:], V[b,t,h,:], where D=H*Dh.
+ *     Splitting into heads is therefore a logical view, not a data copy.
+ *     Att is stored per (b,h) for backward.
  *
  * Reference:
  *   - Vaswani et al., "Attention Is All You Need", 2017
@@ -331,8 +321,6 @@ void mha_forward(MHA* restrict l,
 
     typedef float (*ArrDD)[D];
     typedef float (*ArrBTD)[D];
-    typedef float (*ArrBHTDh)[Dh];
-    typedef float (*ArrTDh)[Dh];
     typedef float (*ArrTT)[T];
     typedef float (*ArrBHTT)[T];
 
@@ -345,14 +333,8 @@ void mha_forward(MHA* restrict l,
     ArrBTD K = (ArrBTD) l->K;
     ArrBTD V = (ArrBTD) l->V;
 
-    ArrBHTDh Qh = (ArrBHTDh) l->Qh;
-    ArrBHTDh Kh = (ArrBHTDh) l->Kh;
-    ArrBHTDh Vh = (ArrBHTDh) l->Vh;
-
     ArrTT Scores = (ArrTT) l->Scores;
     ArrBHTT Att = (ArrBHTT) l->Att;
-    ArrTDh Oh = (ArrTDh) l->Oh;
-
     ArrBTD Out = (ArrBTD) l->Out;
 
     float scale = 1.0 / sqrtf((float) Dh);
@@ -372,20 +354,18 @@ void mha_forward(MHA* restrict l,
 
             int base = (b * H + h) * T; /* Row offset into [BHT][...] buffers */
 
-            /* Step 2 - Split into heads (Sec. 3.2.2):
-             * Qh = Q[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
-             * Kh = K[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
-             * Vh = V[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
+            /* Step 2 - Split into heads (Sec. 3.2.2).
+             *
+             * Notice that Q/K/V are physically [B*T][D], which is also
+             * [B][T][H][Dh].  For this (b,h), Qh/Kh/Vh point at the first
+             * Dh-vector and successive token rows are D elements apart
              */
-            for (int t = 0; t < T; t++) {
-                int r = b * T + t;
-                cufltcpy(&Qh[base + t][0],&Q[r][h * Dh],Dh);
-                cufltcpy(&Kh[base + t][0],&K[r][h * Dh],Dh);
-                cufltcpy(&Vh[base + t][0],&V[r][h * Dh],Dh);
-            }
+            fArr2D Qh = (fArr2D) &Q[b * T][h * Dh];
+            fArr2D Kh = (fArr2D) &K[b * T][h * Dh];
+            fArr2D Vh = (fArr2D) &V[b * T][h * Dh];
 
-            rope_apply((fArr2D)&Qh[base],l->theta,0,offset,T,Dh);
-            rope_apply((fArr2D)&Kh[base],l->theta,0,offset,T,Dh);
+            rope_apply_ld(Qh,l->theta,0,offset,T,Dh,D);
+            rope_apply_ld(Kh,l->theta,0,offset,T,Dh,D);
 
             /* Step 3 - Scaled dot-product attention (in Eq. 1, Sec. 3.2.1):
              * Scores  = Qh @ Kh.T
@@ -394,7 +374,7 @@ void mha_forward(MHA* restrict l,
              * Att = softmax(Scores)
              * Oh  = Att @ Vh
              */
-            matmulT(Scores,&Qh[base],&Kh[base],T,Dh,T);
+            matmulT_ld(Scores,Qh,Kh,T,Dh,T,D,D,T);
 
             scale_and_mask_scores<<<blocks,threads>>>(
                    (float*) Scores,(const int *) pad_mask,b,T,lookahead,scale);
@@ -410,15 +390,12 @@ void mha_forward(MHA* restrict l,
                     dropout_forward(l->dropout[b * H + h],Scores);
 
             /* In Eq. 1: Attention @ V */
-            matmul(Oh,Scores,&Vh[base],T,T,Dh);
-
-            /* Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
-             * Out = Concat(Oh_0, ..., Oh_{H-1})
+            /* Write this head directly into its slice of Out.  The output
+             * is logically [T][Dh] with row stride D, so concatenation is
+             * again just a view: no Oh -> Out copies are required.
              */
-            for (int t = 0; t < T; t++) {
-                int r = b * T + t;
-                cufltcpy(&Out[r][h * Dh],&Oh[t][0],Dh);
-            }
+            fArr2D Oh = (fArr2D) &Out[b * T][h * Dh];
+            matmul_ld(Oh,Scores,Vh,T,T,Dh,T,D,D);
         }
     }
     /* Step 4 continued - output projection (Eq. 2, Sec. 3.2.2):
@@ -479,8 +456,6 @@ void mha_forward_step(MHA* restrict l,
 
     ArrHTDh Kc = (ArrHTDh) l->Kh_cache;
     ArrHTDh Vc = (ArrHTDh) l->Vh_cache;
-    ArrHTDh Qh = (ArrHTDh) l->Qh;
-    ArrHTDh Kh = (ArrHTDh) l->Kh;
 
     /* Project the single new token */
     matmul(Q,x,Wq,1,D,D);
@@ -497,26 +472,30 @@ void mha_forward_step(MHA* restrict l,
     int blocks = (n + threads - 1) / threads;
 
     for (int h = 0; h < H; h++) {
+
         int hbase = h * T;
-        float* qh = (float*) &Qh[hbase];
-        float* kh = (float*) &Kh[hbase];
-        cufltcpy(qh,&Q[0][h * Dh],Dh);
-        cufltcpy(kh,&K[0][h * Dh],Dh);
+        
+        /* Notice that Q and K are [1][D] arrays for the current token.
+         * Since D = H * Dh, each row can be viewed as H contiguous
+         * head vectors of dimension Dh, i.e. [H][Dh]. For this (h),
+         * Qh/Kh point at the Dh-vecto.
+         */
+        fArr2D Qh = (fArr2D) &Q[0][h * Dh];
+        fArr2D Kh = (fArr2D) &K[0][h * Dh];
 
         /* RoPE-rotate the new token's Q and K at absolute position offset */
-        rope_apply((fArr2D)qh,l->theta,0,offset,1,Dh);
-        rope_apply((fArr2D)kh,l->theta,0,offset,1,Dh);
+        rope_apply(Qh,l->theta,0,offset,1,Dh);
+        rope_apply(Kh,l->theta,0,offset,1,Dh);
 
         /* Store rotated K and raw V into the ring at this slot */
-        cufltcpy(&Kc[hbase + slot][0],kh,Dh);
+        cufltcpy(&Kc[hbase + slot][0],Kh,Dh);
         cufltcpy(&Vc[hbase + slot][0],&V[0][h * Dh],Dh);
 
         /* Attention of the new token over the n valid cached keys */
-        matmulT(l->Scores,(fArr2D) qh,&Kc[hbase],1,Dh,n);
+        matmulT(l->Scores,Qh,&Kc[hbase],1,Dh,n);
         scale_scores<<<blocks,threads>>>((float*)l->Scores,n,scale);
         softmax(l->Scores,1,n);
-        matmul(l->Oh,l->Scores,&Vc[hbase],1,n,Dh);
-        cufltcpy(&Out[0][h * Dh],l->Oh,Dh);
+        matmul((fArr2D) &Out[0][h * Dh],l->Scores,&Vc[hbase],1,n,Dh);
     }
 
     if (Y != NULL)
@@ -535,9 +514,8 @@ void mha_forward_step(MHA* restrict l,
  *   dX  - gradient of loss w.r.t. MHA input [BT][D], or NULL
  *   lyr - layer index (informational)
  *
- * Reads back the per-(b,h) Qh, Kh, Vh, and Att stored by mha_forward
- * for the same (b,h) pair, rather than recomputing them, so the values
- * used here are guaranteed identical to what forward actually produced.
+ * Q, K, and V are read directly from their [B*T][D] storage as strided
+ * per-head views.  Att is read back per (b,h) from mha_forward.
  *
  * Gradient steps (reverse of forward):
  *
@@ -556,10 +534,8 @@ void mha_forward_step(MHA* restrict l,
  *           dQh = dScores @ Kh
  *           dKh = dScores.T @ Qh
  *
- *   Step 2 backward - accumulate head gradients into full tensors:
- *     dQ[b*T+t][h*Dh+k] += dQh[t][k]
- *     dK[b*T+t][h*Dh+k] += dKh[t][k]
- *     dV[b*T+t][h*Dh+k] += dVh[t][k]
+ *   Step 2 backward - head gradients are written directly into the
+ *     corresponding slices of dQ, dK, and dV; no concatenation copy.
  *
  *   Step 1 backward - linear projections (reverse of Q=X@Wq, K=X@Wk, V=X@Wv):
  *     gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
@@ -582,8 +558,6 @@ void mha_backward(MHA* restrict l,
     const int BT = l->BT;
 
     typedef float (*ArrBTD)[D];
-    typedef float (*ArrBHTDh)[Dh];
-    typedef float (*ArrTDh)[Dh];
     typedef float (*ArrTT)[T];
     typedef float (*ArrBHTT)[T];
     typedef float (*ArrDD)[D];
@@ -594,11 +568,10 @@ void mha_backward(MHA* restrict l,
     ArrBTD dK = (ArrBTD) l->dK;
     ArrBTD dV = (ArrBTD) l->dV;
 
-    ArrTDh dQh = (ArrTDh) l->dQh;
-    ArrTDh dKh = (ArrTDh) l->dKh;
-    ArrTDh dVh = (ArrTDh) l->dVh;
+    ArrBTD Q = (ArrBTD) l->Q;
+    ArrBTD K = (ArrBTD) l->K;
+    ArrBTD V = (ArrBTD) l->V;
 
-    ArrTDh dOh = (ArrTDh) l->dOh;
     ArrTT dAtt = (ArrTT) l->dAtt;
     ArrTT dScores = (ArrTT) l->dScores;
 
@@ -611,10 +584,6 @@ void mha_backward(MHA* restrict l,
     ArrDD Wk = (ArrDD) l->Wk;
     ArrDD Wv = (ArrDD) l->Wv;
     ArrDD Wo = (ArrDD) l->Wo;
-
-    ArrBHTDh Qh = (ArrBHTDh) l->Qh;
-    ArrBHTDh Kh = (ArrBHTDh) l->Kh;
-    ArrBHTDh Vh = (ArrBHTDh) l->Vh;
 
     ArrBHTT Att = (ArrBHTT) l->Att;
 
@@ -644,13 +613,22 @@ void mha_backward(MHA* restrict l,
 
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
+
             int base = (b * H + h) * T; /* row offset into [BHT][...] buffers */
 
-            /* split dOut */
-            for (int t = 0; t < T; t++) {
-                int r = b * T + t;
-                cufltcpy(&dOh[t][0],&dOut[r][h * Dh],Dh);
-            }
+            /* Per-head views.  Each row contains Dh contiguous values;
+             * Q/K/V (and the derivaties) are physically [B*T][D], which
+             * is also [B][T][H][Dh].  For this (b,h), Qh/Kh/Vh (and the
+             * derivaties) point at the first Dh-vector and successive
+             * rows are D elements apart.
+             */
+            fArr2D Qh  = (fArr2D) &Q[b * T][h * Dh];
+            fArr2D Kh  = (fArr2D) &K[b * T][h * Dh];
+            fArr2D Vh  = (fArr2D) &V[b * T][h * Dh];
+            fArr2D dOh = (fArr2D) &dOut[b * T][h * Dh];
+            fArr2D dQh = (fArr2D) &dQ[b * T][h * Dh];
+            fArr2D dKh = (fArr2D) &dK[b * T][h * Dh];
+            fArr2D dVh = (fArr2D) &dV[b * T][h * Dh];
 
             /* Step 3a backward - reverse Oh = Att @ Vh:
              * dVh  = Att.T @ dOh
@@ -663,12 +641,12 @@ void mha_backward(MHA* restrict l,
             if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                 /* Use Scroes as scratch buffer */
                 dropout_backward(l->dropout[b * H + h],&Att[base],l->Scores);
-                Tmatmul(dVh,l->Scores,dOh,T,T,Dh);
+                Tmatmul_ld(dVh,l->Scores,dOh,T,T,Dh,T,D,D);
             }
             else
-                Tmatmul(dVh,&Att[base],dOh,T,T,Dh);
+                Tmatmul_ld(dVh,&Att[base],dOh,T,T,Dh,T,D,D);
 
-            matmulT(dAtt,dOh,&Vh[base],T,Dh,T);
+            matmulT_ld(dAtt,dOh,Vh,T,Dh,T,D,D,T);
 
             /* Step 3b backward - reverse Att = softmax(Scores):
              * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
@@ -686,21 +664,16 @@ void mha_backward(MHA* restrict l,
              * dKh = dScores.T @ Qh
              * then apply inverse RoPE to dQh and dKh
              */
-            matmul(dQh,dScores,&Kh[base],T,T,Dh);
-            Tmatmul(dKh,dScores,&Qh[base],T,T,Dh);
+            matmul_ld(dQh,dScores,Kh,T,T,Dh,T,D,D);
+            Tmatmul_ld(dKh,dScores,Qh,T,T,Dh,T,D,D);
 
-            rope_apply((fArr2D)dQh,l->theta,1,0,T,Dh);
-            rope_apply((fArr2D)dKh,l->theta,1,0,T,Dh);
+            rope_apply_ld(dQh,l->theta,1,0,T,Dh,D);
+            rope_apply_ld(dKh,l->theta,1,0,T,Dh,D);
 
-            /* Step 2 backward - concatenate head gradients
-             * dQ dimentsions B x T x D dQh dimensions B x T x Dh
+            /* Step 2 backward - dQ/dK/dV were written directly into the
+             * appropriate head slices, so no gradient concatenation copies
+             * are required.
              */
-            for (int t = 0; t < T; t++) {
-                int r = b * T + t;
-                cufltcpy(&dQ[r][h * Dh],&dQh[t][0],Dh);
-                cufltcpy(&dK[r][h * Dh],&dKh[t][0],Dh);
-                cufltcpy(&dV[r][h * Dh],&dVh[t][0],Dh);
-            }
         }
     }
 

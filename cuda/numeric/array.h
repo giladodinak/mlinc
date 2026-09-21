@@ -79,6 +79,19 @@ inline cublasHandle_t cublas_handle(void)
     return h.handle;
 }
 
+/* The _ld matrix multiplication functions below accept explicit leading
+ * dimensions for row-major matrices. The leading dimension is the number of
+ * elements between the starts of two consecutive rows in physical memory.
+ *
+ *     lda: leading dimension (row stride) of x
+ *     ldb: leading dimension (row stride) of y
+ *     ldc: leading dimension (row stride) of r
+ *
+ * For a tightly packed row-major matrix, the leading dimension is equal to
+ * the matrix's logical number of columns. A larger leading dimension allows
+ * a logical matrix to be a strided view into a wider physical matrix.
+ */
+
 /* Multiplies matrix x by matrix y, and returns the result in matrix r.
  * r = x @ y
  * r: resulting matrix NxM
@@ -87,19 +100,28 @@ inline cublasHandle_t cublas_handle(void)
  * Note that d is the common dimension, not related to D, which usually
  * indicates the size of neural network layer's input vectors dimension.
  */
-static inline void matmul(fArr2D restrict r_/*[N][M]*/,
-                          const fArr2D restrict x_/*[N][d]*/,
-                          const fArr2D restrict y_/*[d][M]*/,
-                          int N, int d, int M)
+static inline void matmul_ld(fArr2D restrict r_/*[N][M]*/,
+                             const fArr2D restrict x_/*[N][d]*/,
+                             const fArr2D restrict y_/*[d][M]*/,
+                             int N, int d, int M,
+                             int lda, int ldb, int ldc)
 {
     /* Row-major r=x@y is computed by cuBLAS as r.T=y.T@x.T */
     const float alpha = 1.0;
     const float beta = 0.0;
     CUGEMM(cublas_handle(),CUBLAS_OP_N,CUBLAS_OP_N,
            M,N,d,
-           &alpha,(const float*)y_,M,
-                  (const float*)x_,d,
-           &beta, (float*)r_,M);
+           &alpha,(const float*)y_,ldb,
+                  (const float*)x_,lda,
+           &beta, (float*)r_,ldc);
+}
+
+static inline void matmul(fArr2D restrict r_/*[N][M]*/,
+                          const fArr2D restrict x_/*[N][d]*/,
+                          const fArr2D restrict y_/*[d][M]*/,
+                          int N, int d, int M)
+{
+    matmul_ld(r_,x_,y_,N,d,M,d,M,M);
 }
 
 /* Multiplies matrix x by the transpose of matrix y.
@@ -109,19 +131,28 @@ static inline void matmul(fArr2D restrict r_/*[N][M]*/,
  * x: left matrix Nxd
  * y: right matrix Mxd
  */
+static inline void addMatmulT_ld(fArr2D restrict r_/*[N][M]*/,
+                                 const fArr2D restrict x_/*[N][d]*/,
+                                 const fArr2D restrict y_/*[M][d]*/,
+                                 int N, int d, int M,
+                                 int lda, int ldb, int ldc)
+{
+    /* Row-major r+=x@y.T is computed by cuBLAS as r.T += y @ x.T */
+    const float alpha = 1.0;
+    const float beta = 1.0;
+    CUGEMM(cublas_handle(),CUBLAS_OP_T,CUBLAS_OP_N,
+           M,N,d,
+           &alpha,(const float*)y_,ldb,
+                  (const float*)x_,lda,
+           &beta, (float*)r_,ldc);
+}
+
 static inline void addMatmulT(fArr2D restrict r_/*[N][M]*/,
                               const fArr2D restrict x_/*[N][d]*/,
                               const fArr2D restrict y_/*[M][d]*/,
                               int N, int d, int M)
 {
-    /* Row-major r+=x@y.T is computed by cuBLAS as * r.T += y @ x.T */
-    const float alpha = 1.0;
-    const float beta = 1.0;
-    CUGEMM(cublas_handle(),CUBLAS_OP_T,CUBLAS_OP_N,
-           M,N,d,
-           &alpha,(const float*)y_,d,
-                  (const float*)x_,d,
-           &beta, (float*)r_,M);
+    addMatmulT_ld(r_,x_,y_,N,d,M,d,d,M);
 }
 
 /* Multiplies matrix x by the transpose of matrix y.
@@ -131,19 +162,28 @@ static inline void addMatmulT(fArr2D restrict r_/*[N][M]*/,
  * x: left matrix Nxd
  * y: right matrix Mxd
  */
+static inline void matmulT_ld(fArr2D restrict r_/*[N][M]*/,
+                              const fArr2D restrict x_/*[N][d]*/,
+                              const fArr2D restrict y_/*[M][d]*/,
+                              int N, int d, int M,
+                              int lda, int ldb, int ldc)
+{
+    /* Row-major r=x@y.T is computed as r.T = y @ x.T */
+    const float alpha = 1.0;
+    const float beta = 0.0;
+    CUGEMM(cublas_handle(),CUBLAS_OP_T,CUBLAS_OP_N,
+           M,N,d,
+           &alpha,(const float*)y_,ldb,
+                  (const float*)x_,lda,
+           &beta, (float*)r_,ldc);
+}
+
 static inline void matmulT(fArr2D restrict r_/*[N][M]*/,
                            const fArr2D restrict x_/*[N][d]*/,
                            const fArr2D restrict y_/*[M][d]*/,
                            int N, int d, int M)
 {
-    /* Row-major r=x@y.T is computed as * r.T = y @ x.T */
-    const float alpha = 1.0;
-    const float beta = 0.0;
-    CUGEMM(cublas_handle(),CUBLAS_OP_T,CUBLAS_OP_N,
-           M,N,d,
-           &alpha,(const float*)y_,d,
-                  (const float*)x_,d,
-           &beta, (float*)r_,M);
+    matmulT_ld(r_,x_,y_,N,d,M,d,d,M);
 }
 
 /* Multiplies the transpose of matrix x by matrix y.
@@ -153,19 +193,28 @@ static inline void matmulT(fArr2D restrict r_/*[N][M]*/,
  * x: left matrix dxN
  * y: right matrix dxM
  */
-static inline void Tmatmul(fArr2D restrict r_/*[N][M]*/,
-                           const fArr2D restrict x_/*[d][N]*/,
-                           const fArr2D restrict y_/*[d][M]*/,
-                           int N, int d, int M)
+static inline void Tmatmul_ld(fArr2D restrict r_/*[N][M]*/,
+                              const fArr2D restrict x_/*[d][N]*/,
+                              const fArr2D restrict y_/*[d][M]*/,
+                              int N, int d, int M,
+                              int lda, int ldb, int ldc)
 {
     /* Row-major r=x.T@y is computed as r.T = y.T @ x */
     const float alpha = 1.0;
     const float beta = 0.0;
     CUGEMM(cublas_handle(),CUBLAS_OP_N,CUBLAS_OP_T,
            M,N,d,
-           &alpha,(const float*)y_,M,
-                  (const float*)x_,N,
-           &beta, (float*)r_,M);
+           &alpha,(const float*)y_,ldb,
+                  (const float*)x_,lda,
+           &beta, (float*)r_,ldc);
+}
+
+static inline void Tmatmul(fArr2D restrict r_/*[N][M]*/,
+                           const fArr2D restrict x_/*[d][N]*/,
+                           const fArr2D restrict y_/*[d][M]*/,
+                           int N, int d, int M)
+{
+    Tmatmul_ld(r_,x_,y_,N,d,M,N,M,M);
 }
 
 /* Multiplies the vector v by the matrix m and
