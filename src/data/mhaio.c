@@ -72,10 +72,12 @@ MHA* read_mha(FILE* fp)
     l->Vh = allocmem(l->BHT,l->Dh,float);
 
     l->Att = allocmem(l->BHT,l->T,float);
-    l->dropout = allocmem(l->B * l->H,1,DROPOUT*);
-    for (int i = 0; i < l->B * l->H; i++) {
-        l->dropout[i] = dropout_create(dropout_rate);
-        dropout_init(l->dropout[i],l->T,l->T);
+    if (dropout_rate > 0) {
+        l->dropout = allocmem(l->B * l->H,1,DROPOUT*);
+        for (int i = 0; i < l->B * l->H; i++) {
+            l->dropout[i] = dropout_create(dropout_rate);
+            dropout_init(l->dropout[i],l->T,l->T);
+        }
     }
 
     l->Scores = allocmem(l->T,l->T,float);
@@ -138,7 +140,7 @@ err: /* error exit */
 int write_mha(const MHA* l, int final, FILE* fp)
 {
     int training = final ? 0 : l->training;
-    float dropout_rate = final ? 0.0f : l->dropout[0]->rate;
+    float dropout_rate = final ? 0.0f : (l->dropout && l->dropout[0]->rate);
     int cnt = fprintf(fp,"MHA H %d T %d D %d B %d lookahead %d"
                          " training %d dropout %.9g\n",
                       l->H,l->T,l->D,l->B,l->lookahead,

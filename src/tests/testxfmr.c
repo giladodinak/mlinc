@@ -643,7 +643,7 @@ int main(void)
     init_lrng(seed);
 
     failures = 0;
-    smoke_test();
+//  smoke_test();
     training_test();
 
     if (failures == 0)

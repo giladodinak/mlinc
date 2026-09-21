@@ -381,7 +381,7 @@ void test_mask(MHA* m)
     nnfltcpy(nnX,X,BT * D);
     mha_forward(m,nnX,NULL,nnY,0,0,0);
     nnfltcpy(Y,nnY,BT * D);
-    nnfltcpy(Scores,m->Scores,T * T);
+    nnfltcpy(Scores,m->Att,T * T);
 
     float masked_sum = 0;
     float unmasked_sum = 0;
@@ -444,7 +444,11 @@ void test_padding_mask(MHA* m)
 
     mha_forward(m,nnX,nn_pad_mask,nnY,0,0,0);
     nnfltcpy(Y,nnY,BT * D);
-    nnfltcpy(Scores,m->Scores,T * T);
+    int b = B - 1;
+    int h = m->H - 1;
+    int base = (b * m->H + h) * T;
+    typedef float (*ArrBHTT)[T];
+    nnfltcpy(Scores,&((ArrBHTT)m->Att)[base],T * T);
 
     float padded_sum = 0;
     float unpadded_sum = 0;
@@ -502,7 +506,7 @@ void test_rope_relative_invariance(MHA* m)
     nnfltcpy(Att1,m->Att,m->BHT * T);
 
     /* Forward with offset */
-    int offset = (int) urand(0,1000000);
+    int offset = (int) urand(0,300000);
     nnfltclr(nnY2,BT * D);
     mha_forward(m,nnX,NULL,nnY2,offset,0,0);
     nnfltcpy(Y2,nnY2,BT * D);

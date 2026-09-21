@@ -61,9 +61,12 @@ static __global__ void rope_apply_kernel_ld(float* x,
         int t = k / D2;
         int i = k % D2;
 
-        double angle = ((double)offset + t) * (double)theta[i];
-        float cos_a = (float)cos(angle);
-        float sin_a = sign * (float)sin(angle);
+        /* fp32 calculations, accurate enough for offset < 100K */
+        float angle = (offset + t) * theta[i];
+        float cos_a, sin_a;
+        sincosf(angle,&sin_a,&cos_a);
+        sin_a *= sign;
+
         float x0 = x[t * ld + 2 * i];
         float x1 = x[t * ld + 2 * i + 1];
         x[t * ld + 2 * i]     = x0 * cos_a - x1 * sin_a;

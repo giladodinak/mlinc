@@ -461,6 +461,7 @@ void mha_forward_step(MHA* restrict l,
     typedef float (*ArrDD)[D];
     typedef float (*Arr1D)[D];
     typedef float (*ArrHTDh)[Dh];
+    typedef float (*Arr1Dh)[Dh];
 
     ArrDD Wq = (ArrDD) l->Wq;
     ArrDD Wk = (ArrDD) l->Wk;
@@ -478,8 +479,6 @@ void mha_forward_step(MHA* restrict l,
 
     ArrHTDh Kc = (ArrHTDh) l->Kh_cache;
     ArrHTDh Vc = (ArrHTDh) l->Vh_cache;
-    ArrHTDh Qh = (ArrHTDh) l->Qh;
-    ArrHTDh Kh = (ArrHTDh) l->Kh;
 
     /* Project the single new token */
     matmul(Q,x,Wq,1,D,D);
@@ -493,26 +492,27 @@ void mha_forward_step(MHA* restrict l,
     float scale = 1.0 / sqrtf((float) Dh);
 
     for (int h = 0; h < H; h++) {
-        int hbase = h * T;
-        float* qh = (float*) &Qh[hbase];
-        float* kh = (float*) &Kh[hbase];
-        fltcpy(qh,&Q[0][h*Dh],Dh);
-        fltcpy(kh,&K[0][h*Dh],Dh);
+
+        int hbase = h * T; /* This head's cache offset */
+
+        Arr1Dh Qh = (Arr1Dh) &Q[0][h * Dh];
+        Arr1Dh Kh = (Arr1Dh) &K[0][h * Dh];
+        Arr1Dh Vh = (Arr1Dh) &V[0][h * Dh];
+        Arr1Dh Oh = (Arr1Dh) &Out[0][h * Dh];
 
         /* RoPE-rotate the new token's Q and K at absolute position offset */
-        rope_apply((fArr2D)qh,l->theta,0,offset,1,Dh);
-        rope_apply((fArr2D)kh,l->theta,0,offset,1,Dh);
+        rope_apply(Qh,l->theta,0,offset,1,Dh);
+        rope_apply(Kh,l->theta,0,offset,1,Dh);
 
         /* Store rotated K and raw V into the ring at this slot */
-        fltcpy(&Kc[hbase + slot][0],kh,Dh);
-        fltcpy(&Vc[hbase + slot][0],&V[0][h*Dh],Dh);
+        fltcpy(&Kc[hbase + slot][0],Kh,Dh);
+        fltcpy(&Vc[hbase + slot][0],Vh,Dh);
 
         /* Attention of the new token over the n valid cached keys */
-        matmulT(l->Scores,(fArr2D)qh,&Kc[hbase],1,Dh,n);
+        matmulT(l->Scores,Qh,&Kc[hbase],1,Dh,n);
         scale_scores(l->Scores,1,n,scale);
         softmax(l->Scores,1,n);
-        matmul(l->Oh,l->Scores,&Vc[hbase],1,n,Dh);
-        fltcpy(&Out[0][h * Dh],l->Oh,Dh);
+        matmul(Oh,l->Scores,&Vc[hbase],1,n,Dh);
     }
 
     if (Y != NULL)

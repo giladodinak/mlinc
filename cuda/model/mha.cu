@@ -280,10 +280,11 @@ static __global__ void scale_and_mask_scores(float* Scores,
  *     Vh = V[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
  *
  *   Step 3 - Scaled dot-product attention (in Eq. 1, Sec. 3.2.1):
- *     Scores = Qh @ Kh.T / sqrt(Dh)
- *     Scores[i][j] = -1e9 for j > i + lookahead  (causal/lookahead mask)
- *     Att = softmax(Scores)           (row-wise)
- *     Oh  = Att @ Vh
+ *     Att = Qh @ Kh.T / sqrt(Dh)
+ *     mask(Att)
+ *     softmax(Att)
+ *     [optional] dropout(Att)
+ *     Oh = Att @ Vh
  *
  *   Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
  *     Out = Concat(Oh_0, ..., Oh_{H-1})
@@ -333,7 +334,7 @@ void mha_forward(MHA* restrict l,
     ArrBTD K = (ArrBTD) l->K;
     ArrBTD V = (ArrBTD) l->V;
 
-    ArrTT Scores = (ArrTT) l->Scores;
+    ArrTT AttTemp = (ArrTT) l->Scores;
     ArrBHTT Att = (ArrBHTT) l->Att;
     ArrBTD Out = (ArrBTD) l->Out;
 
@@ -367,27 +368,29 @@ void mha_forward(MHA* restrict l,
             rope_apply_ld(Qh,l->theta,0,offset,T,Dh,D);
             rope_apply_ld(Kh,l->theta,0,offset,T,Dh,D);
 
-            /* Step 3 - Scaled dot-product attention (in Eq. 1, Sec. 3.2.1):
-             * Scores  = Qh @ Kh.T
-             * Scores /= sqrt(Dh)
-             * Scores[i][j] = -1e9 for j > i + lookahead (causal/lookahead mask)
-             * Att = softmax(Scores)
-             * Oh  = Att @ Vh
+            /* Step 3 - Scaled dot-product Attention (in Eq. 1, Sec. 3.2.1):
+             * Att  = Qh @ Kh.T
+             * Att /= sqrt(Dh)
+             * mask(Att)
+             * softmax(Att)
+             * [optional] dropout(Att)
+             * Oh = Att @ Vh
              */
-            matmulT_ld(Scores,Qh,Kh,T,Dh,T,D,D,T);
+            fArr2D Ah = &Att[base];
+            matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
 
             scale_and_mask_scores<<<blocks,threads>>>(
-                   (float*) Scores,(const int *) pad_mask,b,T,lookahead,scale);
+                   (float*) Ah,(const int *) pad_mask,b,T,lookahead,scale);
 
             /* Compute attention probabilities - Softmax - in Eq. 1 */
-            softmax(Scores,T,T);
-
-            /* Store this head's attention weights (pre-dropout) for backward */
-            cufltcpy(&Att[base],Scores,T * T);
+            softmax(Ah,T,T);
 
             if (training && l->training)
-                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
-                    dropout_forward(l->dropout[b * H + h],Scores);
+                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
+                    cufltcpy(AttTemp,Ah,T * T);
+                    dropout_forward(l->dropout[b * H + h],AttTemp);
+                    Ah = AttTemp;
+                }
 
             /* In Eq. 1: Attention @ V */
             /* Write this head directly into its slice of Out.  The output
@@ -395,7 +398,7 @@ void mha_forward(MHA* restrict l,
              * again just a view: no Oh -> Out copies are required.
              */
             fArr2D Oh = (fArr2D) &Out[b * T][h * Dh];
-            matmul_ld(Oh,Scores,Vh,T,T,Dh,T,D,D);
+            matmul_ld(Oh,Ah,Vh,T,T,Dh,T,D,D);
         }
     }
     /* Step 4 continued - output projection (Eq. 2, Sec. 3.2.2):
@@ -439,6 +442,7 @@ void mha_forward_step(MHA* restrict l,
     typedef float (*ArrDD)[D];
     typedef float (*Arr1D)[D];
     typedef float (*ArrHTDh)[Dh];
+    typedef float (*Arr1Dh)[Dh];
 
     ArrDD Wq = (ArrDD) l->Wq;
     ArrDD Wk = (ArrDD) l->Wk;
@@ -448,7 +452,7 @@ void mha_forward_step(MHA* restrict l,
     Arr1D K = (Arr1D) l->K;
     Arr1D V = (Arr1D) l->V;
     Arr1D Out = (Arr1D) l->Out;
-
+    
     if (l->Kh_cache == NULL) {
         l->Kh_cache = (fArr2D) cuallocmem(H * T,Dh,float);
         l->Vh_cache = (fArr2D) cuallocmem(H * T,Dh,float);
@@ -456,6 +460,8 @@ void mha_forward_step(MHA* restrict l,
 
     ArrHTDh Kc = (ArrHTDh) l->Kh_cache;
     ArrHTDh Vc = (ArrHTDh) l->Vh_cache;
+
+    fArr2D AttTemp = l->Scores;
 
     /* Project the single new token */
     matmul(Q,x,Wq,1,D,D);
@@ -473,15 +479,15 @@ void mha_forward_step(MHA* restrict l,
 
     for (int h = 0; h < H; h++) {
 
-        int hbase = h * T;
+        int hbase = h * T; /* This head's cache offset */
         
-        /* Notice that Q and K are [1][D] arrays for the current token.
-         * Since D = H * Dh, each row can be viewed as H contiguous
-         * head vectors of dimension Dh, i.e. [H][Dh]. For this (h),
-         * Qh/Kh point at the Dh-vecto.
+        /* Q/K/V are [1][D] arrays for the current token.
+         * Qh/Kh/Vh/Oh are [1][Dh] views for head h.
          */
-        fArr2D Qh = (fArr2D) &Q[0][h * Dh];
-        fArr2D Kh = (fArr2D) &K[0][h * Dh];
+        Arr1Dh Qh = (Arr1Dh) &Q[0][h * Dh];
+        Arr1Dh Kh = (Arr1Dh) &K[0][h * Dh];
+        Arr1Dh Vh = (Arr1Dh) &V[0][h * Dh];
+        Arr1Dh Oh = (Arr1Dh) &Out[0][h * Dh];
 
         /* RoPE-rotate the new token's Q and K at absolute position offset */
         rope_apply(Qh,l->theta,0,offset,1,Dh);
@@ -489,13 +495,13 @@ void mha_forward_step(MHA* restrict l,
 
         /* Store rotated K and raw V into the ring at this slot */
         cufltcpy(&Kc[hbase + slot][0],Kh,Dh);
-        cufltcpy(&Vc[hbase + slot][0],&V[0][h * Dh],Dh);
+        cufltcpy(&Vc[hbase + slot][0],Vh,Dh);
 
         /* Attention of the new token over the n valid cached keys */
-        matmulT(l->Scores,Qh,&Kc[hbase],1,Dh,n);
-        scale_scores<<<blocks,threads>>>((float*)l->Scores,n,scale);
-        softmax(l->Scores,1,n);
-        matmul((fArr2D) &Out[0][h * Dh],l->Scores,&Vc[hbase],1,n,Dh);
+        matmulT(AttTemp,Qh,&Kc[hbase],1,Dh,n);
+        scale_scores<<<blocks,threads>>>((float*)AttTemp,n,scale);
+        softmax(AttTemp,1,n);
+        matmul(Oh,AttTemp,&Vc[hbase],1,n,Dh);
     }
 
     if (Y != NULL)
@@ -529,7 +535,7 @@ void mha_forward_step(MHA* restrict l,
  *           dAtt = dOh @ Vh.T
  *     (b) reverse Att = softmax(Scores):
  *           dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
- *           dScores /= sqrt(Dh)                  (reverse scaling)
+ *           dScores /= sqrt(Dh)                 (reverse scaling)
  *     (c) reverse Scores = Qh @ Kh.T:
  *           dQh = dScores @ Kh
  *           dKh = dScores.T @ Qh
@@ -587,6 +593,8 @@ void mha_backward(MHA* restrict l,
 
     ArrBHTT Att = (ArrBHTT) l->Att;
 
+    ArrTT AttTemp = (ArrTT) l->Scores;
+
     ArrBTD Out = (ArrBTD) l->Out;
 
     float scale = 1.0 / sqrtf((float) Dh);
@@ -634,14 +642,14 @@ void mha_backward(MHA* restrict l,
              * dVh  = Att.T @ dOh
              * dAtt = dOh @ Vh.T
              *
-             * Note that the stored Att containts the pre-dropout values,
-             * whereas dVh calculation uses the post-dropout values, which
-             * can be resoncstructed by applying the dropout mask.
+             * Note that stored Att contains the pre-dropout values.
+             * With dropout, AttTemp reconstructs the post-dropout values
+             * needed for the dVh calculation.
              */
             if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
-                /* Use Scroes as scratch buffer */
-                dropout_backward(l->dropout[b * H + h],&Att[base],l->Scores);
-                Tmatmul_ld(dVh,l->Scores,dOh,T,T,Dh,T,D,D);
+                /* Use AttTemp as scratch buffer */
+                dropout_backward(l->dropout[b * H + h],&Att[base],AttTemp);
+                Tmatmul_ld(dVh,AttTemp,dOh,T,T,Dh,T,D,D);
             }
             else
                 Tmatmul_ld(dVh,&Att[base],dOh,T,T,Dh,T,D,D);
