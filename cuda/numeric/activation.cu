@@ -1,6 +1,8 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 /* CUDA activation functions and their derivatives */
+#include <math.h>
 #include <cuda_runtime.h>
+#include "arraytypes.h"
 #include "activation.h"
 
 #define ACT_THREADS 256

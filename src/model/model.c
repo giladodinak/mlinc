@@ -509,10 +509,10 @@ void model_fit(MODEL* m,
             printf("\n");
     }
     for (int i = 0; i < L; i++) {
-        freemem(dy[i]);
+        nnfreemem(dy[i]);
     }
-    freemem(x);
-    freemem(yt);
+    nnfreemem(x);
+    nnfreemem(yt);
     batch_free(bTr);
     if (bVd != NULL)
         batch_free(bVd);
@@ -553,6 +553,9 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     /* Allocate memory for one batch */
     typedef float (*ArrBD)[D];
     ArrBD xb = (ArrBD) nnallocmem(B,D,float); /* Array of samples */
+    /* Temp output buffer */
+    typedef float (*ArrBNo)[No];
+    ArrBNo yb = (m->loss_func == 'N') ? (ArrBNo) nnallocmem(B,No,float) : NULL;
 
     BATCH* b = batch_create(x,D,NULL,0,B,NULL,len,0);
     reset_state(m);
@@ -567,14 +570,16 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
         if (m->loss_func == 'N') {
             /* Full-vocabulary pass, then normalize to a distribution */
             negsample_logits(m->layer[L - 1].negsample,yp[L - 1],
-                             (fArr2D) y,cnt);
-            softmax((fArr2D) y,cnt,No);
+                             (fArr2D) yb,cnt);
+            softmax((fArr2D) yb,cnt,No);
+            nnfltcpy((fArr2D) y,yb,cnt * No);
         }
         else
-            fltcpy((fArr2D) y,yp[L - 1],cnt * No);
+            nnfltcpy((fArr2D) y,yp[L - 1],cnt * No);
         y += cnt;
     }
     nnfreemem(xb);
+    nnfreemem(yb);
     batch_free(b);
 }
 

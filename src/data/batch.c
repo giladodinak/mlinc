@@ -24,6 +24,8 @@ BATCH* batch_create(const fArr2D x, int D, const fArr2D y, int N, int B,
     b->shufSeq = NULL;
     b->shufLen = NULL;
     b->shufVec = NULL;
+    b->xbuf = allocmem(B,D,float);
+    b->ybuf = (y != NULL && N > 0) ? allocmem(B,N,float) : NULL;
     b->curSeq = 0;
     b->curVec = 0;
 
@@ -57,6 +59,8 @@ void batch_free(BATCH* b)
     freemem(b->shufSeq);
     freemem(b->shufLen);
     freemem(b->shufVec);
+    freemem(b->xbuf);
+    freemem(b->ybuf);
     freemem(b);
 }
 
@@ -110,9 +114,9 @@ int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
     typedef float (*ArrBD)[D];
     typedef float (*ArrBN)[b->N];
     ArrBD xs = (ArrBD) b->x;
-    ArrBD xd = (ArrBD) x;
-    ArrBN ys = (ArrBN) b->y; /* Maybe NULL */
-    ArrBN yd = (ArrBN) y;    /* Maybe NULL */
+    ArrBD xd = (ArrBD) b->xbuf;
+    ArrBN ys = (ArrBN) b->y;    /* Maybe NULL */
+    ArrBN yd = (ArrBN) b->ybuf; /* Maybe NULL */
     
     if (b->shufSeq != NULL) {
         if (b->curSeq < b->num) { /* b->num is number of sequences */
@@ -169,6 +173,7 @@ int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
             }
         }
     }
+
     if (cnt < B) { /* Pad to batch size */
         for (int i = cnt; i < B; i++)
             for (int j = 0; j < D; j++)
@@ -179,6 +184,13 @@ int batch_copy(BATCH* restrict b, fArr2D restrict x, fArr2D restrict y)
                     yd[i][j] = 0;
         }
     }
+
+    if (cnt > 0) {
+        nnfltcpy(x,xd,B * D);
+        if (y != NULL && yd != NULL)
+            nnfltcpy(y,yd,B * N);
+    }
+
     return cnt;
 }
 
