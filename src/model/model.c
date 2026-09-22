@@ -323,11 +323,19 @@ void model_fit(MODEL* m,
     else
         MVd = numVd; 
 
-    typedef float (*VecDx);
-    VecDx mean = (VecDx) m->mean;
-    VecDx sdev = (VecDx) m->sdev;
-    if (m->normalize)
+    typedef float (*VecD);
+    VecD mean = (VecD) m->mean;
+    VecD sdev = (VecD) m->sdev;
+    VecD nn_mean = NULL;
+    VecD nn_sdev = NULL;
+    
+    if (m->normalize) {
         calculate_mean_sdev(xTr,MTr,D,mean,sdev,0);
+        nn_mean = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_mean,mean,D);
+        nn_sdev = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_sdev,sdev,D);
+    }
 
     BATCH* bTr = batch_create(xTr,D,yTr,Nt,B,lenTr,numTr,shuffle);
     BATCH* bVd = NULL;
@@ -379,7 +387,7 @@ void model_fit(MODEL* m,
             if (cnt == 0)
                 break;
             if (m->normalize)
-                normalize(x,B,D,mean,sdev,0);
+                normalize(x,B,D,nn_mean,nn_sdev,0);
             model_batch_forward(m,x,1,yp);
             sample_cnt += cnt;
 
@@ -452,7 +460,7 @@ void model_fit(MODEL* m,
                 if (cnt == 0)
                     break;
                 if (m->normalize)
-                    normalize(x,B,D,mean,sdev,0); 
+                    normalize(x,B,D,nn_mean,nn_sdev,0); 
                 model_batch_forward(m,x,0,yp);
                 v_sample_cnt += cnt;
 
@@ -511,6 +519,8 @@ void model_fit(MODEL* m,
     for (int i = 0; i < L; i++) {
         nnfreemem(dy[i]);
     }
+    nnfreemem(nn_mean);
+    nnfreemem(nn_sdev);
     nnfreemem(x);
     nnfreemem(yt);
     batch_free(bTr);
@@ -547,9 +557,19 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     ArrMD x = (ArrMD) x_;
     ArrMNo y = (ArrMNo) y_;
     
-    typedef float (*VecDx);
-    VecDx mean = (VecDx) m->mean;
-    VecDx sdev = (VecDx) m->sdev;
+    typedef float (*VecD);
+    VecD mean = (VecD) m->mean;
+    VecD sdev = (VecD) m->sdev;
+    VecD nn_mean = NULL;
+    VecD nn_sdev = NULL;
+
+    if (m->normalize) {
+        nn_mean = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_mean,mean,D);
+        nn_sdev = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_sdev,sdev,D);
+    }
+
     /* Allocate memory for one batch */
     typedef float (*ArrBD)[D];
     ArrBD xb = (ArrBD) nnallocmem(B,D,float); /* Array of samples */
@@ -565,7 +585,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
         if (cnt == 0)
             break;
         if (m->normalize)
-            normalize(xb,B,D,mean,sdev,0); 
+            normalize(xb,B,D,nn_mean,nn_sdev,0); 
         model_batch_forward(m,xb,0,yp);
         if (m->loss_func == 'N') {
             /* Full-vocabulary pass, then normalize to a distribution */
@@ -578,6 +598,8 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
             nnfltcpy((fArr2D) y,yp[L - 1],cnt * No);
         y += cnt;
     }
+    nnfreemem(nn_mean);
+    nnfreemem(nn_sdev);
     nnfreemem(xb);
     nnfreemem(yb);
     batch_free(b);

@@ -3,6 +3,7 @@
 #ifndef NEGSAMPLE_H
 #define NEGSAMPLE_H
 #include "float.h"
+#include "mem.h"
 #include "array.h"
 
 /* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
@@ -105,11 +106,7 @@ static inline fArr2D negsample_forward(NEGSAMPLE* restrict l,
                                        int lyr)
 {
     (void) lyr;
-#ifdef USE_CUDA
-    cufltcpy(l->h,X,l->B * l->E);
-#else
-    fltcpy(l->h,X,l->B * l->E);
-#endif
+    nnfltcpy(l->h,X,l->B * l->E);
     return l->h;
 }
 
@@ -131,11 +128,7 @@ static inline void negsample_backward(NEGSAMPLE* restrict l,
 {
     (void) lyr;
     if (dx == NULL) return;
-#ifdef USE_CUDA
-    cufltcpy(dx,dy,l->B * l->E);
-#else
-    fltcpy(dx,dy,l->B * l->E);
-#endif
+    nnfltcpy(dx,dy,l->B * l->E);
 }
 
 /* Computes the negative-sampling loss and its gradients for a batch.
