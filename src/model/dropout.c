@@ -112,7 +112,7 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
 }
 
 /* Applies a precomputed dropout mask to an input array, writing the
- * result to a separate output array without modifying the input.
+ * result to an output array, which can be the same array as the input.
  *
  * Parameters:
  *   in  : Pointer to the 2D input array to be masked

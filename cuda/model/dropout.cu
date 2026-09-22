@@ -3,51 +3,72 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <curand_kernel.h>
 #include "float.h"
 #include "mem.h"
 #include "random.h"
 #include "arraytypes.h"
 #include "cumem.h"
 #include "cuflt.h"
-#include "curand.h"
 #include "dropout.h"
 
-#define RNG_STATES 1024
-#define THDCNT      256
+#define THDCNT 256
 
-/* Initialize seed per RNG worker */
-static __global__ void dropout_init_rng(int* restrict state, int base)
-{
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k < RNG_STATES) {
-        /* Avoid addition integer overflow and 0 seed */
-        state[k] = (((long long)base - 1 + k) %  2147483646) + 1;
-    }
-}
+typedef struct {
+    unsigned long long seed;
+    unsigned long long counter;
+} DROPOUT_RNG;
 
-/* Applies dropout in-place. Each active CUDA worker owns one RNG seed and
- * advances that seed while processing its grid-stride sequence of elements.
+/* Mixes random seed into a well distributed 64 bit key.
+ *
+ * References:
+ *   - https://prng.di.unimi.it/splitmix64.c
+ *   - https://dl.acm.org/doi/epdf/10.1145/2714064.2660195
  */
-static __global__ void dropout_forward_kernel(float* restrict mx,
-                                              float* restrict mask,
+static unsigned long long dropout_mix_seed(unsigned long long x)
+{
+    x += 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
+/* Generates a dropout mask and applies it in place.
+ *
+ * curand_uniform() returns values in (0,1]
+ */
+static __global__ void dropout_forward_kernel(float* mx,
+                                              float* mask,
                                               int n, float rate,
-                                              int* restrict rng_state)
+                                              unsigned long long seed,
+                                              unsigned long long counter)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-    float scale = 1.0 / (1.0 - rate);
+    int i = 4 * k;
+    if (i >= n) return;
 
-    for (int i = k; i < n; i += stride) {
-        float value = cu_urand(&rng_state[k],0,1) >= rate ? scale : 0.0;
-        mx[i] *= value;
-        mask[i] = value;
+    curandStatePhilox4_32_10_t st;
+    curand_init(seed,(unsigned long long) k,counter,&st);
+    float4 r = curand_uniform4(&st);
+
+    float u[4] = { r.x, r.y, r.z, r.w };
+    float scale = 1.0f / (1.0f - rate);
+
+    #pragma unroll
+    for (int j = 0; j < 4; j++) {
+        int idx = i + j;
+        if (idx < n) {
+            float value = (u[j] >= rate) ? scale : 0.0f;
+            mx[idx] *= value;
+            mask[idx] = value;
+        }
     }
 }
 
-/* Applies an already-generated dropout mask. */
-static __global__ void dropout_backward_kernel(const float* restrict in,
+/* Applies an already-generated dropout mask */
+static __global__ void dropout_backward_kernel(const float* in,
                                                const float* restrict mask,
-                                               float* restrict out,
+                                               float* out,
                                                int n)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
@@ -85,8 +106,9 @@ DROPOUT* dropout_create(float rate)
  *   input_dim  - Size of input vectors
  *
  * Notes:
- *   The output weights are initialized using a normal distribution
- *   scaled by 1/sqrt(D).
+ *   Allocates the device mask array and seeds this layer's counter based
+ *   RNG. The RNG state itself lives in host memory; the device needs only
+ *   the seed and the call counter, which are passed as kernel arguments.
  */
 void dropout_init(DROPOUT* l, int input_dim, int batch_size)
 {
@@ -94,9 +116,10 @@ void dropout_init(DROPOUT* l, int input_dim, int batch_size)
     l->D = input_dim;
     l->mask = (fArr2D) cuallocmem(l->B,l->D,float);
 
-    l->rng_state = cuallocmem(RNG_STATES,1,int);
-    int blocks = RNG_STATES / THDCNT;
-    dropout_init_rng<<<blocks,THDCNT>>>((int*) l->rng_state,lrng());
+    DROPOUT_RNG* rng = (DROPOUT_RNG*) allocmem(1,1,DROPOUT_RNG);
+    rng->seed = dropout_mix_seed((unsigned long long) lrng());
+    rng->counter = 0;
+    l->rng_state = rng;
 }
 
 /* Sets a new batch size.
@@ -124,7 +147,7 @@ void dropout_free(DROPOUT* l)
 {
     if (l == NULL) return;
     cufreemem(l->mask);
-    cufreemem(l->rng_state);
+    freemem(l->rng_state);
     freemem(l);
 }
 
@@ -132,10 +155,15 @@ void dropout_free(DROPOUT* l)
  *
  * Parameters:
  *   l - Pointer to the layer to be reset
+ *
+ * Notes:
+ *   Rewinds the RNG call counter, so a run repeated from here produces the
+ *   same sequence of masks.
  */
 void dropout_reset(DROPOUT* l)
 {
-    (void) l; /* do nothing */
+    if (l == NULL || l->rng_state == NULL) return;
+    ((DROPOUT_RNG*) l->rng_state)->counter = 0;
 }
 
 /* Applies dropout to a 2D array in-place (training only).
@@ -148,23 +176,31 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
     int n = l->B * l->D;
     float rate = l->rate;
 
+    if (n <= 0) return;
+
     if (rate == 1.0f) {
         cufltclr(mx_,n);
+        cufltclr(l->mask,n);
         return;
     }
 
-    int blocks = (n + THDCNT - 1) / THDCNT;
-    if (blocks > RNG_STATES / THDCNT)
-        blocks = RNG_STATES / THDCNT;
-    if (blocks < 1)
-        blocks = 1;
+    DROPOUT_RNG* rng = (DROPOUT_RNG*) l->rng_state;
+
+    /* One thread per four elements; the whole array is covered in one
+     * launch, so every element's mask comes from a distinct counter block.
+     */
+    int quads = (n + 3) / 4;
+    int blocks = (quads + THDCNT - 1) / THDCNT;
 
     dropout_forward_kernel<<<blocks,THDCNT>>>(
-        (float*) mx_,(float*) l->mask,n,rate,(int*) l->rng_state);
+        (float*) mx_,(float*) l->mask,n,rate,rng->seed,rng->counter);
+
+    rng->counter += 4; /* Number of random numbers generated */
 }
 
 /* Applies a precomputed dropout mask to an input array, writing the
- * result to a separate output array without modifying the input.
+ * result to an output array, which may be the same array as the input
+ * (in-place); partial overlap is not supported.
  *
  * Parameters:
  *   in  : Pointer to the 2D input array to be masked
@@ -175,6 +211,8 @@ void dropout_backward(DROPOUT* restrict l,
                       fArr2D out_/*[B][D]*/)
 {
     int n = l->B * l->D;
+    if (n <= 0) return;
+
     int blocks = (n + THDCNT - 1) / THDCNT;
     if (blocks < 1)
         blocks = 1;
