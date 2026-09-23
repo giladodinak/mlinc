@@ -4,6 +4,10 @@
 #define ACCURACY_H
 #include "arraytypes.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Calculates the R-squared factor between predicted and true values.
  * 
  * This function calculates the numerator of the R-squared factor between M 
@@ -49,5 +53,9 @@ float R2_sum(const fArr2D yp_/*[M][N]*/,
 float match_sum(const fArr2D yp_/*[M][K]*/,
                 const fArr2D yt_/*[M][K]*/, 
                 int M, int K);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

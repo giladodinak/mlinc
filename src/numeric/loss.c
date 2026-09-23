@@ -1,5 +1,6 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 /* Loss functions and their derivatives */
+#include <math.h>
 #include "arraytypes.h"
 #include "loss.h"
 
@@ -148,5 +149,3 @@ void dLdy_mean_square_error(const fArr2D yp_/*[M][N]*/,
             dy[i][j] = 2 * (yp[i][j] - yt[i][j]) / N / M;
 }
 
-
-#endif
