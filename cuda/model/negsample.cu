@@ -12,6 +12,13 @@
 #include "activation.h"
 #include "negsample.h"
 
+typedef struct devstat_s {
+    int* dtouched;  /* Device copy of touched[]                       */
+    int* dsamples;  /* Device target/negative samples [B][n_neg+1]    */
+    float* dloss;   /* Device loss accumulator                        */
+    int* dcorrect;  /* Device correct-count accumulator               */
+} DEVSTAT;
+
 #define THCNT 256
 
 /* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
@@ -34,18 +41,31 @@
  *   Compositionality, Mikolov et al., 2013, https://arxiv.org/pdf/1310.4546
  */
 
-/* Prepares a Wo gradient row for accumulation this batch.
+/* Records a Wo gradient row touched in this batch.
  *
- * On the first touch of 'row' in this batch (per-row stamp), the row is zeroed
- * and appended to l->touched. Later touches are no-ops so gradients add up.
+ * On the first touch of 'row' in this batch (per-row stamp), the row is
+ * appended to l->touched. Later touches are no-ops so gradients add up.
  */
-static inline void prep_row(NEGSAMPLE* l, fArr2D gWo_, int row)
+static inline void prep_row(NEGSAMPLE* l, int row)
 {
     if (l->seen[row] == l->stamp)
         return;
     l->seen[row] = l->stamp;
-    cufltclr(&((float*)gWo_)[row * l->E],l->E);
     l->touched[l->ntouched++] = row;
+}
+
+static __global__ void clear_rows_kernel(float* gWo,
+                                         const int* touched,
+                                         int ntouched, int E)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    int n = ntouched * E;
+    if (k < n) {
+        int r = k / E;
+        int j = k % E;
+        int row = touched[r];
+        gWo[row * E + j] = 0.0f;
+    }
 }
 
 static __global__ void negsample_loss_kernel(const float* h,
@@ -202,8 +222,16 @@ void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training)
     l->training = training;
 
     if (training) {
+        int n = l->B * (l->n_neg + 1);
+        DEVSTAT* d = (DEVSTAT*) allocmem(1,1,DEVSTAT);
+        d->dtouched = (int*) cuallocmem(n,1,int);
+        d->dsamples = (int*) cuallocmem(n,1,int);
+        d->dloss = (float*) cuallocmem(1,1,float);
+        d->dcorrect = (int*) cuallocmem(1,1,int);
+        l->devstat = d;
+
         l->gWo = (fArr2D) cuallocmem(l->K,l->E,float);
-        l->touched = (int*) allocmem(l->B * (l->n_neg + 1),1,int);
+        l->touched = (int*) allocmem(n,1,int);
         l->ntouched = 0;
         l->seen = (int*) allocmem(l->K,1,int);
         for (int i = 0; i < l->K; i++)
@@ -246,8 +274,14 @@ void negsample_set_batch_size(NEGSAMPLE* l, int batch_size)
         cufreemem(l->h);
         l->h = (fArr2D) cuallocmem(l->B,l->E,float);
         if (l->training) {
+            int n = l->B * (l->n_neg + 1);
+            DEVSTAT* d = (DEVSTAT*) l->devstat;
             freemem(l->touched);
-            l->touched = (int*) allocmem(l->B * (l->n_neg + 1),1,int);
+            cufreemem(d->dtouched);
+            cufreemem(d->dsamples);
+            l->touched = (int*) allocmem(n,1,int);
+            d->dtouched = (int*) cuallocmem(n,1,int);
+            d->dsamples = (int*) cuallocmem(n,1,int);
         }
     }
     else
@@ -266,6 +300,14 @@ void negsample_free(NEGSAMPLE* l)
     cufreemem(l->h);
     cufreemem(l->Wo);
     cufreemem(l->gWo);
+    if (l->devstat != NULL) {
+        DEVSTAT* d = (DEVSTAT*) l->devstat;
+        cufreemem(d->dtouched);
+        cufreemem(d->dsamples);
+        cufreemem(d->dloss);
+        cufreemem(d->dcorrect);
+        freemem(d);
+    }
     freemem(l->touched);
     freemem(l->seen);
     freemem(l);
@@ -300,11 +342,12 @@ void negsample_reset(NEGSAMPLE* l)
  */
 float negsample_loss(NEGSAMPLE* restrict l,
                      const fArr2D restrict h_/*[B][E]*/,
-                     const fArr2D restrict labels_/*[B][1]*/,
+                     const fArr2D restrict labels/*[B][1]*/,
                      fArr2D restrict dh_/*[B][E]*/,
                      int cnt, int* correct)
 {
     if (!l->training) return 1e30;
+    DEVSTAT* d = (DEVSTAT*) l->devstat;
     const int E = l->E;
     const int K = l->K;
     const int n_neg = l->n_neg;
@@ -320,56 +363,56 @@ float negsample_loss(NEGSAMPLE* restrict l,
     l->ntouched = 0;
     cufltclr(dh_,cnt * E);
 
-    float* labels = (float*) allocmem(cnt,1,float);
-    cufltcpy(labels,labels_,cnt);
     int* samples = (int*) allocmem(cnt * (n_neg + 1),1,int);
 
     for (int i = 0; i < cnt; i++) {
-        int target = (int) labels[i];
+        int target = (int) ((const float *)labels)[i];
         if (target <= 0 || target >= K) {
             samples[i * (n_neg + 1)] = -1;
             continue;
         }
 
         samples[i * (n_neg + 1)] = target;
-        prep_row(l,l->gWo,target);
+        prep_row(l,target);
 
         for (int k = 0; k < n_neg;) {
             int neg = l->dist[(int) urand(0,l->dist_size)];
             if (neg == target)
                 continue;
             samples[i * (n_neg + 1) + k + 1] = neg;
-            prep_row(l,l->gWo,neg);
+            prep_row(l,neg);
             k++;
         }
     }
 
-    int* dsamples = (int*) cuallocmem(cnt * (n_neg + 1),1,int);
-    cudaMemcpy(dsamples,samples,cnt * (n_neg + 1) * sizeof(int),cudaMemcpyHostToDevice);
+    cudaMemcpy(d->dsamples,samples,cnt * (n_neg + 1) * sizeof(int),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d->dtouched,l->touched,l->ntouched * sizeof(int),
+               cudaMemcpyHostToDevice);
 
-    float* dloss = (float*) cuallocmem(1,1,float);
-    int* dcorrect = NULL;
+    int ng = l->ntouched * E;
+    if (ng > 0)
+        clear_rows_kernel<<<(ng + THCNT - 1) / THCNT,THCNT>>>(
+            (float*)l->gWo,d->dtouched,l->ntouched,E);
+
+    cufltclr(d->dloss,1);
     if (correct != NULL)
-        dcorrect = (int*) cuallocmem(1,1,int);
+        cudaMemset(d->dcorrect,0,sizeof(int));
 
     negsample_loss_kernel<<<cnt,THCNT,THCNT * sizeof(float)>>>(
-        (const float*)h_,dsamples,(float*)dh_,
+        (const float*)h_,d->dsamples,(float*)dh_,
         (const float*)l->Wo,(float*)l->gWo,
-        E,n_neg,cnt,dloss,dcorrect);
+        E,n_neg,cnt,d->dloss,(correct != NULL) ? d->dcorrect : NULL);
 
     float loss = 0.0f;
-    cudaMemcpy(&loss,dloss,sizeof(float),cudaMemcpyDeviceToHost);
+    cudaMemcpy(&loss,d->dloss,sizeof(float),cudaMemcpyDeviceToHost);
     if (correct != NULL) {
         int c = 0;
-        cudaMemcpy(&c,dcorrect,sizeof(int),cudaMemcpyDeviceToHost);
+        cudaMemcpy(&c,d->dcorrect,sizeof(int),cudaMemcpyDeviceToHost);
         *correct += c;
     }
 
-    cufreemem(dsamples);
-    cufreemem(dloss);
-    cufreemem(dcorrect);
     freemem(samples);
-    freemem(labels);
     return loss;
 }
 
@@ -385,17 +428,13 @@ void negsample_update(NEGSAMPLE* restrict l,
                       float learning_rate, float weight_decay)
 {
     if (!l->training || l->ntouched == 0) return;
+    DEVSTAT* d = (DEVSTAT*) l->devstat;
     const int E = l->E;
-
-    int* touched = (int*) cuallocmem(l->ntouched,1,int);
-    cudaMemcpy(touched,l->touched,l->ntouched * sizeof(int),cudaMemcpyHostToDevice);
 
     int n = l->ntouched * E;
     negsample_update_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-        (float*)l->Wo,(const float*)l->gWo,touched,l->ntouched,E,
+        (float*)l->Wo,(const float*)l->gWo,d->dtouched,l->ntouched,E,
         learning_rate,weight_decay);
-
-    cufreemem(touched);
 }
 
 /* Scores h against the entire vocabulary for generation.

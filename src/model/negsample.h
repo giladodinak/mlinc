@@ -3,8 +3,7 @@
 #ifndef NEGSAMPLE_H
 #define NEGSAMPLE_H
 #include "float.h"
-#include "mem.h"
-#include "array.h"
+#include "arraytypes.h"
 
 /* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
  * vocabulary K is too large for a full softmax. Its forward pass is the
@@ -28,6 +27,7 @@ typedef struct negsample_s {
   int ntouched;  /* Number of valid entries in touched[]                  */
   int* seen;     /* Per-row batch stamp [K], for first-touch detection    */
   int stamp;     /* Current batch stamp                                   */
+  void* devstat; /* Additional device state (NULL if not used)            */
 } NEGSAMPLE;
 
 #ifdef __cplusplus
@@ -63,7 +63,7 @@ NEGSAMPLE* negsample_create(int vocab_size, int num_negatives);
 void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training);
 
 /* Provides the unigram negative-sampling table (referenced, not owned) */
-void negsample_set_dist(NEGSAMPLE* l, 
+void negsample_set_dist(NEGSAMPLE* l,
                         const int* dist_table, int dist_table_size);
 
 /* Sets a new batch size.
@@ -135,9 +135,9 @@ static inline void negsample_backward(NEGSAMPLE* restrict l,
  *
  * For each of the first 'cnt' rows, scores the target word plus n_neg
  * sampled negatives, accumulating the gradient into h (dh) and into the
- * output weights (gWo). Only the Wo rows actually scored are zeroed (on
- * first touch this batch) and recorded in l->touched / l->ntouched, so a
- * subsequent sparse update touches only those rows.
+ * output weights (gWo). Only the Wo rows actually scored are recorded in
+ * and cleared before gradient accumulation, so a subsequent sparse update
+ * touches only those rows.
  *
  * Parameters:
  *   l       - Pointer to the layer
