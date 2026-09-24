@@ -2,7 +2,8 @@
 /* Sampled-softmax layer data structure and functions */
 #ifndef SMSFTMAX_H
 #define SMSFTMAX_H
-#include "array.h"
+#include "float.h"
+#include "arraytypes.h"
 
 /* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
  * vocabulary K is too large for a full softmax. Its forward pass is the
@@ -25,7 +26,12 @@ typedef struct smsftmax_s {
   int* seen;     /* Per-row batch stamp [K], for first-touch detection    */
   int stamp;     /* Current batch stamp                                   */
   float* logq;   /* Precomputed ln(q_c) per word [K], q from dist[]       */
+  void* devstat; /* Additional implementation state (NULL if not used)    */
 } SMSFTMAX;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Creates a sampled-softmax layer.
  *
@@ -79,7 +85,7 @@ static inline fArr2D smsftmax_forward(SMSFTMAX* restrict l,
                                       int lyr)
 {
     (void) lyr;
-    fltcpy(l->h,X,l->B * l->E);
+    nnfltcpy(l->h,X,l->B * l->E);
     return l->h;
 }
 
@@ -93,7 +99,7 @@ static inline void smsftmax_backward(SMSFTMAX* restrict l,
 {
     (void) lyr;
     if (dx != NULL)
-        fltcpy(dx,dy,l->B * l->E);
+        nnfltcpy(dx,dy,l->B * l->E);
 }
 
 /* Computes the sampled-softmax loss and its gradients for a batch.
@@ -143,5 +149,9 @@ void smsftmax_logits(SMSFTMAX* restrict l,
                      const fArr2D restrict h/*[cnt][E]*/,
                      fArr2D restrict logits/*[cnt][K]*/,
                      int cnt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

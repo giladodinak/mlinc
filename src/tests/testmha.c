@@ -436,11 +436,7 @@ void test_padding_mask(MHA* m)
     fArr2D nnY = nnallocmem(BT,D,float);
     iVec nn_pad_mask = (iVec) nnallocmem(BT,1,int);
     nnfltcpy(nnX,X,BT * D);
-#ifdef USE_CUDA
-    cudaMemcpy(nn_pad_mask,pad_mask,BT * sizeof(int),cudaMemcpyDefault);
-#else
-    memcpy(nn_pad_mask,pad_mask,BT * sizeof(int));
-#endif
+    nnmemcpy(nn_pad_mask,pad_mask,BT * sizeof(int));
 
     mha_forward(m,nnX,nn_pad_mask,nnY,0,0,0);
     nnfltcpy(Y,nnY,BT * D);

@@ -1,6 +1,11 @@
 /* Copyright (c) 2026 Gilad Odinak       */
 /* Decoder-only language model functions */
+#include <string.h>
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
 #include "mem.h"
+#include "float.h"
 #include "random.h"
 #include "arraytypes.h"
 #include "array.h"
@@ -11,6 +16,11 @@
 #include "smsftmax.h"
 #include "layer.h"
 #include "lm.h"
+
+
+typedef struct lmstat_s {
+    iVec nn_pad_mask; /* Backend-resident copy of pad_mask [BT] */
+} LMSTAT;
 
 LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
               int batch, int layers, int ffn_dim, int n_neg,
@@ -39,18 +49,21 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     m->head = smsftmax_create(vocab,n_neg);
     smsftmax_init(m->head,model_dim,m->BT);
     m->gHead = allocmem(1,1,fArr2D*);
-    m->gHead[0] = allocmem(vocab,model_dim,float);
+    m->gHead[0] = nnallocmem(vocab,model_dim,float);
 
     m->acts = allocmem(layers + 1,1,fArr2D*);
     for (int i = 0; i <= layers; i++)
-        m->acts[i] = allocmem(m->BT,model_dim,float);
-    m->dtop  = allocmem(m->BT,model_dim,float);
-    m->dcur  = allocmem(m->BT,model_dim,float);
-    m->dnext = allocmem(m->BT,model_dim,float);
+        m->acts[i] = nnallocmem(m->BT,model_dim,float);
+    m->dtop  = nnallocmem(m->BT,model_dim,float);
+    m->dcur  = nnallocmem(m->BT,model_dim,float);
+    m->dnext = nnallocmem(m->BT,model_dim,float);
 
     m->pad_mask = allocmem(m->BT,1,int);
     m->labels = allocmem(m->BT,1,float);
     m->ids = allocmem(m->BT,1,int);
+    LMSTAT* s = allocmem(1,1,LMSTAT);
+    s->nn_pad_mask = (iVec) nnallocmem(m->BT,1,int);
+    m->devstat = s;
     return m;
 }
 
@@ -59,23 +72,26 @@ void lm_free(LM* m)
     lmemb_free(m->emb);
     for (int i = 0; i < m->N; i++) {
         transformer_free(m->tr[i].transformer);
-        for (int j = 0; j < m->tr[i].num_opt_state; j++)
-            freemem(m->tr[i].opt_state[j]);
-        freemem(m->tr[i].opt_state);
+        layer_free_opt_state(&m->tr[i]);
     }
     freemem(m->tr);
     smsftmax_free(m->head);
-    freemem(m->gHead[0]);
+    nnfreemem(m->gHead[0]);
     freemem(m->gHead);
     for (int i = 0; i <= m->N; i++)
-        freemem(m->acts[i]);
+        nnfreemem(m->acts[i]);
     freemem(m->acts);
-    freemem(m->dtop);
-    freemem(m->dcur);
-    freemem(m->dnext);
+    nnfreemem(m->dtop);
+    nnfreemem(m->dcur);
+    nnfreemem(m->dnext);
     freemem(m->pad_mask);
     freemem(m->labels);
     freemem(m->ids);
+    if (m->devstat != NULL) {
+        LMSTAT* s = (LMSTAT*) m->devstat;
+        nnfreemem(s->nn_pad_mask);
+        freemem(s);
+    }
     freemem(m);
 }
 
@@ -86,11 +102,13 @@ fArr2D lm_forward(LM* m, int training)
      * its own l->h; copy into acts[0] so the stack owns a stable buffer.
      */
     fArr2D h = lmemb_forward(m->emb,m->ids,0);
-    fltcpy(m->acts[0],h,m->BT * m->E);
+    nnfltcpy(m->acts[0],h,m->BT * m->E);
 
+    LMSTAT* s = (LMSTAT*) m->devstat;
+    nnmemcpy(s->nn_pad_mask,m->pad_mask,m->BT);
     for (int i = 0; i < m->N; i++)
         transformer_forward(m->tr[i].transformer,
-                            m->acts[i],m->pad_mask,
+                            m->acts[i],s->nn_pad_mask,
                             training,m->acts[i+1],i);
     return m->acts[m->N];
 }
@@ -101,7 +119,7 @@ void lm_backward(LM* m)
     /* Walk transformers in reverse. dcur holds grad w.r.t. layer i+1's
      * output; dnext receives grad w.r.t. layer i's input.
      */
-    fltcpy(m->dcur,m->dtop,m->BT * m->E);
+    nnfltcpy(m->dcur,m->dtop,m->BT * m->E);
     for (int i = m->N - 1; i >= 0; i--) {
         transformer_backward(m->tr[i].transformer,
                              m->dcur,m->acts[i],m->dnext,i);
@@ -122,19 +140,8 @@ void lm_update(LM* m, char optimizer, float lr, float wd, int update_cnt)
     /* Head: sparse SGD over touched rows (its own scheme). */
     smsftmax_update(m->head,m->gHead[0],lr,wd);
 
-    /* Embedding: sparse row update over rows touched this batch. Weight
-     * decay omitted for embeddings (standard practice).
-     */
-    {
-        typedef float (*ArrVE)[m->E];
-        ArrVE Wx  = (ArrVE) m->emb->Wx;
-        ArrVE gWx = (ArrVE) m->emb->gWx;
-        for (int r = 0; r < m->emb->ntouched; r++) {
-            int row = m->emb->touched[r];
-            for (int j = 0; j < m->E; j++)
-                Wx[row][j] -= lr * gWx[row][j];
-        }
-    }
+    /* Embedding: sparse row update. Weight decay omitted. */
+    lmemb_update(m->emb,lr);
 }
 
 /* Enables or disables single-token cached decoding.
@@ -175,9 +182,8 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
     /* Embed just the single token: copy its row from the embedding table.
      * lmemb_forward would embeds all BT positions; here only one exists.
      */
-    typedef float (*ArrVE)[E];
-    ArrVE Wx = (ArrVE) m->emb->Wx;
-    fltcpy(m->acts[0],&Wx[token_id][0],E);
+    float* Wx = (float*) m->emb->Wx;
+    nnfltcpy(m->acts[0],Wx + token_id * E,E);
 
     for (int i = 0; i < m->N; i++)
         transformer_forward_step(m->tr[i].transformer,

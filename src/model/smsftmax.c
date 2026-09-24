@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include "mem.h"
+#include "arraytypes.h"
 #include "array.h"
 #include "random.h"
 #include "smsftmax.h"
@@ -227,7 +228,7 @@ void smsftmax_reset(SMSFTMAX* l)
  */
 float smsftmax_loss(SMSFTMAX* restrict l,
                     const fArr2D restrict h_/*[B][E]*/,
-                    const fArr2D restrict labels_/*[B][1]*/,
+                    const fArr2D restrict labels/*[B][1]*/,
                     fArr2D restrict gWo_/*[K][E]*/,
                     fArr2D restrict dh_/*[B][E]*/,
                     int cnt, int* correct)
@@ -242,7 +243,6 @@ float smsftmax_loss(SMSFTMAX* restrict l,
     ArrBE dh = (ArrBE) dh_;
     ArrKE Wo = (ArrKE) l->Wo;
     ArrKE gWo = (ArrKE) gWo_;
-    const float* labels = (const float*) labels_;
 
     if (l->dist == NULL || l->logq == NULL) {
         fflush(stdout);
@@ -263,7 +263,7 @@ float smsftmax_loss(SMSFTMAX* restrict l,
     const float lnk = logf((float) k);
     float loss = 0.0;
     for (int i = 0; i < cnt; i++) {
-        int target = (int) labels[i];
+        int target = (int)((const float*) labels)[i];
         if (target <= 0 || target >= K)  /* index 0 reserved (PAD); skip  */
             continue;
 
@@ -286,7 +286,7 @@ float smsftmax_loss(SMSFTMAX* restrict l,
             cand[c] = neg;
         }
 
-        /* Ref. #1, Sec. 3.1: f(u,d) = <g(u),h(d)> (score function). */
+        /* Ref. #1, Sec. 3.1: f(u,d) = <g(u),h(d)> (score function) */
         float pos = 0.0;
         for (int j = 0; j < E; j++)
             pos += Wo[target][j] * h[i][j];

@@ -26,7 +26,6 @@ for cmd in wget tar zstd python3 iconv awk find xargs; do
     fi
 done
 
-# Download archive if shards have not already been extracted.
 if [ ! -f "$SHARD_DIR/.complete" ]; then
     if [ ! -f "$ARCHIVE" ]; then
         echo "Downloading OpenWebText2"

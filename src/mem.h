@@ -61,10 +61,13 @@ inline static void freemem(void *p) { if (p != NULL) free(p); }
  */
 #ifdef USE_CUDA
 #define nnallocmem(M,N,T) cuallocmem(M,N,T)
-#define nnfreemem(P)      cufreemem(P)
+#define nnfreemem(p)      cufreemem(p)
+#define nnmemcpy(dst,src,cnt) cudaMemcpy(dst,src,cnt,cudaMemcpyDefault)
+
 #else
 #define nnallocmem(M,N,T) allocmem(M,N,T)
-#define nnfreemem(P)      freemem(P)
+#define nnfreemem(p)      freemem(p)
+#define nnmemcpy(dst,src,cnt) memcpy(dst,src,cnt)
 #endif
 
 #endif
