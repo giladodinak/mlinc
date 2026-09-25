@@ -98,9 +98,8 @@ for n, line in enumerate(sys.stdin, 1):
 PY
 chmod +x "$TMP/extract_text.py"
 
-# Split documents into approximately CHUNK_WORDS chunks. This is deliberately
-# structured like the Gutenberg chunker, but no Gutenberg header stripping is
-# needed because OpenWebText2 already stores cleaned document text.
+# Split documents into approximately CHUNK_WORDS chunks.
+# Assume OpenWebText2 already stores cleaned document text.
 cat > "$TMP/process.awk" <<'AWK'
 function nwords(s,    a,n,t) {
     t = s

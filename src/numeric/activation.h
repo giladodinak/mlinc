@@ -122,6 +122,33 @@ void relu(fArr2D m_/*[B][S]*/, int B, int S);
  */
 void gelu(fArr2D m_/*[B][S]*/, int B, int S);
 
+/* Applies the softmax activation function to a single vector.
+ *
+ * Parameters:
+ *   p  : Pointer to the vector to be processed
+ *   K  : Number of elements in the vector
+ *
+ * Notes:
+ * Converts scores in the passed vector to probabilities in place.
+ * Subtracting the maximum value improves numerical stability.
+ */
+static inline void softmax1(float* p, int K)
+{
+    float m = p[0];
+    for (int i = 1; i < K; i++)
+        if (p[i] > m)
+            m = p[i];
+
+    float s = 0.0f;
+    for (int i = 0; i < K; i++) {
+        p[i] = expf(p[i] - m);
+        s += p[i];
+    }
+
+    for (int i = 0; i < K; i++)
+        p[i] /= s;
+}
+
 /* Applies the softmax activation function to each row of a 2D array
  *
  * Parameters:

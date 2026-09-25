@@ -355,8 +355,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
             /* Convert scores to probabilities and sample.
              * Ref. #1 Eq. (1), Ref. #2 Sec. 4.1, Ref. #3 Sec. 5.4.
              */
-            typedef float (*Arr1K1)[K - 1];
-            softmax((Arr1K1) (logits + 1),1,K - 1);
+            softmax1(logits + 1,K - 1);
 
             float r = urand(0,1);
             float c = 0;
