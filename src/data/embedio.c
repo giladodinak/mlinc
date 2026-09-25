@@ -28,14 +28,8 @@ EMBEDDING* read_embedding(FILE* fp)
         fprintf(stderr,"In read_embedding: failed to read the header\n");
         return NULL;
     }
-    EMBEDDING* e = allocmem(1,1,EMBEDDING);
-    e->D = D;
-    e->B = B;
-    e->M = M;
-    e->E = E;
-    e->padinx = pad;
-    e->h = allocmem(e->B,e->E,float);
-    e->Wx = allocmem(e->D,e->E,float);
+    EMBEDDING* e = embedding_create(E,M,pad);
+    embedding_init(e,D,B,0);
     int ok = read_array(e->Wx,e->D,e->E,fp,0);
     if (ok)
         return e;
@@ -48,7 +42,7 @@ EMBEDDING* read_embedding(FILE* fp)
 }
 
 
-/* write_embedding - Write an embeddin layer to a file
+/* write_embedding - Write an embedding layer to a file
  * 
  * Writes the embedding layer pointed to by d to the file pointed to by fp. 
  * 

@@ -17,7 +17,7 @@
  */
 EMBEDDING* read_embedding(FILE* fp);
 
-/* write_embedding - Write an embeddin layer to a file
+/* write_embedding - Write an embedding layer to a file
  * 
  * Writes the embedding layer pointed to by d to the file pointed to by fp. 
  * 

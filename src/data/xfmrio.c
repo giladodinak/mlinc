@@ -46,74 +46,52 @@ TRANSFORMER* read_transformer(FILE* fp)
         return NULL;
     }
 
-    TRANSFORMER* l = allocmem(1,1,TRANSFORMER);
-    l->B = B;
-    l->T = T;
-    l->D = D;
-    l->Dff = Dff;
-    l->BT = B * T;
-    l->training = (training) ? 1 : 0;
+    MHA* mha = read_mha(fp);
+    if (mha == NULL) {
+        fprintf(stderr,"In read_transformer: failed to read mha\n");
+        return NULL;
+    }
+
+    TRANSFORMER* l = transformer_create(mha->H,T,D,Dff,mha->lookahead);
+    transformer_init(l,B,training,dropout_rate);
+    mha_free(l->mha);
+    l->mha = mha;
 
     /* Sub-layers (order must match write_transformer) */
-    l->mha = read_mha(fp);
-    if (l->mha == NULL) {
-        fprintf(stderr,"In read_transformer: failed to read mha\n");
-        goto err;
-    }
-    l->ffn1 = read_dense(fp);
-    if (l->ffn1 == NULL) {
+    DENSE* ffn1 = read_dense(fp);
+    if (ffn1 == NULL) {
         fprintf(stderr,"In read_transformer: failed to read ffn1\n");
         goto err;
     }
-    l->ffn2 = read_dense(fp);
-    if (l->ffn2 == NULL) {
+    dense_free(l->ffn1);
+    l->ffn1 = ffn1;
+    DENSE* ffn2 = read_dense(fp);
+    if (ffn2 == NULL) {
         fprintf(stderr,"In read_transformer: failed to read ffn2\n");
         goto err;
     }
-    l->norm1 = read_addnorm(fp);
-    if (l->norm1 == NULL) {
+    dense_free(l->ffn2);
+    l->ffn2 = ffn2;
+    ADDNORM* norm1 = read_addnorm(fp);
+    if (norm1 == NULL) {
         fprintf(stderr,"In read_transformer: failed to read norm1\n");
         goto err;
     }
-    l->norm2 = read_addnorm(fp);
-    if (l->norm2 == NULL) {
+    addnorm_free(l->norm1);
+    l->norm1 = norm1;
+    ADDNORM* norm2 = read_addnorm(fp);
+    if (norm2 == NULL) {
         fprintf(stderr,"In read_transformer: failed to read norm2\n");
         goto err;
     }
+    addnorm_free(l->norm2);
+    l->norm2 = norm2;
 
     /* Transformer's own scratch buffers (mirror transformer_init) */
-    l->mha_out = allocmem(l->BT,l->D,float);
-    l->norm1_out = allocmem(l->BT,l->D,float);
-
-    if (l->training) {
-        l->d_norm2_in = allocmem(l->BT,l->D,float);
-        l->d_ffn1_in = allocmem(l->BT,l->Dff,float);
-        l->d_norm1_in = allocmem(l->BT,l->D,float);
-        l->d_mha_out = allocmem(l->BT,l->D,float);
-        l->d_ffn2_in = allocmem(l->BT,l->D,float);
-        l->d_mha_masked = allocmem(l->BT,l->D,float);
-
-        l->dg1 = allocmem(l->D,1,float);
-        l->db1 = allocmem(l->D,1,float);
-        l->dg2 = allocmem(l->D,1,float);
-        l->db2 = allocmem(l->D,1,float);
-
-        if (dropout_rate > 0) {
-            l->dropout1 = dropout_create(dropout_rate);
-            l->dropout2 = dropout_create(dropout_rate);
-            dropout_init(l->dropout1,l->D,l->BT);
-            dropout_init(l->dropout2,l->D,l->BT);
-        }
-    }
     return l;
 
 err: /* error exit - free only the sub-layers already created, then self */
-    if (l->mha != NULL) mha_free(l->mha);
-    if (l->ffn1 != NULL) dense_free(l->ffn1);
-    if (l->ffn2 != NULL) dense_free(l->ffn2);
-    if (l->norm1 != NULL) addnorm_free(l->norm1);
-    if (l->norm2 != NULL) addnorm_free(l->norm2);
-    freemem(l);
+    transformer_free(l);
     return NULL;
 }
 

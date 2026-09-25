@@ -30,6 +30,10 @@
 #include "lm.h"
 #include "lmio.h"
 
+typedef struct lmstat_s {
+    iVec nn_pad_mask;
+} LMSTAT;
+
 /* Wrap the N transformer LAYERs and the output layer in a MODEL 
  * and pass it to write_model().
  */
@@ -214,18 +218,21 @@ LM* read_lm(FILE* fp, VOCAB** pvocab, LMPARAM* st)
     m->emb = emb; m->tr = tr; m->head = head;
 
     m->gHead = allocmem(1,1,fArr2D*);
-    m->gHead[0] = allocmem(V,E,float);
+    m->gHead[0] = nnallocmem(V,E,float);
 
     m->acts = allocmem(N + 1,1,fArr2D*);
     for (int i = 0; i <= N; i++)
-        m->acts[i] = allocmem(m->BT,E,float);
-    m->dtop  = allocmem(m->BT,E,float);
-    m->dcur  = allocmem(m->BT,E,float);
-    m->dnext = allocmem(m->BT,E,float);
+        m->acts[i] = nnallocmem(m->BT,E,float);
+    m->dtop  = nnallocmem(m->BT,E,float);
+    m->dcur  = nnallocmem(m->BT,E,float);
+    m->dnext = nnallocmem(m->BT,E,float);
 
     m->pad_mask = allocmem(m->BT,1,int);
     m->labels   = allocmem(m->BT,1,float);
     m->ids      = allocmem(m->BT,1,int);
+    LMSTAT* ds = allocmem(1,1,LMSTAT);
+    ds->nn_pad_mask = (iVec) nnallocmem(m->BT,1,int);
+    m->devstat = ds;
 
     /* Re-attach the sampling table to the output */
     if (vocab->dist != NULL)

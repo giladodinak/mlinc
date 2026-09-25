@@ -32,54 +32,8 @@ LSTM* read_lstm(FILE* fp)
     use_bias = (use_bias) ? 1 : 0;
     training = (training) ? 1 : 0;
 
-    LSTM* l = allocmem(1,1,LSTM);
-    l->S = S;
-    l->D = D;
-    l->B = B;
-    l->stateful = stateful;
-    l->use_bias = use_bias;
-    l->training = training;
-
-    l->f = allocmem(l->B,l->S,float);
-    l->i = allocmem(l->B,l->S,float);
-    l->o = allocmem(l->B,l->S,float);
-    l->cc = allocmem(l->B+1,l->S,float);
-    l->h = allocmem(l->B+1,l->S,float);
-    l->c = allocmem(l->B+1,l->S,float);
-    l->Wf = allocmem(l->D,l->S,float);
-    l->Wi = allocmem(l->D,l->S,float);
-    l->Wc = allocmem(l->D,l->S,float);
-    l->Wo = allocmem(l->D,l->S,float);
-    l->Uf = allocmem(l->S,l->S,float);
-    l->Ui = allocmem(l->S,l->S,float);
-    l->Uc = allocmem(l->S,l->S,float);
-    l->Uo = allocmem(l->S,l->S,float);
-    l->ph = allocmem(1,l->S,float);
-    l->pc = allocmem(1,l->S,float);
-
-    if (l->use_bias) {
-        l->bf = allocmem(1,l->S,float);
-        l->bi = allocmem(1,l->S,float);
-        l->bc = allocmem(1,l->S,float);
-        l->bo = allocmem(1,l->S,float);
-    }
-
-    if (l->training) {
-        l->gWf = allocmem(l->D,l->S,float);
-        l->gWi = allocmem(l->D,l->S,float);
-        l->gWc = allocmem(l->D,l->S,float);
-        l->gWo = allocmem(l->D,l->S,float);
-        l->gUf = allocmem(l->S,l->S,float);
-        l->gUi = allocmem(l->S,l->S,float);
-        l->gUc = allocmem(l->S,l->S,float);
-        l->gUo = allocmem(l->S,l->S,float);
-        if (l->use_bias) {
-            l->gbf = allocmem(1,l->S,float);
-            l->gbi = allocmem(1,l->S,float);
-            l->gbc = allocmem(1,l->S,float);
-            l->gbo = allocmem(1,l->S,float);
-        }
-    }
+    LSTM* l = lstm_create(S,stateful,use_bias);
+    lstm_init(l,D,B,training);
 
     fArr2D Wx[4] = {l->Wf,l->Wi,l->Wc,l->Wo};
     char* sWx[4] = {"Wf","Wi","Wc","Wo"};

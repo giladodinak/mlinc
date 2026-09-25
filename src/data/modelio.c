@@ -29,19 +29,27 @@
  */
 MODEL* read_model(FILE* fp)
 {
-    MODEL* m = allocmem(1,1,MODEL);
+    int num_layers, batch_size, input_dim, output_dim, target_dim, normalize;
+    int update_cnt, final;
+    char loss_func, optimizer;
     int ok;
     int cnt = fscanf(fp," MODEL num_layers %d batch_size %d input_dim %d "
                      "output_dim %d target_dim %d normalize %d "
                      "loss_func '%c' optimizer '%c' update_cnt %d final %d\n",
-                     &m->num_layers,&m->batch_size,&m->input_dim,
-                     &m->output_dim,&m->target_dim,&m->normalize,
-                     &m->loss_func,&m->optimizer,&m->update_cnt,&m->final);
+                     &num_layers,&batch_size,&input_dim,
+                     &output_dim,&target_dim,&normalize,
+                     &loss_func,&optimizer,&update_cnt,&final);
     if (cnt < 10 || cnt == EOF) {
         fprintf(stderr,"In read_model: failed to read the header\n");
-        goto err;
+        return NULL;
     }
-    m->layer = allocmem(1,m->num_layers,LAYER);
+    MODEL* m = model_create(num_layers,batch_size,input_dim,normalize);
+    m->output_dim = output_dim;
+    m->target_dim = target_dim;
+    m->loss_func = loss_func;
+    m->optimizer = optimizer;
+    m->update_cnt = update_cnt;
+    m->final = final;
     if (m->normalize) {
         int D = m->input_dim;
         m->mean = allocmem(1,D,float);
@@ -65,8 +73,9 @@ MODEL* read_model(FILE* fp)
     }
     for (int i = 0; i < m->num_layers; i++) {
         LAYER* l = &m->layer[i];
+        int num_opt_state;
         cnt = fscanf(fp," LAYER type '%c' num_opt_state %d\n",
-                                             &l->type,&l->num_opt_state);
+                                             &l->type,&num_opt_state);
         if (cnt < 2 || cnt == EOF) {
             fprintf(stderr,
                     "In read_model: failed to read layer %d header\n",i);
@@ -95,17 +104,20 @@ MODEL* read_model(FILE* fp)
                     "In read_model: failed to read layer %d data\n",i);
             goto err;
         }
-        if (l->num_opt_state > 0) {
+        if (num_opt_state > 0) {
             /* opt_state is an array of pointers to arrays 
              * see layer_alloc_opt_state() for layout
              */
-            l->opt_state  = allocmem(1,l->num_opt_state,fArr2D*);
+            layer_alloc_opt_state(l,m->optimizer);
+            if (l->num_opt_state != num_opt_state) {
+                fprintf(stderr,"In read_model: invalid optimizer state count for layer %d\n",i);
+                goto err;
+            }
             ok = 1; /* assume success */
             switch (l->type) {
                 case 'd': /* dense layer optimizer moments */
                     for (int j = 0; j < l->num_opt_state && ok; j++) {
                         int rows = (j < 2) ? l->dense->D : 1;
-                        l->opt_state[j] = allocmem(rows,l->dense->S,float);
                         ok = read_array(l->opt_state[j],rows,l->dense->S,fp,0);
                     }
                 break;
@@ -118,7 +130,6 @@ MODEL* read_model(FILE* fp)
                         }
                         else
                             rows = 1;
-                        l->opt_state[j] = allocmem(rows,l->lstm->S,float);
                         ok = read_array(l->opt_state[j],rows,l->lstm->S,fp,0);
                     }
                 break;
@@ -130,7 +141,6 @@ MODEL* read_model(FILE* fp)
                     int gc[10] = { D, D, D, D, Dff, D,   1, 1, 1, 1 };
                     for (int j = 0; j < l->num_opt_state && ok; j++) {
                         int k = j % 10;
-                        l->opt_state[j] = allocmem(gr[k],gc[k],float);
                         ok = read_array(l->opt_state[j],gr[k],gc[k],fp,0);
                     }
                 }
@@ -140,7 +150,6 @@ MODEL* read_model(FILE* fp)
                     int K = l->negsample->K;
                     int E = l->negsample->E;
                     for (int j = 0; j < l->num_opt_state && ok; j++) {
-                        l->opt_state[j] = allocmem(K,E,float);
                         ok = read_array(l->opt_state[j],K,E,fp,0);
                     }
                 }

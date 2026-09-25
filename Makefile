@@ -52,7 +52,8 @@ TESTS = testmem cblastest cudatest \
 		testqr testsvd testpca \
 		testadamw testctc testnorm \
 		testdense testlstm testmodel \
-		testembed testlmemb testmha testxfmr testsmsftmax
+		testembed testlmemb testmha \
+		testxfmr testsmsftmax testioformat
 
 SRCS = $(shell find $(SRC_DIR) -name '*.c')
 HDRS = $(shell find $(SRC_DIR) -name '*.h')

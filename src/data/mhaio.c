@@ -43,71 +43,14 @@ MHA* read_mha(FILE* fp)
         return NULL;
     }
 
-    MHA* l = allocmem(1,1,MHA);
-    l->H = H;
-    l->T = T;
-    l->D = D;
-    l->B = B;
-    l->Dh = D / H;
-    l->BT = B * T;
-    l->BHT = B * H * T;
-    l->lookahead = lookahead;
-    l->training = (training) ? 1 : 0;
+    MHA* l = mha_create(H,T,lookahead);
 
     /* Persistent projection weights */
-    l->Wq = allocmem(l->D,l->D,float);
-    l->Wk = allocmem(l->D,l->D,float);
-    l->Wv = allocmem(l->D,l->D,float);
-    l->Wo = allocmem(l->D,l->D,float);
 
     /* Forward scratch buffers */
-    l->Q = allocmem(l->BT,l->D,float);
-    l->K = allocmem(l->BT,l->D,float);
-    l->V = allocmem(l->BT,l->D,float);
-
-    l->theta = allocmem(1,l->Dh / 2,float);
-
-    l->Qh = allocmem(l->BHT,l->Dh,float);
-    l->Kh = allocmem(l->BHT,l->Dh,float);
-    l->Vh = allocmem(l->BHT,l->Dh,float);
-
-    l->Att = allocmem(l->BHT,l->T,float);
-    if (dropout_rate > 0) {
-        l->dropout = allocmem(l->B * l->H,1,DROPOUT*);
-        for (int i = 0; i < l->B * l->H; i++) {
-            l->dropout[i] = dropout_create(dropout_rate);
-            dropout_init(l->dropout[i],l->T,l->T);
-        }
-    }
-
-    l->Scores = allocmem(l->T,l->T,float);
-    l->Oh = allocmem(l->T,l->Dh,float);
-
-    l->Out = allocmem(l->BT,l->D,float);
-
-    rope_init(l->theta,l->Dh);
 
     /* Backward / gradient buffers (only when training) */
-    if (l->training) {
-        l->dOut = allocmem(l->BT,l->D,float);
-
-        l->dQ = allocmem(l->BT,l->D,float);
-        l->dK = allocmem(l->BT,l->D,float);
-        l->dV = allocmem(l->BT,l->D,float);
-
-        l->dQh = allocmem(l->T,l->Dh,float);
-        l->dKh = allocmem(l->T,l->Dh,float);
-        l->dVh = allocmem(l->T,l->Dh,float);
-
-        l->dOh = allocmem(l->T,l->Dh,float);
-        l->dAtt = allocmem(l->T,l->T,float);
-        l->dScores = allocmem(l->T,l->T,float);
-
-        l->gWq = allocmem(l->D,l->D,float);
-        l->gWk = allocmem(l->D,l->D,float);
-        l->gWv = allocmem(l->D,l->D,float);
-        l->gWo = allocmem(l->D,l->D,float);
-    }
+    mha_init(l,D,B,training,dropout_rate);
 
     fArr2D Wx[4] = {l->Wq,l->Wk,l->Wv,l->Wo};
     char* sWx[4] = {"Wq","Wk","Wv","Wo"};

@@ -24,7 +24,12 @@
 int read_array(fArr2D a_, int M, int N, FILE* fp, int exc_last)
 {
     typedef float (*ArrMN)[N];
+#ifdef USE_CUDA
+    fArr2D host = allocmem(M,N,float);
+    ArrMN a = (ArrMN) host;
+#else
     ArrMN a = (ArrMN) a_;
+#endif
     int tot = 0, cnt = 0;
     float value;
     for (int i = 0; i < M; i++) {
@@ -44,6 +49,11 @@ int read_array(fArr2D a_, int M, int N, FILE* fp, int exc_last)
             }
         }
     }
+#ifdef USE_CUDA
+    if (tot == M * N)
+        nnfltcpy(a_,host,M * N);
+    freemem(host);
+#endif
     return (tot == M * N) ? 1 : 0;
 }
 
@@ -72,7 +82,13 @@ int write_array(const fArr2D a_, int M, int N,
     if (fmt == NULL)
         fmt = "%.6g ";
     typedef float (*ArrMN)[N];
+#ifdef USE_CUDA
+    fArr2D host = allocmem(M,N,float);
+    nnfltcpy(host,a_,M * N);
+    ArrMN a = (ArrMN) host;
+#else
     ArrMN a = (ArrMN) a_;
+#endif
     int len = 0;
     exc_last = (exc_last) ? 1 : 0;
     for (int i = 0; i < M && len >= 0; i++) {
@@ -83,6 +99,9 @@ int write_array(const fArr2D a_, int M, int N,
     }
     if (len < 0) 
         fprintf(stderr,"In write_array: failed to write array data\n");
+#ifdef USE_CUDA
+    freemem(host);
+#endif
     return (len >= 0) ? 1 : 0;
 }
 
