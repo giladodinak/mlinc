@@ -193,6 +193,10 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
 
 /* Generates tokens continuing from a prompt.
  *
+ * Autoregressive generation: each new token is sampled conditional on
+ * the prompt and all tokens generated so far. The prompt and generated
+ * tokens remain available as left context through the MHA KV cache.
+ *
  * Parameters:
  *   m           - Language model
  *   hmap        - Token id <-> string map, used to render tokens
@@ -226,15 +230,15 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
  *     arbitrary additive offset of raw logits.
  *     https://arxiv.org/pdf/2607.09791
  */
-int lm_generate(LM* m, HASHMAP* hmap, 
+int lm_generate(LM* m, HASHMAP* hmap,
                 const int* seed, int seedlen,
                 int steps, char *buffer, int buflen,
-                float temperature, int top_k, 
+                float temperature, int top_k,
                 float rep_penalty, int rep_win_len)
 {
     int T = m->T, K = m->V;
 
-    if (seed == NULL || seedlen <= 0 || seedlen > T) 
+    if (seed == NULL || seedlen <= 0 || seedlen > T)
         return -1;
     if (buffer == NULL || buflen <= 0)
         return -1;
@@ -249,7 +253,10 @@ int lm_generate(LM* m, HASHMAP* hmap,
     int* recent = (rep_win_len > 0) ? allocmem(rep_win_len,1,int) : NULL;
     int nrecent = 0;
 
-    /* Output buffer starts with the seed tokens. */
+    /* Output buffer starts with the seed tokens: these are the
+     * conditioning context x_1..x_m, echoed back so the printed
+     * text reads prompt + continuation.
+     */
     for (int i = 0; i < seedlen && buflen > 1; i++) {
         bufext = snprintf(buffer + bufpos,buflen - bufpos,
                           "%s ",hashmap_inx2str(hmap,seed[i]));
@@ -261,11 +268,14 @@ int lm_generate(LM* m, HASHMAP* hmap,
     /* Switch to single-row processing and use the MHA KV cache */
     lm_use_cache(m,1);
 
-    /* Prefill: feed the prompt one token at a time (offset 0..seedlen-1),
-     * filling the KV cache. Keep the last token's head-input activation to
-     * produce the first generated token.
+    /* Prefill: this is where the prompt enters the computation. Feeding
+     * the tokens one at a time (offsets 0..seedlen-1) writes each one's
+     * key/value vectors into the KV cache, so later attention can attend
+     * to the whole prompt. The head-input activation H kept from the LAST
+     * prompt token is h_m = f(x_1..x_m): the attention-weighted summary
+     * that defines the first generated token's distribution P(. | x_1..x_m).
      */
-    fArr2D H = NULL;
+    fArr2D H = NULL; /* Holds the current hidden activation */
     for (int i = 0; i < seedlen; i++)
         H = lm_forward_step(m,seed[i],i);
 
@@ -273,6 +283,10 @@ int lm_generate(LM* m, HASHMAP* hmap,
 
     for (s = 0; s < steps; s++) {
 
+        /* Project the current hidden state onto the vocabulary: z = W_o h_t.
+         * h_t already encodes the prompt (and tokens generated so far) via
+         * attention, so these logits ARE the prompt's effect on the next token
+         */
         smsftmax_logits(m->head,(fArr2D) H,(fArr2D) logits,1);
 
         /* log-softmax: log p_i = z_i - logsumexp(z)
@@ -291,8 +305,11 @@ int lm_generate(LM* m, HASHMAP* hmap,
         for (int k = 1; k < K; k++)
             logits[k] -= logsum;
 
-        /* Repetition penalty applied once per unique recent token
-         * (Ref. #2 Sec. 4.1, Ref. #4).
+        /* Repetition penalty applied once per unique recent token.
+         * Scaling a normalized log-prob (which is <= 0) by rep_penalty > 1 
+         * makes it more negative, i.e. lowers the probability of tokens
+         * already emitted in the window.
+         * Ref. #2 Sec. 4.1, Ref. #4.
          */
         if (rep_penalty > 1) {
             for (int i = 0; i < nrecent; i++) {
@@ -300,6 +317,9 @@ int lm_generate(LM* m, HASHMAP* hmap,
                 if (t <= 0 || t >= K)
                     continue;
 
+                /* Skip tokens already penalized earlier in the window,
+                 * so a repeated token is down-weighted once, not compounded.
+                 */
                 int seen = 0;
                 for (int j = 0; j < i; j++)
                     if (recent[j] == t) {
@@ -315,14 +335,17 @@ int lm_generate(LM* m, HASHMAP* hmap,
         int nxt;
 
         if (temperature > 0) {
-            /* Temperature scaling of log-probability scores.
+            /* Temperature scaling of log-probability scores: z_i / T.
+             * T<1 sharpens the distribution (more prompt-driven, closer to
+             * greedy), T>1 flattens it toward uniform.
              * Ref. #1 Eq. (1), Ref. #2 Sec. 4.1.
              */
             for (int k = 1; k < K; k++)
                 logits[k] /= temperature;
 
-            /* Top-k sampling: restrict sampling to the top_k highest
-             * scoring tokens.
+            /* Top-k sampling: keep only the top_k highest-scoring tokens by
+             * finding the k-th largest score (thresh) and masking everything
+             * below it to -inf, so all probability mass falls on those k.
              * Ref. #2 Sec. 4.1, Ref. #3 Sec. 5.4.
              */
             if (top_k > 0 && top_k < K - 1) {
@@ -331,6 +354,9 @@ int lm_generate(LM* m, HASHMAP* hmap,
                 for (int k = 1; k < K; k++)
                     tmp[k] = logits[k];
 
+                /* Selection pass: pull off the top_k maxima to
+                 * locate the cutoff score without a full sort.
+                 */
                 float thresh = neginf;
                 for (int r = 0; r < top_k; r++) {
                     float mv = neginf;
@@ -352,40 +378,50 @@ int lm_generate(LM* m, HASHMAP* hmap,
                         logits[k] = neginf;
             }
 
-            /* Convert scores to probabilities and sample.
+            /* Convert scores to probability distribution over the
+             * (surviving) vocabulary: p_i = softmax(z/T)_i.
              * Ref. #1 Eq. (1), Ref. #2 Sec. 4.1, Ref. #3 Sec. 5.4.
              */
             softmax1(logits + 1,K - 1);
 
+            /* Inverse-transform sampling: draw r ~ U(0,1) and walk the CDF;
+             * choose the first token whose cumulative probability reaches r.
+             * nxt tracks the last token with nonzero probability, so it
+             * also serves as a fallback if rounding leaves the CDF below r.
+             */
             float r = urand(0,1);
-            float c = 0;
+            float cdf = 0;
             nxt = 0;
-            for (int k = 1; k < K && nxt == 0; k++)
-                if (logits[k] > 0) 
-                    nxt = k;
-           
+
             for (int k = 1; k < K; k++) {
-                c += logits[k];
-                if (r <= c) {
-                    nxt = k;
+                if (logits[k] <= 0)
+                    continue;
+                nxt = k;
+                cdf += logits[k];
+                if (r <= cdf)
                     break;
-                }
             }
         }
-        else { /* Greedy decoding (Ref. #2 Sec. 4.1) */
+        else {
+           /* Greedy decoding: argmax_i p_i, i.e. always the most likely
+            * next token (Ref. #2 Sec. 4.1)
+            */
             nxt = 1;
             for (int k = 2; k < K; k++)
                 if (logits[k] > logits[nxt])
                     nxt = k;
         }
 
+        /* Emit the chosen token's surface string into the output buffer. */
         bufext = snprintf(buffer + bufpos,buflen - bufpos,
                           "%s ",hashmap_inx2str(hmap,nxt));
         if (bufext < 0 || bufext >= buflen - bufpos)
             break;
         bufpos += bufext;
 
-        /* Record the emitted token in the repetition window */
+        /* Record the emitted token in the repetition window so the
+         * repetition penalty can down-weight it on later steps.
+         */
         if (rep_win_len > 0 && rep_penalty > 1) {
             if (nrecent < rep_win_len)
                 recent[nrecent++] = nxt;
@@ -396,6 +432,10 @@ int lm_generate(LM* m, HASHMAP* hmap,
             }
         }
 
+        /* Extend the conditioning set: feed the chosen token back at the next
+         * position, advancing the KV cache so H = h_{t+1} conditions on
+         * x_1..x_m, y_1..y_s for the following step.
+         */
         H = lm_forward_step(m,nxt,pos);
         pos++;
     }
