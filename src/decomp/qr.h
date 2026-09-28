@@ -3,7 +3,11 @@
 #ifndef QR_H
 #define QR_H
 #include <math.h>
-#include "array.h"
+#include "arraytypes.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* QR - Performs QR decomposition of matrix M to an orthogonal matrix Q,
  *      and an upper right triangular matrix R, using Householder
@@ -35,5 +39,9 @@ void QR(fArr2D M_/*[m][n]*/,
         fArr2D Q_/*[m][min(n,m)]*/,
         fArr2D R_/*[min(m,n)][n]*/,
         int m, int n);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
