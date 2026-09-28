@@ -8,9 +8,11 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <math.h>
+#include "float.h"
 #include "mem.h"
 #include "random.h"
 #include "arraytypes.h"
+#include "array.h"
 #include "activation.h"
 #include "qr.h"
 #include "lstm.h"
