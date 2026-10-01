@@ -218,6 +218,28 @@ static inline void Tmatmul(fArr2D restrict r_/*[N][M]*/,
 }
 
 /* Multiplies the vector v by the matrix m and
+ * returns the resulting vector in r.
+ * r = v @ m
+ * r: vector 1xN
+ * v: vector 1xM
+ * m: matrix MxN
+ */
+static inline void vecmatmul(fVec restrict r_/*[N]*/,
+                             const fVec restrict v_/*[M]*/,
+                             const fArr2D restrict m_/*[M][N]*/,
+                             int M, int N)
+{
+    /* Row-major r+=v@m becomes r = m.T @ v in column-vector form */
+    const float alpha = 1.0;
+    const float beta = 0.0;
+    CUGEMV(cublas_handle(),CUBLAS_OP_N,
+           N,M,
+           &alpha,(const float*)m_,N,
+                  (const float*)v_,1,
+           &beta, (float*)r_,1);
+}
+
+/* Multiplies the vector v by the matrix m and
  * adds the resulting vector to the vector in r.
  * r = r + v @ m
  * r: vector 1xN
