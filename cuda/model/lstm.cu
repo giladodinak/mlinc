@@ -1,157 +1,41 @@
-/* Copyright (c) 2023-2024 Gilad Odinak */
-/* CUDA LSTM (recurrent) neural network functions */
+/* Copyright (c) 2026 Gilad Odinak           */
+/* LSTM (reccurent) neural network functions */
 /* References:
  * https://en.wikipedia.org/wiki/Long_short-term_memory
  * https://www.bioinf.jku.at/publications/older/2604.pdf
  */
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <math.h>
 #include <cuda_runtime.h>
-
 #include "float.h"
 #include "mem.h"
+#include "random.h"
+#include "arraytypes.h"
 #include "array.h"
 #include "activation.h"
+#include "qr.h"
 #include "lstm.h"
+#include "graph.h"
 
 #define THCNT 256
 
-static __device__ unsigned int lstm_hash(unsigned int x)
-{
-    x ^= x >> 16;
-    x *= 0x7feb352du;
-    x ^= x >> 15;
-    x *= 0x846ca68bu;
-    x ^= x >> 16;
-    return x;
-}
 
-static __global__ void init_normal_kernel(float* w, int n, float scale,
-                                          unsigned int seed)
-{
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k < n) {
-        unsigned int h1 = lstm_hash((unsigned int)k + seed);
-        unsigned int h2 = lstm_hash((unsigned int)k + seed + 0x9e3779b9u);
-        float u1 = ((float)h1 + 1.0f) / 4294967296.0f;
-        float u2 = ((float)h2 + 1.0f) / 4294967296.0f;
-        float z = sqrtf(-2.0f * logf(u1)) *
-                  cosf(6.2831853071795864769f * u2);
-        w[k] = z * scale;
-    }
-}
-
-static __global__ void init_uniform_kernel(float* w, int n, float scale,
-                                           unsigned int seed)
-{
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (k < n) {
-        unsigned int h = lstm_hash((unsigned int)k + seed);
-        float u = ((float)h + 0.5f) / 4294967296.0f;
-        w[k] = (2.0f * u - 1.0f) * scale;
-    }
-}
-
-/* Initialization-only Gram-Schmidt orthogonalization of a square row-major
- * matrix. It intentionally runs serially: recurrent weights are initialized
- * once, while forward/backward remain fully device-resident.
+/* Creates a long short term memory (LSTM) neural network.
+ *
+ * Parameters:
+ *   units      - Number of cells (hidden size)
+ *   stateful   - If not zero, maintain state across batches.
+ *   use_bias   - If not zero, add a per-gate bias.
+ * 
+ * Returns:
+ *   Pointer to an LSTM neural network layer.
+ *
+ * Notes:
+ *   - The neural network needs to be further intialized using lstm_init()
+ *     before it can be used.
  */
-static __global__ void orthogonalize_kernel(float* u, int S)
-{
-    if (blockIdx.x != 0 || threadIdx.x != 0)
-        return;
-
-    for (int j = 0; j < S; j++) {
-        for (int k = 0; k < j; k++) {
-            float dot = 0.0f;
-            for (int r = 0; r < S; r++)
-                dot += u[r * S + j] * u[r * S + k];
-            for (int r = 0; r < S; r++)
-                u[r * S + j] -= dot * u[r * S + k];
-        }
-
-        float norm = 0.0f;
-        for (int r = 0; r < S; r++) {
-            float v = u[r * S + j];
-            norm += v * v;
-        }
-        norm = sqrtf(norm);
-
-        if (norm > 1e-12f) {
-            float inv = 1.0f / norm;
-            for (int r = 0; r < S; r++)
-                u[r * S + j] *= inv;
-        }
-    }
-}
-
-static __global__ void add_bias_kernel(float* v, const float* b, int S)
-{
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j < S)
-        v[j] += b[j];
-}
-
-static __global__ void tanh_kernel(float* v, int S)
-{
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j < S)
-        v[j] = tanhf(v[j]);
-}
-
-static __global__ void state_kernel(const float* f, const float* i,
-                                    const float* o, const float* cc,
-                                    const float* cprev,
-                                    float* c, float* h, int S)
-{
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j < S) {
-        float cv = f[j] * cprev[j] + i[j] * cc[j];
-        c[j] = cv;
-        h[j] = o[j] * tanhf(cv);
-    }
-}
-
-static __global__ void backward_gate_kernel(const float* dy,
-                                             const float* f,
-                                             const float* i,
-                                             const float* o,
-                                             const float* cc,
-                                             const float* cprev,
-                                             const float* c,
-                                             const float* dh_next,
-                                             float* dc_next,
-                                             float* do_,
-                                             float* dc,
-                                             float* dcc,
-                                             float* di,
-                                             float* df,
-                                             int S)
-{
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j < S) {
-        float dh = dy[j] + dh_next[j];
-        float cv = c[j];
-        float tanhc = tanhf(cv);
-        float dcv = dh * o[j] * (1.0f - tanhc * tanhc) + dc_next[j];
-
-        do_[j] = dh * tanhc * (o[j] * (1.0f - o[j]));
-        dc[j] = dcv;
-        dcc[j] = dcv * i[j] * (1.0f - cc[j] * cc[j]);
-        di[j] = dcv * cc[j] * (i[j] * (1.0f - i[j]));
-        df[j] = dcv * cprev[j] * (f[j] * (1.0f - f[j]));
-        dc_next[j] = f[j] * dcv;
-    }
-}
-
-static __global__ void add_vector_kernel(float* dst, const float* src, int n)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n)
-        dst[i] += src[i];
-}
-
 extern "C" LSTM* lstm_create(int units, int stateful, int use_bias)
 {
     LSTM* l = (LSTM*) allocmem(1,1,LSTM);
@@ -161,226 +45,413 @@ extern "C" LSTM* lstm_create(int units, int stateful, int use_bias)
     return l;
 }
 
+/* Initializes an LSTM neural network created by lstm_create().
+ *
+ * Parameters:
+ *   input_dim  - Size of input vectors
+ *   batch_size - Number of input vectors processed simultaneously
+ *   training   - 1: allocate gradient buffers, 0 for inference-only
+ *
+ * Notes:
+ *   - Kernel weights (Wx) are initialized using Glorot normal distribution.
+ *   - Recurrent weights (Ux) are initialized using orthogonal uniform 
+ *     distribution.
+ */
 extern "C" void lstm_init(LSTM* l, int input_dim, int batch_size, int training)
 {
     l->D = input_dim;
     l->B = batch_size;
     l->training = training ? 1 : 0;
+    /* Fused gate storage: [f | i | cc | o] for each time step */
+    l->f = (fArr2D) allocmem(l->B,4 * l->S,float);
+    l->i = (fArr2D) ((float*) l->f + l->S);
+    l->cc = (fArr2D) ((float*) l->f + 2 * l->S);
+    l->o = (fArr2D) ((float*) l->f + 3 * l->S);
+    l->h = (fArr2D) allocmem(l->B + 1,l->S,float);
+    l->c = (fArr2D) allocmem(l->B + 1,l->S,float);
 
-    l->f  = (fArr2D)cuallocmem(l->B,l->S,float);
-    l->i  = (fArr2D)cuallocmem(l->B,l->S,float);
-    l->o  = (fArr2D)cuallocmem(l->B,l->S,float);
-    l->cc = (fArr2D)cuallocmem(l->B + 1,l->S,float);
-    l->h  = (fArr2D)cuallocmem(l->B + 1,l->S,float);
-    l->c  = (fArr2D)cuallocmem(l->B + 1,l->S,float);
+    /* Fused transposed weights: [Wf.T | Wi.T | Wc.T | Wo.T] */
+    l->Wf = (fArr2D) allocmem(4 * l->S,l->D,float);
+    l->Wi = (fArr2D) ((float*) l->Wf + l->S * l->D);
+    l->Wc = (fArr2D) ((float*) l->Wf + 2 * l->S * l->D);
+    l->Wo = (fArr2D) ((float*) l->Wf + 3 * l->S * l->D);
 
-    l->Wf = (fArr2D)cuallocmem(l->D,l->S,float);
-    l->Wi = (fArr2D)cuallocmem(l->D,l->S,float);
-    l->Wc = (fArr2D)cuallocmem(l->D,l->S,float);
-    l->Wo = (fArr2D)cuallocmem(l->D,l->S,float);
-
-    l->Uf = (fArr2D)cuallocmem(l->S,l->S,float);
-    l->Ui = (fArr2D)cuallocmem(l->S,l->S,float);
-    l->Uc = (fArr2D)cuallocmem(l->S,l->S,float);
-    l->Uo = (fArr2D)cuallocmem(l->S,l->S,float);
-
-    l->ph = (fVec)cuallocmem(1,l->S,float);
-    l->pc = (fVec)cuallocmem(1,l->S,float);
-
+    /* Fused transposed recurrent weights: [Uf.T | Ui.T | Uc.T | Uo.T] */
+    l->Uf = (fArr2D) allocmem(4 * l->S,l->S,float);
+    l->Ui = (fArr2D) ((float*) l->Uf + l->S * l->S);
+    l->Uc = (fArr2D) ((float*) l->Uf + 2 * l->S * l->S);
+    l->Uo = (fArr2D) ((float*) l->Uf + 3 * l->S * l->S);
+    l->ph = (fVec) allocmem(1,l->S,float);
+    l->pc = (fVec) allocmem(1,l->S,float);
     if (l->use_bias) {
-        l->bf = (fVec)cuallocmem(1,l->S,float);
-        l->bi = (fVec)cuallocmem(1,l->S,float);
-        l->bc = (fVec)cuallocmem(1,l->S,float);
-        l->bo = (fVec)cuallocmem(1,l->S,float);
+        l->bf = (fVec) allocmem(1,4 * l->S,float);
+        l->bi = (fVec) l->bf + l->S;
+        l->bc = (fVec) l->bf + 2 * l->S;
+        l->bo = (fVec) l->bf + 3 * l->S;
     }
 
-    int nW = l->D * l->S;
-    float wscale = sqrtf(2.0f / (l->D + l->S));
-    int wblocks = (nW + THCNT - 1) / THCNT;
-    init_normal_kernel<<<wblocks,THCNT>>>((float*)l->Wf,nW,wscale,0x10001u);
-    init_normal_kernel<<<wblocks,THCNT>>>((float*)l->Wi,nW,wscale,0x20003u);
-    init_normal_kernel<<<wblocks,THCNT>>>((float*)l->Wc,nW,wscale,0x30007u);
-    init_normal_kernel<<<wblocks,THCNT>>>((float*)l->Wo,nW,wscale,0x40009u);
+    typedef float (*ArrSD)[l->D];
+    ArrSD Wf = (ArrSD) l->Wf;
+    ArrSD Wi = (ArrSD) l->Wi;
+    ArrSD Wc = (ArrSD) l->Wc;
+    ArrSD Wo = (ArrSD) l->Wo;
+    float scale = sqrt(2.0 / (l->D + l->S));
+    for (int i = 0; i < l->D; i++)
+        for (int j = 0; j < l->S; j++)
+            Wf[j][i] = nrand(0.0,scale);
+    for (int i = 0; i < l->D; i++)
+        for (int j = 0; j < l->S; j++)
+            Wi[j][i] = nrand(0.0,scale);
+    for (int i = 0; i < l->D; i++)
+        for (int j = 0; j < l->S; j++)
+            Wc[j][i] = nrand(0.0,scale);
+    for (int i = 0; i < l->D; i++)
+        for (int j = 0; j < l->S; j++)
+            Wo[j][i] = nrand(0.0,scale);
+    typedef float (*ArrS2)[l->S];
+    ArrS2 Uf = (ArrS2) l->Uf;
+    ArrS2 Ui = (ArrS2) l->Ui;
+    ArrS2 Uc = (ArrS2) l->Uc;
+    ArrS2 Uo = (ArrS2) l->Uo;
+    scale = sqrt(6.0 / ((float) (l->S * 2)));
+    for (int i = 0; i < l->S; i++)
+        for (int j = 0; j < l->S; j++)
+            Uf[i][j] = urand(-scale,scale);
+    for (int i = 0; i < l->S; i++)
+        for (int j = 0; j < l->S; j++)
+            Ui[i][j] = urand(-scale,scale);
+    for (int i = 0; i < l->S; i++)
+        for (int j = 0; j < l->S; j++)
+            Uc[i][j] = urand(-scale,scale);
+    for (int i = 0; i < l->S; i++)
+        for (int j = 0; j < l->S; j++)
+            Uo[i][j] = urand(-scale,scale);
 
-    int nU = l->S * l->S;
-    float uscale = sqrtf(6.0f / (2.0f * l->S));
-    int ublocks = (nU + THCNT - 1) / THCNT;
-    init_uniform_kernel<<<ublocks,THCNT>>>((float*)l->Uf,nU,uscale,0x50021u);
-    init_uniform_kernel<<<ublocks,THCNT>>>((float*)l->Ui,nU,uscale,0x6002bu);
-    init_uniform_kernel<<<ublocks,THCNT>>>((float*)l->Uc,nU,uscale,0x7002fu);
-    init_uniform_kernel<<<ublocks,THCNT>>>((float*)l->Uo,nU,uscale,0x8003bu);
-
-    orthogonalize_kernel<<<1,1>>>((float*)l->Uf,l->S);
-    orthogonalize_kernel<<<1,1>>>((float*)l->Ui,l->S);
-    orthogonalize_kernel<<<1,1>>>((float*)l->Uc,l->S);
-    orthogonalize_kernel<<<1,1>>>((float*)l->Uo,l->S);
+    QR(Uf,NULL,NULL,l->S,l->S);
+    QR(Ui,NULL,NULL,l->S,l->S);
+    QR(Uc,NULL,NULL,l->S,l->S);
+    QR(Uo,NULL,NULL,l->S,l->S);
 
     if (l->training) {
-        l->gWf = (fArr2D)cuallocmem(l->D,l->S,float);
-        l->gWi = (fArr2D)cuallocmem(l->D,l->S,float);
-        l->gWc = (fArr2D)cuallocmem(l->D,l->S,float);
-        l->gWo = (fArr2D)cuallocmem(l->D,l->S,float);
-        l->gUf = (fArr2D)cuallocmem(l->S,l->S,float);
-        l->gUi = (fArr2D)cuallocmem(l->S,l->S,float);
-        l->gUc = (fArr2D)cuallocmem(l->S,l->S,float);
-        l->gUo = (fArr2D)cuallocmem(l->S,l->S,float);
+        l->gWf = (fArr2D) allocmem(4 * l->S,l->D,float);
+        l->gWi = (fArr2D) ((float*) l->gWf + l->S * l->D);
+        l->gWc = (fArr2D) ((float*) l->gWf + 2 * l->S * l->D);
+        l->gWo = (fArr2D) ((float*) l->gWf + 3 * l->S * l->D);
+        l->gUf = (fArr2D) allocmem(4 * l->S,l->S,float);
+        l->gUi = (fArr2D) ((float*) l->gUf + l->S * l->S);
+        l->gUc = (fArr2D) ((float*) l->gUf + 2 * l->S * l->S);
+        l->gUo = (fArr2D) ((float*) l->gUf + 3 * l->S * l->S);
+        if (l->use_bias) {
+            l->gbf = (fVec) allocmem(1,4 * l->S,float);
+            l->gbi = (fVec) l->gbf + l->S;
+            l->gbc = (fVec) l->gbf + 2 * l->S;
+            l->gbo = (fVec) l->gbf + 3 * l->S;
+        }
+    }
+
+    /* Initialization above used CPU memory. Move each allocation base to
+     * CUDA memory, then restore the aliases into the fused allocations,
+     * and free the CPU memory.
+     */
+    fArr2D f = (fArr2D) cuallocmem(l->B,4 * l->S,float);
+    fArr2D h = (fArr2D) cuallocmem(l->B + 1,l->S,float);
+    fArr2D c = (fArr2D) cuallocmem(l->B + 1,l->S,float);
+    fArr2D Wf2 = (fArr2D) cuallocmem(4 * l->S,l->D,float);
+    fArr2D Uf2 = (fArr2D) cuallocmem(4 * l->S,l->S,float);
+    fVec ph = (fVec) cuallocmem(1,l->S,float);
+    fVec pc = (fVec) cuallocmem(1,l->S,float);
+
+    cufltcpy(f,l->f,l->B * 4 * l->S);
+    cufltcpy(h,l->h,(l->B + 1) * l->S);
+    cufltcpy(c,l->c,(l->B + 1) * l->S);
+    cufltcpy(Wf2,l->Wf,4 * l->S * l->D);
+    cufltcpy(Uf2,l->Uf,4 * l->S * l->S);
+    cufltcpy(ph,l->ph,l->S);
+    cufltcpy(pc,l->pc,l->S);
+
+    freemem(l->f);
+    freemem(l->h);
+    freemem(l->c);
+    freemem(l->Wf);
+    freemem(l->Uf);
+    freemem(l->ph);
+    freemem(l->pc);
+
+    l->f = f;
+    l->i = (fArr2D) ((float*) l->f + l->S);
+    l->cc = (fArr2D) ((float*) l->f + 2 * l->S);
+    l->o = (fArr2D) ((float*) l->f + 3 * l->S);
+    l->h = h;
+    l->c = c;
+
+    l->Wf = Wf2;
+    l->Wi = (fArr2D) ((float*) l->Wf + l->S * l->D);
+    l->Wc = (fArr2D) ((float*) l->Wf + 2 * l->S * l->D);
+    l->Wo = (fArr2D) ((float*) l->Wf + 3 * l->S * l->D);
+
+    l->Uf = Uf2;
+    l->Ui = (fArr2D) ((float*) l->Uf + l->S * l->S);
+    l->Uc = (fArr2D) ((float*) l->Uf + 2 * l->S * l->S);
+    l->Uo = (fArr2D) ((float*) l->Uf + 3 * l->S * l->S);
+
+    l->ph = ph;
+    l->pc = pc;
+
+    if (l->use_bias) {
+        fVec bf = (fVec) cuallocmem(1,4 * l->S,float);
+        cufltcpy(bf,l->bf,4 * l->S);
+        freemem(l->bf);
+        l->bf = bf;
+        l->bi = l->bf + l->S;
+        l->bc = l->bf + 2 * l->S;
+        l->bo = l->bf + 3 * l->S;
+    }
+
+    if (l->training) {
+        fArr2D gWf = (fArr2D) cuallocmem(4 * l->S,l->D,float);
+        fArr2D gUf = (fArr2D) cuallocmem(4 * l->S,l->S,float);
+
+        cufltcpy(gWf,l->gWf,4 * l->S * l->D);
+        cufltcpy(gUf,l->gUf,4 * l->S * l->S);
+
+        freemem(l->gWf);
+        freemem(l->gUf);
+
+        l->gWf = gWf;
+        l->gWi = (fArr2D) ((float*) l->gWf + l->S * l->D);
+        l->gWc = (fArr2D) ((float*) l->gWf + 2 * l->S * l->D);
+        l->gWo = (fArr2D) ((float*) l->gWf + 3 * l->S * l->D);
+
+        l->gUf = gUf;
+        l->gUi = (fArr2D) ((float*) l->gUf + l->S * l->S);
+        l->gUc = (fArr2D) ((float*) l->gUf + 2 * l->S * l->S);
+        l->gUo = (fArr2D) ((float*) l->gUf + 3 * l->S * l->S);
 
         if (l->use_bias) {
-            l->gbf = (fVec)cuallocmem(1,l->S,float);
-            l->gbi = (fVec)cuallocmem(1,l->S,float);
-            l->gbc = (fVec)cuallocmem(1,l->S,float);
-            l->gbo = (fVec)cuallocmem(1,l->S,float);
+            fVec gbf = (fVec) cuallocmem(1,4 * l->S,float);
+            cufltcpy(gbf,l->gbf,4 * l->S);
+            freemem(l->gbf);
+            l->gbf = gbf;
+            l->gbi = l->gbf + l->S;
+            l->gbc = l->gbf + 2 * l->S;
+            l->gbo = l->gbf + 3 * l->S;
         }
-        l->params = (float*)cuallocmem(7,l->S,float);
+
+        /* Backward workspace: dh_next[S], dc_next[S],
+         * and fused [df | di | dcc | do][B][4S].
+         */
+        l->dh_next = (fVec) cuallocmem(2 + 4 * l->B,l->S,float);
+        l->dc_next = l->dh_next + l->S;
+        l->df = (fArr2D) (l->dh_next + 2 * l->S);
+        l->di = (fArr2D) ((float*) l->df + l->S);
+        l->dcc = (fArr2D) ((float*) l->df + 2 * l->S);
+        l->do_ = (fArr2D) ((float*) l->df + 3 * l->S);
     }
+
+    l->state = graph_create();
 }
 
+/* Sets a new batch size.
+ *
+ * Parameters:
+ *   batch_size - Number of input vectors processed simultaneously
+ *
+ * Notes:
+ *   If this function is called before ilstm_init(), it does nothing.
+ *   Otherwise, the network's hidden states are resized and re-initialized
+ */
 extern "C" void lstm_set_batch_size(LSTM* l, int batch_size)
 {
     if (l->B == 0)
         return;
-
     if (batch_size != l->B) {
+        graph_destroy((GRAPH*) l->state);
         cufreemem(l->f);
-        cufreemem(l->i);
-        cufreemem(l->o);
-        cufreemem(l->cc);
         cufreemem(l->h);
         cufreemem(l->c);
+        if (l->training)
+            cufreemem(l->dh_next);
 
         l->B = batch_size;
-        l->f  = (fArr2D)cuallocmem(l->B,l->S,float);
-        l->i  = (fArr2D)cuallocmem(l->B,l->S,float);
-        l->o  = (fArr2D)cuallocmem(l->B,l->S,float);
-        l->cc = (fArr2D)cuallocmem(l->B + 1,l->S,float);
-        l->h  = (fArr2D)cuallocmem(l->B + 1,l->S,float);
-        l->c  = (fArr2D)cuallocmem(l->B + 1,l->S,float);
+        l->f = (fArr2D) cuallocmem(l->B,4 * l->S,float);
+        l->i = (fArr2D) ((float*) l->f + l->S);
+        l->cc = (fArr2D) ((float*) l->f + 2 * l->S);
+        l->o = (fArr2D) ((float*) l->f + 3 * l->S);
+        l->h = (fArr2D) cuallocmem(l->B + 1,l->S,float);
+        l->c = (fArr2D) cuallocmem(l->B + 1,l->S,float);
+
+        if (l->training) {
+            l->dh_next = (fVec) cuallocmem(2 + 4 * l->B,l->S,float);
+            l->dc_next = l->dh_next + l->S;
+            l->df = (fArr2D) (l->dh_next + 2 * l->S);
+            l->di = (fArr2D) ((float*) l->df + l->S);
+            l->dcc = (fArr2D) ((float*) l->df + 2 * l->S);
+            l->do_ = (fArr2D) ((float*) l->df + 3 * l->S);
+        }
+
+        l->state = graph_create();
     }
     else {
-        cufltclr(l->f,l->B * l->S);
-        cufltclr(l->i,l->B * l->S);
-        cufltclr(l->o,l->B * l->S);
-        cufltclr(l->cc,(l->B + 1) * l->S);
+        cufltclr(l->f,l->B * 4 * l->S);
         cufltclr(l->h,(l->B + 1) * l->S);
         cufltclr(l->c,(l->B + 1) * l->S);
     }
 }
 
+
+/* Frees the memory allocated by lstm_create().
+ * 
+ * Parameters:
+ *   l - Pointer to the LSTM neural network layer to be freed
+ */
 extern "C" void lstm_free(LSTM* l)
 {
-    if (l == NULL)
-        return;
-
+    graph_destroy((GRAPH*) l->state);
     cufreemem(l->f);
-    cufreemem(l->i);
-    cufreemem(l->o);
-    cufreemem(l->cc);
     cufreemem(l->h);
     cufreemem(l->c);
-
     cufreemem(l->Wf);
-    cufreemem(l->Wi);
-    cufreemem(l->Wc);
-    cufreemem(l->Wo);
     cufreemem(l->Uf);
-    cufreemem(l->Ui);
-    cufreemem(l->Uc);
-    cufreemem(l->Uo);
-
     cufreemem(l->ph);
     cufreemem(l->pc);
     cufreemem(l->bf);
-    cufreemem(l->bi);
-    cufreemem(l->bc);
-    cufreemem(l->bo);
-
     cufreemem(l->gWf);
-    cufreemem(l->gWi);
-    cufreemem(l->gWc);
-    cufreemem(l->gWo);
     cufreemem(l->gUf);
-    cufreemem(l->gUi);
-    cufreemem(l->gUc);
-    cufreemem(l->gUo);
     cufreemem(l->gbf);
-    cufreemem(l->gbi);
-    cufreemem(l->gbc);
-    cufreemem(l->gbo);
-
-    cufreemem(l->params);
-
+    cufreemem(l->dh_next);
     freemem(l);
 }
 
+/* Resets the LSTM internal state.
+ * 
+ * Parameters:
+ *   l - Pointer to the LSTM neural network layer to be reset
+ */
 extern "C" void lstm_reset(LSTM* l)
 {
     cufltclr(l->ph,l->S);
     cufltclr(l->pc,l->S);
 }
 
-extern "C" fArr2D lstm_forward(LSTM* restrict l,
-                                const fArr2D restrict X,
-                                int lyr)
+static inline void lstm_activate(fVec v, int S)
 {
-    (void)lyr;
+   sigmoid((fArr2D) v,1,S);
+}
+
+/* Adds bias vector b to a gate pre-activation vector v (length S) */
+static inline void lstm_add_bias(fVec v_, const fVec b_, int S)
+{
+    float* v = (float*) v_;
+    const float* b = (const float*) b_;
+    for (int j = 0; j < S; j++)
+        v[j] += b[j];
+}
+
+/* Applies the gate activations and updates cell and hidden state.
+ * g is the fused gate row [f | i | cc | o].
+ */
+static __global__ void lstm_forward_kernel(float* g, const float* b,
+                                           const float* cprev,
+                                           float* c, float* h,
+                                           int S, int use_bias)
+{
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < S) {
+        float f  = g[j];
+        float i  = g[S + j];
+        float cc = g[2 * S + j];
+        float o  = g[3 * S + j];
+
+        if (use_bias) {
+            f  += b[j];
+            i  += b[S + j];
+            cc += b[2 * S + j];
+            o  += b[3 * S + j];
+        }
+
+        f  = 1.0f / (1.0f + expf(-f));
+        i  = 1.0f / (1.0f + expf(-i));
+        cc = tanhf(cc);
+        o  = 1.0f / (1.0f + expf(-o));
+
+        g[j] = f;
+        g[S + j] = i;
+        g[2 * S + j] = cc;
+        g[3 * S + j] = o;
+
+        float cv = f * cprev[j] + i * cc;
+        c[j] = cv;
+        h[j] = o * tanhf(cv);
+    }
+}
+
+/* Performs LSTM layer training/prediction's forward pass.
+ *
+ * Parameters:
+ *   l   - Pointer to the LSTM layer's data
+ *   X   - Array of input vectors BxD, where B is the number of 
+ *         input vectors, and D is the number of features in each vector
+ *   lyr - Ordinal number of this layer in a model (not used)
+ * 
+ * Returns:
+ *   Pointer to the predicted values.
+ * 
+ * Note:
+ * - In a multi-layered neural network, after the first layer,
+ *   X is the (activated) output of a previous layer.
+ */
+extern "C" fArr2D lstm_forward(LSTM* restrict l,
+                    const fArr2D restrict X /*[B][D]*/, int lyr)
+{
+    (void) lyr;
     const int D = l->D;
     const int S = l->S;
     const int B = l->B;
     const int blocks = (S + THCNT - 1) / THCNT;
-
     typedef float (*ArrTD)[D];
+    ArrTD x = (ArrTD) X;
+
+    cufltclr(l->f,B * 4 * S);
+    cufltclr(l->c,(B+1)*S);
+    cufltclr(l->h,(B+1)*S);
+
+    typedef float (*ArrB4S)[4 * S];
+    ArrB4S f = (ArrB4S) l->f;
     typedef float (*ArrBS)[S];
     typedef float (*ArrB1S)[S];
-
-    ArrTD x = (ArrTD)X;
-    ArrBS f = (ArrBS)l->f;
-    ArrBS i = (ArrBS)l->i;
-    ArrBS o = (ArrBS)l->o;
-    ArrBS cc = ((ArrB1S)l->cc) + 1;
-    ArrBS c = ((ArrB1S)l->c) + 1;
-    ArrBS h = ((ArrB1S)l->h) + 1;
-
-    cufltclr(l->f,B * S);
-    cufltclr(l->i,B * S);
-    cufltclr(l->o,B * S);
-    cufltclr(l->cc,(B + 1) * S);
-    cufltclr(l->c,(B + 1) * S);
-    cufltclr(l->h,(B + 1) * S);
+    ArrBS c = ((ArrB1S) l->c) + 1;
+    ArrBS h = ((ArrB1S) l->h) + 1;
 
     if (l->stateful) {
         cufltcpy(h[-1],l->ph,S);
         cufltcpy(c[-1],l->pc,S);
     }
 
-    for (int t = 0; t < B; t++) {
-        addvecmatmul(f[t],x[t],l->Wf,D,S);
-        addvecmatmul(f[t],h[t-1],l->Uf,S,S);
-        if (l->use_bias)
-            add_bias_kernel<<<blocks,THCNT>>>((float*)f[t],(const float*)l->bf,S);
-        sigmoid((fArr2D)f[t],1,S);
+    /* f[B][4S] = X[B][D] @ Wf[4S][D].T */
+    matmulT(l->f,X,l->Wf,B,D,4*S);
 
-        addvecmatmul(i[t],x[t],l->Wi,D,S);
-        addvecmatmul(i[t],h[t-1],l->Ui,S,S);
-        if (l->use_bias)
-            add_bias_kernel<<<blocks,THCNT>>>((float*)i[t],(const float*)l->bi,S);
-        sigmoid((fArr2D)i[t],1,S);
+    GRAPH* graph = (GRAPH*) l->state;
 
-        addvecmatmul(o[t],x[t],l->Wo,D,S);
-        addvecmatmul(o[t],h[t-1],l->Uo,S,S);
-        if (l->use_bias)
-            add_bias_kernel<<<blocks,THCNT>>>((float*)o[t],(const float*)l->bo,S);
-        sigmoid((fArr2D)o[t],1,S);
+    if (graph_record_exists(graph,GRAPH_FORWARD)) {
+        graph_play(graph,GRAPH_FORWARD);
+    }
+    else {
+        graph_record(graph,GRAPH_FORWARD,GRAPH_RECORD_ON);
+        cudaStream_t stream = graph_stream(graph);
 
-        addvecmatmul(cc[t],x[t],l->Wc,D,S);
-        addvecmatmul(cc[t],h[t-1],l->Uc,S,S);
-        if (l->use_bias)
-            add_bias_kernel<<<blocks,THCNT>>>((float*)cc[t],(const float*)l->bc,S);
-        tanh_kernel<<<blocks,THCNT>>>((float*)cc[t],S);
+        for (int t = 0; t < B; t++) {
+            /* [f i cc o] = X[t] @ W.T */
+            //addinnermul(f[t],x[t],l->Wf,4 * S,D);
+            /* [f i cc o] += h[t-1] @ U.T */
+            addinnermul(f[t],h[t-1],l->Uf,4 * S,S);
 
-        state_kernel<<<blocks,THCNT>>>((const float*)f[t],(const float*)i[t],
-                                      (const float*)o[t],(const float*)cc[t],
-                                      (const float*)c[t-1],(float*)c[t],
-                                      (float*)h[t],S);
+            lstm_forward_kernel<<<blocks,THCNT,0,stream>>>(
+                (float*)f[t],(const float*)l->bf,(const float*)c[t-1],
+                (float*)c[t],(float*)h[t],S,l->use_bias);
+        }
+
+        graph_record(graph,GRAPH_FORWARD,GRAPH_RECORD_OFF);
+        graph_play(graph,GRAPH_FORWARD);
     }
 
     cufltcpy(l->ph,h[B-1],S);
@@ -388,91 +459,148 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
     return h;
 }
 
-extern "C" void lstm_backward(LSTM* restrict l,
-                               const fArr2D restrict dY,
-                               const fArr2D restrict X,
-                               fArr2D restrict dX,
-                               int lyr)
+static inline float lstm_d_activate(float x)
 {
-    (void)lyr;
+    return d_sigmoid1(x);
+}
+
+/* Computes dg = [df | di | dcc | do], updates dc_next, and accumulates
+ * the fused bias gradient when bias is enabled.
+ */
+static __global__ void lstm_backward_kernel(const float* dy,
+                                            const float* f,
+                                            const float* i,
+                                            const float* cc,
+                                            const float* o,
+                                            const float* cprev,
+                                            const float* c,
+                                            const float* dh_next,
+                                            float* dc_next,
+                                            float* dg,
+                                            float* gb,
+                                            int S, int use_bias)
+{
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < S) {
+        float dh = dy[j] + dh_next[j];
+        float tc = tanhf(c[j]);
+        float dc = dh * o[j] * (1.0f - tc * tc) + dc_next[j];
+
+        float df = dc * cprev[j] * (f[j] * (1.0f - f[j]));
+        float di = dc * cc[j] * (i[j] * (1.0f - i[j]));
+        float dcc = dc * i[j] * (1.0f - cc[j] * cc[j]);
+        float do_ = dh * tc * (o[j] * (1.0f - o[j]));
+
+        dg[j] = df;
+        dg[S + j] = di;
+        dg[2 * S + j] = dcc;
+        dg[3 * S + j] = do_;
+
+        if (use_bias) {
+            gb[j] += df;
+            gb[S + j] += di;
+            gb[2 * S + j] += dcc;
+            gb[3 * S + j] += do_;
+        }
+
+        dc_next[j] = f[j] * dc;
+    }
+}
+
+/* Performs LSTM layer training's backward pass.
+ * 
+ * Parameters:
+ *   l    - Pointer to the LSTM layer's data
+ *   dY   - Output vector gradient of lstm_create's units dimension
+ *   X    - Array of input vectors BxD, where B is the number of input
+ *          vectors, and D is the number of features in each vector
+ *   dX   - Output parameter for the input vector gradient (if not NULL)
+ *   lyr  - Ordinal number of this layer in a model (not used)
+ * 
+ * Returns:
+ *   None
+ * 
+ * Note:
+ *   - Calculates the weight and bias gradients and stores them in the
+ *     layer's own gradient buffers (gWf..gUo, and gbf..gbo if use_bias).
+ *   - Calculates the input vector gradient and returns it in dx, if dx is 
+ *     not NULL
+ *   - When stateful is enabled, forward state is carried across calls,
+ *     but gradients do not propagate across sequence boundaries.
+ *   - In a multi-layered neural network, except the last layer, dy is the 
+ *     gradient of the previous layer's input (dx), thus, the dimension of 
+ *     dx (this layer's D) must equal the dimension of the previous layer's
+ *     dy (previous layer's S)
+ */
+extern "C" void lstm_backward(LSTM* restrict l,
+                   const fArr2D restrict dY/*[B][S]*/,
+                   const fArr2D restrict X/*[B][D]*/,
+                   fArr2D restrict dX/*[B][D]*/,
+                   int lyr)
+{
+    (void) lyr;
     const int D = l->D;
     const int S = l->S;
     const int B = l->B;
     const int blocks = (S + THCNT - 1) / THCNT;
-
     typedef float (*ArrBD)[D];
+    ArrBD x = (ArrBD) X;
+    ArrBD dx = (ArrBD) dX;
     typedef float (*ArrBS)[S];
+    ArrBS dy = (ArrBS) dY;
+
+    typedef float (*ArrB4S)[4 * S];
+    ArrB4S f = (ArrB4S) l->f;
+    ArrB4S i = (ArrB4S) l->i;
+    ArrB4S cc = (ArrB4S) l->cc;
+    ArrB4S o = (ArrB4S) l->o;
     typedef float (*ArrB1S)[S];
+    ArrBS c = ((ArrB1S) l->c) + 1;
+    ArrBS h = ((ArrB1S) l->h) + 1;
 
-    ArrBD x = (ArrBD)X;
-    ArrBD dx = (ArrBD)dX;
-    ArrBS dy = (ArrBS)dY;
-    ArrBS f = (ArrBS)l->f;
-    ArrBS i = (ArrBS)l->i;
-    ArrBS o = (ArrBS)l->o;
-    ArrBS cc = ((ArrB1S)l->cc) + 1;
-    ArrBS c = ((ArrB1S)l->c) + 1;
-    ArrBS h = ((ArrB1S)l->h) + 1;
+    cufltclr(l->gWf,4 * S * D);
+    cufltclr(l->gUf,4 * S * S);
+    if (l->use_bias)
+        cufltclr(l->gbf,4 * S);
 
-    cufltclr(l->gWf,D * S);
-    cufltclr(l->gWi,D * S);
-    cufltclr(l->gWc,D * S);
-    cufltclr(l->gWo,D * S);
-    cufltclr(l->gUf,S * S);
-    cufltclr(l->gUi,S * S);
-    cufltclr(l->gUc,S * S);
-    cufltclr(l->gUo,S * S);
+    /* dh_next[S], dc_next[S], dg[B][4*S] */
+    fVec dh_next = l->dh_next;
+    fVec dc_next = l->dc_next;
+    ArrB4S dg = (ArrB4S) l->df;
+    cufltclr(dh_next,S);
+    cufltclr(dc_next,S);
 
-    if (l->use_bias) {
-        cufltclr(l->gbf,S);
-        cufltclr(l->gbi,S);
-        cufltclr(l->gbc,S);
-        cufltclr(l->gbo,S);
+    GRAPH* graph = (GRAPH*) l->state;
+
+    if (graph_record_exists(graph,GRAPH_BACKWARD)) {
+        graph_play(graph,GRAPH_BACKWARD);
     }
+    else {
+        graph_record(graph,GRAPH_BACKWARD,GRAPH_RECORD_ON);
+        cudaStream_t stream = graph_stream(graph);
 
-    float* tmp = l->params;
-    float* dh_next = tmp + 0 * S;
-    float* dc_next = tmp + 1 * S;
-    float* do_     = tmp + 2 * S;
-    float* dc      = tmp + 3 * S;
-    float* dcc     = tmp + 4 * S;
-    float* di      = tmp + 5 * S;
-    float* df      = tmp + 6 * S;
+        for (int t = B - 1; t >= 0; t--) {
+            const float* ft = (const float*) f[t];
+            const float* it = (const float*) i[t];
+            const float* cct = (const float*) cc[t];
+            const float* ot = (const float*) o[t];
 
-    for (int t = B - 1; t >= 0; t--) {
-        backward_gate_kernel<<<blocks,THCNT>>>(
-            (const float*)dy[t],(const float*)f[t],(const float*)i[t],
-            (const float*)o[t],(const float*)cc[t],(const float*)c[t-1],
-            (const float*)c[t],dh_next,dc_next,do_,dc,dcc,di,df,S);
+            lstm_backward_kernel<<<blocks,THCNT,0,stream>>>(
+                (const float*) dy[t],ft,it,cct,ot,
+                (const float*) c[t-1],(const float*) c[t],
+                dh_next,dc_next,dg[t],(float*) l->gbf,S,l->use_bias);
 
-        addoutermul(l->gWo,x[t],(fVec)do_,D,S);
-        addoutermul(l->gUo,h[t-1],(fVec)do_,S,S);
-        addoutermul(l->gWc,x[t],(fVec)dcc,D,S);
-        addoutermul(l->gUc,h[t-1],(fVec)dcc,S,S);
-        addoutermul(l->gWi,x[t],(fVec)di,D,S);
-        addoutermul(l->gUi,h[t-1],(fVec)di,S,S);
-        addoutermul(l->gWf,x[t],(fVec)df,D,S);
-        addoutermul(l->gUf,h[t-1],(fVec)df,S,S);
-
-        if (l->use_bias) {
-            add_vector_kernel<<<blocks,THCNT>>>((float*)l->gbo,do_,S);
-            add_vector_kernel<<<blocks,THCNT>>>((float*)l->gbc,dcc,S);
-            add_vector_kernel<<<blocks,THCNT>>>((float*)l->gbi,di,S);
-            add_vector_kernel<<<blocks,THCNT>>>((float*)l->gbf,df,S);
+            vecmatmul(dh_next,(fVec) dg[t],l->Uf,4 * S,S);
         }
 
-        cufltclr(dh_next,S);
-        addinnermul((fVec)dh_next,(fVec)df,l->Uf,S,S);
-        addinnermul((fVec)dh_next,(fVec)di,l->Ui,S,S);
-        addinnermul((fVec)dh_next,(fVec)dcc,l->Uc,S,S);
-        addinnermul((fVec)dh_next,(fVec)do_,l->Uo,S,S);
-
-        if (dX != NULL) {
-            cufltclr(dx[t],D);
-            addinnermul(dx[t],(fVec)df,l->Wf,D,S);
-            addinnermul(dx[t],(fVec)di,l->Wi,D,S);
-            addinnermul(dx[t],(fVec)dcc,l->Wc,D,S);
-            addinnermul(dx[t],(fVec)do_,l->Wo,D,S);
-        }
+        graph_record(graph,GRAPH_BACKWARD,GRAPH_RECORD_OFF);
+        graph_play(graph,GRAPH_BACKWARD);
     }
+
+    /* Gradients of the stored transposed fused matrices */
+    Tmatmul(l->gWf,dg,x,4 * S,B,D);
+    Tmatmul(l->gUf,dg,l->h,4 * S,B,S); /* l->h is h[-1] */
+
+    if (dx != NULL)
+        matmul(dx,dg,l->Wf,B,4 * S,D);
 }
