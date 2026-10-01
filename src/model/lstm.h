@@ -49,7 +49,14 @@ typedef struct lstm_s {
   fVec gbi;        /* Bias gradients [S] (use_bias && training)     */
   fVec gbc;        /* Bias gradients [S] (use_bias && training)     */
   fVec gbo;        /* Bias gradients [S] (use_bias && training)     */
-  float* params;   /* Parameters buffer                             */
+  /* Backward intermediate derivatives (only if training == 1) */
+  fVec dh_next;    /* Hidden state derivatives [S]                  */
+  fVec dc_next;    /* Cell state derivatives [S]                    */
+  fArr2D do_;      /* Output gate derivatives [1|B][S]              */
+  fArr2D dcc;      /* Cell candidate derivatives [1|B][S]           */
+  fArr2D di;       /* Input gate derivatives [1|B][S]               */
+  fArr2D df;       /* Forget gate derivatives [1|B][S]              */
+  void* state;     /* Implementation specific (NULL if not used)    */
 } LSTM;
 
 #ifdef __cplusplus

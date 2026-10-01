@@ -37,7 +37,7 @@ LSTM* lstm_create(int units, int stateful, int use_bias)
     l->S = units;
     l->stateful = stateful ? 1 : 0;
     l->use_bias = use_bias ? 1 : 0;
-    return l;    
+    return l;
 }
 
 /* Initializes an LSTM neural network created by lstm_create().
@@ -116,7 +116,7 @@ void lstm_init(LSTM* l, int input_dim, int batch_size, int training)
     for (int i = 0; i < l->S; i++)
         for (int j = 0; j < l->S; j++)
             Uo[i][j] = urand(-scale,scale);
-    
+
     QR(Uf,NULL,NULL,l->S,l->S);
     QR(Ui,NULL,NULL,l->S,l->S);
     QR(Uc,NULL,NULL,l->S,l->S);
@@ -137,6 +137,13 @@ void lstm_init(LSTM* l, int input_dim, int batch_size, int training)
             l->gbc = allocmem(1,l->S,float);
             l->gbo = allocmem(1,l->S,float);
         }
+
+        l->dh_next = allocmem(1,l->S,float);
+        l->dc_next = allocmem(1,l->S,float);
+        l->do_ = allocmem(1,l->S,float);
+        l->dcc = allocmem(1,l->S,float);
+        l->di = allocmem(1,l->S,float);
+        l->df = allocmem(1,l->S,float);
     }
 }
 
@@ -218,6 +225,12 @@ void lstm_free(LSTM* l)
     freemem(l->gbi);
     freemem(l->gbc);
     freemem(l->gbo);
+    freemem(l->dh_next);
+    freemem(l->dc_next);
+    freemem(l->do_);
+    freemem(l->dcc);
+    freemem(l->di);
+    freemem(l->df);
     freemem(l);
 }
 
@@ -420,10 +433,10 @@ void lstm_backward(LSTM* restrict l,
     fltclr(l->gUc,S * S);
     fltclr(l->gUo,S * S);
     /* Bias gradient accumulators (summed over time steps) */
-    float* gbf = (float*) l->gbf;
-    float* gbi = (float*) l->gbi;
-    float* gbc = (float*) l->gbc;
-    float* gbo = (float*) l->gbo;
+    fVec gbf = l->gbf;
+    fVec gbi = l->gbi;
+    fVec gbc = l->gbc;
+    fVec gbo = l->gbo;
     if (l->use_bias) {
         fltclr(l->gbf,S);
         fltclr(l->gbi,S);
@@ -431,8 +444,8 @@ void lstm_backward(LSTM* restrict l,
         fltclr(l->gbo,S);
     }
     /* Future time step gradient */
-    float dh_next[S];
-    float dc_next[S];
+    fVec dh_next = l->dh_next;
+    fVec dc_next = l->dc_next;
     fltclr(dh_next,S);
     fltclr(dc_next,S);
     /* Backward pass loop */
@@ -444,7 +457,7 @@ void lstm_backward(LSTM* restrict l,
             dh[j] = dy[t][j] + dh_next[j];
 
         /* Update output gate gradient */
-        float do_[S]; /* 'do' is a C keyword, use do_ for variable name */
+        fVec do_ = (fVec) l->do_; /* 'do' is a C keyword, use do_ instead */
         for (int j = 0; j < S; j++)
             do_[j] = dh[j] * tanh(c[t][j]) * lstm_d_activate(o[t][j]);
         addoutermul(gWo,x[t],do_,D,S);
@@ -462,7 +475,7 @@ void lstm_backward(LSTM* restrict l,
          * in forward so instead of d_tanh use d_tanh_x 
          * dcc = dc * i[t] * tanh_x_derivative(cc[t]) 
          */
-        float dcc[S];
+        fVec dcc = (fVec) l->dcc; /* [1][S] */
         for (int j = 0; j < S; j++)
             dcc[j] = dc[j] * i[t][j] * d_tanh_x(cc[t][j]);
         addoutermul(gWc,x[t],dcc,D,S);
@@ -472,7 +485,7 @@ void lstm_backward(LSTM* restrict l,
                 gbc[j] += dcc[j];
 
         /* Update input gate gradient */
-        float di[S];
+        fVec di = (fVec) l->di;
         for (int j = 0; j < S; j++)
             di[j] = dc[j] * cc[t][j] * lstm_d_activate(i[t][j]);
         addoutermul(gWi,x[t],di,D,S);
@@ -482,7 +495,7 @@ void lstm_backward(LSTM* restrict l,
                 gbi[j] += di[j];
 
         /* Update forget gate gradient */
-        float df[S];
+        fVec df = (fVec) l->df;
         for (int j = 0; j < S; j++)
             df[j] = dc[j] * c[t-1][j] * lstm_d_activate(f[t][j]);
         addoutermul(gWf,x[t],df,D,S);
