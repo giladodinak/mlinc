@@ -47,6 +47,7 @@ CTC* ctc_create(int T, int L, int blank)
  */
 void ctc_free(CTC* ctc)
 {
+    if (ctc == NULL) return;
     freemem(ctc->yp);
     freemem(ctc->ypc);
     freemem(ctc->ytc);

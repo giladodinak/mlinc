@@ -270,6 +270,7 @@ extern "C" CTC* ctc_create(int T, int L, int blank)
  */
 extern "C" void ctc_free(CTC* ctc)
 {
+    if (ctc == NULL) return;
     cufreemem(ctc->yp);
     freemem(ctc->ypc);
     freemem(ctc->ytc);
