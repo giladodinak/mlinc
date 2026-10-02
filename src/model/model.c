@@ -71,7 +71,7 @@ void model_free(MODEL* m)
 {
     for (int i = 0; i < m->num_layers; i++)
         layer_free(&m->layer[i]);
-    freemem(m->ctc);
+    ctc_free(m->ctc);
     freemem(m->mean);
     freemem(m->sdev);
     freemem(m->layer);
