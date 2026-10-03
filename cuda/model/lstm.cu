@@ -1,9 +1,40 @@
 /* Copyright (c) 2026 Gilad Odinak           */
 /* LSTM (reccurent) neural network functions */
+
 /* References:
  * https://en.wikipedia.org/wiki/Long_short-term_memory
  * https://www.bioinf.jku.at/publications/older/2604.pdf
  */
+
+/* lstm.cu implements the same LSTM equations as the textbook lstm.c, but
+ * reorganizes the computation to suit GPU execution. The CPU version stores
+ * the four gates separately and performs their input and recurrent matrix
+ * multiplications independently at each time step.
+ *
+ * The CUDA version fuses the gates into [f | i | cc | o]. The four input-
+ * weight matrices are transposed and stacked as additional row blocks in
+ * one [4S][D] matrix, and the recurrent matrices similarly become one [4S][S]
+ * matrix. Thus a single multiplication produces all four gate pre-activations.
+ * The bias vectors are similarily fused. Transposing and stacking changes 
+ * only memory layout and multiplication orientation; it does not change
+ * the mathematical result.
+ *
+ * Forward input projection for all time steps is computed with one large
+ * matrix multiplication, while the recurrent contribution remains sequential.
+ * Gate activation, bias addition, and cell/hidden-state updates are combined
+ * in a CUDA kernel.
+ *
+ * The same fusion is used for backward gate derivatives, and weight gradients.
+ *
+ * Backward propagation first computes the sequential recurrent derivatives,
+ * then uses batched matrix multiplications for the fused weight gradients
+ * and input gradients.
+ *
+ * CUDA Graphs capture the repeated sequential operations to reduce launch
+ * overhead. The LSTM equations themselves are unchanged; the changes are
+ * primarily storage layout, transposition, fusion, and batching.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -333,20 +364,6 @@ extern "C" void lstm_reset(LSTM* l)
     cufltclr(l->pc,l->S);
 }
 
-static inline void lstm_activate(fVec v, int S)
-{
-   sigmoid((fArr2D) v,1,S);
-}
-
-/* Adds bias vector b to a gate pre-activation vector v (length S) */
-static inline void lstm_add_bias(fVec v_, const fVec b_, int S)
-{
-    float* v = (float*) v_;
-    const float* b = (const float*) b_;
-    for (int j = 0; j < S; j++)
-        v[j] += b[j];
-}
-
 /* Applies the gate activations and updates cell and hidden state.
  * g is the fused gate row [f | i | cc | o].
  */
@@ -369,10 +386,10 @@ static __global__ void lstm_forward_kernel(float* g, const float* b,
             o  += b[3 * S + j];
         }
 
-        f  = 1.0f / (1.0f + expf(-f));
-        i  = 1.0f / (1.0f + expf(-i));
+        f  = sigmoid1(f);
+        i  = sigmoid1(i);
         cc = tanhf(cc);
-        o  = 1.0f / (1.0f + expf(-o));
+        o  = sigmoid1(o);
 
         g[j] = f;
         g[S + j] = i;
@@ -409,7 +426,6 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
     const int B = l->B;
     const int blocks = (S + THCNT - 1) / THCNT;
     typedef float (*ArrTD)[D];
-    ArrTD x = (ArrTD) X;
 
     cufltclr(l->f,B * 4 * S);
     cufltclr(l->c,(B+1)*S);
@@ -427,8 +443,8 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
         cufltcpy(c[-1],l->pc,S);
     }
 
-    /* f[B][4S] = X[B][D] @ Wf[4S][D].T */
-    matmulT(l->f,X,l->Wf,B,D,4*S);
+    /* [f i cc o] = X @ W.T */
+    matmulT(l->f,X,l->Wf,B,D,4 * S);
 
     GRAPH* graph = (GRAPH*) l->state;
 
@@ -440,8 +456,6 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
         cudaStream_t stream = graph_stream(graph);
 
         for (int t = 0; t < B; t++) {
-            /* [f i cc o] = X[t] @ W.T */
-            //addinnermul(f[t],x[t],l->Wf,4 * S,D);
             /* [f i cc o] += h[t-1] @ U.T */
             addinnermul(f[t],h[t-1],l->Uf,4 * S,S);
 
@@ -457,11 +471,6 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
     cufltcpy(l->ph,h[B-1],S);
     cufltcpy(l->pc,c[B-1],S);
     return h;
-}
-
-static inline float lstm_d_activate(float x)
-{
-    return d_sigmoid1(x);
 }
 
 /* Computes dg = [df | di | dcc | do], updates dc_next, and accumulates
@@ -482,14 +491,13 @@ static __global__ void lstm_backward_kernel(const float* dy,
 {
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     if (j < S) {
-        float dh = dy[j] + dh_next[j];
         float tc = tanhf(c[j]);
-        float dc = dh * o[j] * (1.0f - tc * tc) + dc_next[j];
-
-        float df = dc * cprev[j] * (f[j] * (1.0f - f[j]));
-        float di = dc * cc[j] * (i[j] * (1.0f - i[j]));
-        float dcc = dc * i[j] * (1.0f - cc[j] * cc[j]);
-        float do_ = dh * tc * (o[j] * (1.0f - o[j]));
+        float dh = dy[j] + dh_next[j];
+        float dc = dh * o[j] * d_tanh_x(tc) + dc_next[j];
+        float do_ = dh * tc * d_sigmoid1(o[j]);
+        float dcc = dc * i[j] * d_tanh_x(cc[j]);
+        float di  = dc * cc[j] * d_sigmoid1(i[j]);
+        float df  = dc * cprev[j] * d_sigmoid1(f[j]);
 
         dg[j] = df;
         dg[S + j] = di;
@@ -556,7 +564,6 @@ extern "C" void lstm_backward(LSTM* restrict l,
     ArrB4S o = (ArrB4S) l->o;
     typedef float (*ArrB1S)[S];
     ArrBS c = ((ArrB1S) l->c) + 1;
-    ArrBS h = ((ArrB1S) l->h) + 1;
 
     cufltclr(l->gWf,4 * S * D);
     cufltclr(l->gUf,4 * S * S);

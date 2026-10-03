@@ -20,8 +20,7 @@ static __device__ __forceinline__ float logsumexp(float a, float b)
 {
     if (a == -INFINITY) return b;
     if (b == -INFINITY) return a;
-    return (a >= b) ? a + log1pf(expf(b - a))
-                    : b + log1pf(expf(a - b));
+    return (a >= b) ? a + log1pf(expf(b - a)) : b + log1pf(expf(a - b));
 }
 
 
@@ -92,9 +91,9 @@ static __global__ void ctc_forward_backward_kernel(const float* yp,
 
     /* Initialize the alpha table */
     if (tid == 0)
-        alpha[0] = yp[blank];                         /* Equation 7.5 */
+        alpha[0] = yp[blank];                       /* Equation 7.5 */
     if (S > 1 && tid == 1)
-        alpha[1] = yp[label[1]];                     /* Equation 7.6 */
+        alpha[1] = yp[label[1]];                    /* Equation 7.6 */
 
     __syncthreads();
 
@@ -110,17 +109,10 @@ static __global__ void ctc_forward_backward_kernel(const float* yp,
         for (int s = start + tid; s < end; s += blockDim.x) {
             int ls = label[s];
             float ats = alpha[(t - 1) * S + s];
-
             if (s >= 1)
-                ats = logsumexp(
-                    ats,
-                    alpha[(t - 1) * S + s - 1]);
-
+                ats = logsumexp(ats,alpha[(t - 1) * S + s - 1]);
             if (s >= 2 && !(ls == blank || label[s - 2] == ls))
-                ats = logsumexp(
-                    ats,
-                    alpha[(t - 1) * S + s - 2]);
-
+                ats = logsumexp(ats,alpha[(t - 1) * S + s - 2]);
             alpha[t * S + s] = ats + yp[t * L + ls];
         }
 
@@ -138,33 +130,17 @@ static __global__ void ctc_forward_backward_kernel(const float* yp,
 
     for (int t = T - 2; t >= 0; t--) {              /* Equation 7.15 */
         int start = S - (2 * (T - t));
-        if (start < 0)
-            start = 0;
-
+        if (start < 0) start = 0;
         int end = 2 * (t + 1);                      /* Equation 7.16 */
-        if (end > S)
-            end = S;
+        if (end > S) end = S;
 
         for (int s = start + tid; s < end; s += blockDim.x) {
-            /* Equation 7.15 has a typo, reads yp[t][] instead
-             * of yp[t + 1][]
-             */
-            float bts = beta[(t + 1) * S + s]
-                      + yp[(t + 1) * L + label[s]];
-
+            /* Equation 7.15 has a typo, reads yp[t][] instead of yp[t + 1][]*/
+            float bts = beta[(t + 1) * S + s] + yp[(t + 1) * L + label[s]];
             if (s + 1 < S)
-                bts = logsumexp(
-                    bts,
-                    beta[(t + 1) * S + s + 1]
-                    + yp[(t + 1) * L + label[s + 1]]);
-
-            if (s + 2 < S &&
-                    !(label[s] == blank || label[s + 2] == label[s]))
-                bts = logsumexp(
-                    bts,
-                    beta[(t + 1) * S + s + 2]
-                    + yp[(t + 1) * L + label[s + 2]]);
-
+                bts = logsumexp(bts,beta[(t + 1) * S + s + 1] + yp[(t + 1) * L + label[s + 1]]);
+            if (s + 2 < S && !(label[s] == blank || label[s + 2] == label[s]))
+                bts = logsumexp(bts,beta[(t + 1) * S + s + 2] + yp[(t + 1) * L + label[s + 2]]);
             beta[t * S + s] = bts;
         }
 
@@ -174,7 +150,7 @@ static __global__ void ctc_forward_backward_kernel(const float* yp,
 
 
 /* Calculates probabilities per time step
- * (see note below Equation 7.29).
+ * (see note below Equation 7.29)
  */
 static __global__ void ctc_prob_kernel(const float* alpha,
                                        const float* beta,
@@ -184,12 +160,8 @@ static __global__ void ctc_prob_kernel(const float* alpha,
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     if (t < T) {
         float p = -INFINITY;
-
-        for (int s = 0; s < S; s++)                 /* Equation 7.23 */
-            p = logsumexp(
-                p,
-                alpha[t * S + s] + beta[t * S + s]);
-
+        for (int s = 0; s < S; s++)    /* Equation 7.23 */
+            p = logsumexp(p,alpha[t * S + s] + beta[t * S + s]);
         prob[t] = p;
     }
 }
@@ -209,35 +181,30 @@ static __global__ void dLdy_ctc_loss_kernel(const float* yp,
         int t = k / L;
         int l = k % L;
         float sum = -INFINITY;
-
         for (int s = 0; s < S; s++)
-            if (l == label[s])                      /* Equation 7.24 */
-                sum = logsumexp(
-                    sum,
-                    alpha[t * S + s] + beta[t * S + s]);
-
+            if (l == label[s])         /* Equation 7.24 */
+                sum = logsumexp(sum,alpha[t * S + s] + beta[t * S + s]);
         dy[k] = expf(yp[k]) - expf(sum - prob[t]);
     }
 }
 
 
-/* Merges consecutive identical labels and removes blanks. */
-static int collapse_labels(int* y, int T, int blank)
+/* Merges consecutive identical labels and removes blanks */
+static inline int collapse_labels(int* y, int T, int blank)
 {
-    int i, j, n;
+    int i, j, k, n;
 
-    if (T == 0)
-        return 0;
-
+    /* Merge consecutive identical labels */
     for (i = 1, j = 0; i < T; i++)
         if (y[i] != y[j])
             y[++j] = y[i];
 
-    for (n = j + 1, i = 0, j = 0; i < n; i++)
+    /* Remove blanks */
+    for (n = j + 1, i = 0, k = 0; i < n; i++)
         if (y[i] != blank)
-            y[j++] = y[i];
+            y[k++] = y[i];
 
-    return j;
+    return j; /* Length of the collapsed sequences */
 }
 
 
@@ -318,8 +285,8 @@ extern "C" float ctc_loss(CTC* ctc,
     if (T == 0)
         return INFINITY;
 
-    /* Convert input predictions to log scale and decode both prediction
-     * and true-label vectors.
+    /* Convert input predictions to log scale and decode
+     * both prediction and true-label vectors.
      *
      * ctc->label is temporarily:
      *     [ypc[T] | ytc[T]]
@@ -333,15 +300,8 @@ extern "C" float ctc_loss(CTC* ctc,
         (int*)ctc->label,
         T,L);
 
-    cudaMemcpy(ctc->ypc,
-               ctc->label,
-               T * sizeof(int),
-               cudaMemcpyDeviceToHost);
-
-    cudaMemcpy(ctc->ytc,
-               ctc->label + T,
-               T * sizeof(int),
-               cudaMemcpyDeviceToHost);
+    nnmemcpy(ctc->ypc,ctc->label,T * sizeof(int));
+    nnmemcpy(ctc->ytc,ctc->label + T,T * sizeof(int));
 
     ctc->ypclen = collapse_labels(ctc->ypc,T,blank);
     ctc->ytclen = collapse_labels(ctc->ytc,T,blank);
@@ -354,14 +314,8 @@ extern "C" float ctc_loss(CTC* ctc,
         label[s++] = ctc->ytc[i];
         label[s++] = blank;
     }
-
-    ctc->S = s;                                     /* Actual padded label length */
-
-    cudaMemcpy(ctc->label,
-               label,
-               ctc->S * sizeof(int),
-               cudaMemcpyHostToDevice);
-
+    ctc->S = s; /* Actual padded label length */
+    nnmemcpy(ctc->label,label,ctc->S * sizeof(int));
     freemem(label);
 
     /* Note that the referenced equations use 1-based indexing,
