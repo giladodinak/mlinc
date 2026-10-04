@@ -204,7 +204,7 @@ static inline int collapse_labels(int* y, int T, int blank)
         if (y[i] != blank)
             y[k++] = y[i];
 
-    return j; /* Length of the collapsed sequences */
+    return k; /* Length of the collapsed sequences */
 }
 
 
