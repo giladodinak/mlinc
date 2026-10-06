@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include <cuda_runtime.h>
+#include "cuctx.h"
+#include "arraytypes.h"
 #include "adamw.h"
 
 /* Adaptive Moment Estimation with weight decay
@@ -63,9 +65,11 @@ extern "C" void adamw_update(fArr2D w_/*[M][N]*/,fArr2D g_/*[M][N]*/,
     int n = M * N;
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
+    float* w = (float*) w_;
+    const float* g = (float*) g_;
+    float* m = (float*) m_;
+    float* v = (float*) v_;
 
-    adamw_update_kernel<<<blocks,threads>>>((float*)w_,(const float*)g_,
-                                            (float*)m_,(float*)v_,n,
-                                            bc1,bc2,
-                                            learning_rate,weight_decay);
+    adamw_update_kernel<<<blocks,threads,0,cuda_stream()>>>(
+                              w,g,m,v,n,bc1,bc2,learning_rate,weight_decay);
 }

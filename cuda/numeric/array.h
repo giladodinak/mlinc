@@ -8,6 +8,7 @@
 #include <math.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include "cuctx.h"
 #include "cuflt.h"
 #include "arraytypes.h"
 /*
@@ -41,29 +42,6 @@
 #define CUGER  cublasSger
 #endif
 
-/* Creates a cuBLAS handle when a varibale of this class is instansiated.
- * The handle is released when the variable is destroyed (goes out of scope).
- */
-class CublasHandle {
-public:
-    cublasHandle_t handle;
-
-    CublasHandle() : handle(NULL)
-    {
-        cublasStatus_t status = cublasCreate(&handle);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr,"cublasCreate failed (%d)\n",(int) status);
-            exit(1);
-        }
-    }
-
-    ~CublasHandle()
-    {
-        if (handle != NULL)
-            cublasDestroy(handle);
-    }
-};
-
 /* This function initializes one cuBLAS handle per CPU thread that is
  * returned by all invocations of this function from that same thread.
  *
@@ -73,11 +51,6 @@ public:
  *
  * This design supports only one (the default) GPU device.
  */
-inline cublasHandle_t cublas_handle(void)
-{
-    static thread_local CublasHandle h;
-    return h.handle;
-}
 
 /* The _ld matrix multiplication functions below accept explicit leading
  * dimensions for row-major matrices. The leading dimension is the number of
@@ -304,8 +277,7 @@ static inline void addoutermul(fArr2D restrict m_/*[N][M]*/,
 static __global__ void transpose_kernel(const float* m, float* mt, int N, int M)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
-    int n = N * M;
-    if (k < n) {
+    if (k < N * M) {
         int i = k / M;
         int j = k % M;
         mt[j * N + i] = m[k];
@@ -318,10 +290,11 @@ static inline void transpose(const fArr2D restrict m_/*[N][M]*/,
                              fArr2D restrict mt_/*[M][N]*/,
                              int N, int M)
 {
-    int n = N * M;
     int threads = 256;
-    transpose_kernel<<<(n + threads - 1) / threads,threads>>>(
-        (const float*)m_,(float*)mt_,N,M);
+    int blocks = (N * M + threads - 1) / threads;
+    const float* m = (const float*) m_;
+    float* mt = (float*) mt_;
+    transpose_kernel<<<blocks,threads,0,cuda_stream()>>>(m,mt,N,M);
 }
 
 static __global__ void matdiag_kernel(const float* m, float* v, int D, int M)
@@ -340,8 +313,10 @@ static inline void matdiag(const fArr2D restrict m_/*[N][M]*/,
 {
     int D = (N < M) ? N : M;
     int threads = 256;
-    matdiag_kernel<<<(D + threads - 1) / threads,threads>>>(
-        (const float*)m_,(float*)v_,D,M);
+    int blocks = (D + threads - 1) / threads;
+    const float* m = (const float*) m_;
+    float* v = (float*) v_;
+    matdiag_kernel<<<blocks,threads,0,cuda_stream()>>>(m,v,D,M);
 }
 
 static __global__ void diagmat_kernel(const float* v, float* m, int N)
@@ -360,8 +335,10 @@ static inline void diagmat(const fVec restrict v_/*[N]*/,
 {
     cufltclr(m_,N * N);
     int threads = 256;
-    diagmat_kernel<<<(N + threads - 1) / threads,threads>>>(
-        (const float*)v_,(float*)m_,N);
+    int blocks = (N + threads - 1) / threads;
+    const float* v = (const float*) v_;
+    float* m = (float*) m_;
+    diagmat_kernel<<<blocks,threads,0,cuda_stream()>>>(v,m,N);
 }
 
 static __global__ void mateye_kernel(float* m, int N)
@@ -377,7 +354,8 @@ static inline void mateye(const fArr2D restrict m_/*[N][N]*/, int N)
 {
     cufltclr(m_,N * N);
     int threads = 256;
-    mateye_kernel<<<(N + threads - 1) / threads,threads>>>((float*)m_,N);
+    int blocks = (N + threads - 1) / threads;
+    mateye_kernel<<<blocks,threads,0,cuda_stream()>>>((float*)m_,N);
 }
 
 #endif

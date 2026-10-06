@@ -19,34 +19,23 @@ typedef struct graph_s {
     int recording;
 } GRAPH;
 
-/* Creates an empty graph object.
- * Returns NULL on error.
- */
+/* Creates an empty graph object */
 GRAPH* graph_create(void);
 
 
-/* Waits for graph execution to complete and destroys the graph object.
- */
-cudaError_t graph_destroy(GRAPH* g);
+/* Waits for graph execution to complete and destroys the graph object */
+void graph_destroy(GRAPH* g);
 
+/* Starts or stops recording the specified graph */
+void graph_record(GRAPH* g, int id, int on);
 
-/* Starts or stops recording the specified graph.
- */
-cudaError_t graph_record(GRAPH* g, int id, int on);
-
-
-/* Returns nonzero if the specified graph has been recorded.
- */
+/* Returns nonzero if the specified graph has been recorded */
 int graph_record_exists(const GRAPH* g, int id);
 
+/* Executes a recorded graph */
+void graph_play(GRAPH* g, int id);
 
-/* Executes a recorded graph.
- */
-cudaError_t graph_play(GRAPH* g, int id);
-
-
-/* Returns the stream used to record and execute the graph.
- */
+/* Returns the stream used to record and execute the graph */
 cudaStream_t graph_stream(const GRAPH* g);
 
 #endif

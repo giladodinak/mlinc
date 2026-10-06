@@ -5,12 +5,12 @@
 
 #include <math.h>
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
+#include "cuctx.h"
 #include "float.h"
 #include "arraytypes.h"
 
-#ifndef THCNT
-#define THCNT 256
-#endif
+#define THDCNT 256
 
 typedef struct lnorm_s {
   int B;           /* Number of input vectors   */
@@ -102,8 +102,9 @@ static inline void addnorm_forward(ADDNORM* l,
                                    const fArr2D x2,
                                    fArr2D y)
 {
-    int threads = THCNT;
-    addnorm_forward_kernel<<<l->B,threads,threads * sizeof(float)>>>(
+    int threads = THDCNT;
+    int shm = threads * sizeof(float);
+    addnorm_forward_kernel<<<l->B,threads,shm,cuda_stream()>>>(
         (const float*)x1,(const float*)x2,(float*)y,(float*)l->xn,
         (float*)l->mean,(float*)l->sdev,
         (const float*)l->gamma,(const float*)l->beta,l->D);
@@ -183,11 +184,13 @@ static inline void addnorm_backward(ADDNORM* l,
                                     fVec dg,
                                     fVec db)
 {
-    int threads = THCNT;
-    addnorm_param_grad_kernel<<<(l->D + threads - 1) / threads,threads>>>(
+    int threads = THDCNT;
+    int blocks = (l->D + threads - 1) / threads;
+    addnorm_param_grad_kernel<<<blocks,threads,0,cuda_stream()>>>(
         (const float*)dy,(const float*)l->xn,(float*)dg,(float*)db,l->B,l->D);
 
-    addnorm_backward_kernel<<<l->B,threads,2 * threads * sizeof(float)>>>(
+    int shm = 2 * threads * sizeof(float);
+    addnorm_backward_kernel<<<l->B,threads,shm,cuda_stream()>>>(
         (const float*)dy,(float*)dx,(const float*)l->xn,
         (const float*)l->gamma,(const float*)l->sdev,l->D);
 }

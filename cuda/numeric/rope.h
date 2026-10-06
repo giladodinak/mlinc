@@ -28,7 +28,7 @@ static inline void rope_init(float* theta, int Dh)
     int n = Dh / 2;
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    rope_init_kernel<<<blocks,threads>>>(theta,Dh);
+    rope_init_kernel<<<blocks,threads,0,cuda_stream()>>>(theta,Dh);
 }
 
 /* Applies RoPE in-place to a single head slice of Q or K.
@@ -83,7 +83,7 @@ static inline void rope_apply_ld(fArr2D x/*[T][Dh]*/,
     int n = T * (Dh / 2);
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    rope_apply_kernel_ld<<<blocks,threads>>>(
+    rope_apply_kernel_ld<<<blocks,threads,0,cuda_stream()>>>(
         (float*)x,theta,inverse,offset,T,Dh,ld);
 }
 

@@ -1,7 +1,8 @@
 /* Copyright (c) 2026 Gilad Odinak */
- /* Language-model token embedding layer functions - CUDA */
+/* Language-model token embedding layer functions - CUDA */
 #include <math.h>
 #include <cuda_runtime.h>
+#include "cuctx.h"
 #include "mem.h"
 #include "cumem.h"
 #include "float.h"
@@ -10,7 +11,7 @@
 #include "random.h"
 #include "lmemb.h"
 
-#define THCNT 256
+#define THDCNT 256
 
 typedef struct devstat_s {
     int* dids;   /* Device copy of current token ids [B*T] */
@@ -248,8 +249,9 @@ fArr2D lmemb_forward(LMEMB* restrict l,
     cudaMemcpy(d->dids,ids,l->BT * sizeof(int),cudaMemcpyHostToDevice);
 
     int n = l->BT * l->E;
-    lmemb_forward_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-        d->dids,(const float*)l->Wx,(float*)l->h,l->BT,l->E);
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    lmemb_forward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                    d->dids,(const float*)l->Wx,(float*)l->h,l->BT,l->E);
     return l->h;
 }
 
@@ -291,19 +293,20 @@ void lmemb_backward(LMEMB* restrict l,
 
     if (l->ntouched > 0) {
         cudaMemcpy(d->drows,l->touched,l->ntouched * sizeof(int),
-                   cudaMemcpyHostToDevice);
+                                                  cudaMemcpyHostToDevice);
 
         if (!l->tied) {
             int n = l->ntouched * l->E;
-            clear_rows_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-                (float*)l->gWx,d->drows,l->ntouched,l->E);
+            int blocks = (n + THDCNT - 1) / THDCNT;
+            clear_rows_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                                (float*)l->gWx,d->drows,l->ntouched,l->E);
         }
     }
 
     int n = l->BT * l->E;
-    lmemb_backward_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-        (const float*)dy,d->dids,(float*)l->gWx,
-        l->BT,l->E,l->padinx);
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    lmemb_backward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+            (const float*)dy,d->dids,(float*)l->gWx,l->BT,l->E,l->padinx);
 }
 
 /* Applies one sparse SGD step to rows touched by lmemb_backward().
@@ -316,7 +319,8 @@ void lmemb_update(LMEMB* restrict l, float learning_rate)
 
     DEVSTAT* d = (DEVSTAT*) l->devstat;
     int n = l->ntouched * l->E;
-    lmemb_update_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-        (float*)l->Wx,(const float*)l->gWx,d->drows,l->ntouched,
-        l->E,learning_rate);
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    lmemb_update_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+        (float*)l->Wx,(const float*)l->gWx,
+        d->drows,l->ntouched,l->E,learning_rate);
 }

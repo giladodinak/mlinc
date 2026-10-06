@@ -1,6 +1,9 @@
-/* Copyright (c) 2023-2024 Gilad Odinak */
-/* Data normalization functions    */
+/* Copyright (c) 2023-2024, 2026 Gilad Odinak */
+/* Data normalization functions */
+#include <cuda_runtime.h>
+#include "cuctx.h"
 #include "float.h"
+#include "arraytypes.h"
 #include "array.h"
 #include "normalize.h"
 
@@ -99,6 +102,8 @@ void normalize(fArr2D x_/*[B][D]*/,
     int n = B * Dx;
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
-    normalize_kernel<<<blocks,threads>>>(
-        (float*)x_,D,Dx,(const float*)mean_,(const float*)sdev_,n);
+    float* x = (float*) x_;
+    const float* mean = (const float*) mean_;
+    const float* sdev = (const float*) sdev_;
+    normalize_kernel<<<blocks,threads,0,cuda_stream()>>>(x,D,Dx,mean,sdev,n);
 }

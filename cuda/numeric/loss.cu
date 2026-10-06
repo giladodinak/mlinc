@@ -1,10 +1,11 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 /* CUDA loss functions and their derivatives */
-#include <cuda_runtime.h>
 #include <math.h>
+#include <cuda_runtime.h>
+#include "cuctx.h"
 #include "loss.h"
 
-#define THCNT 256
+#define THDCNT 256
 
 static __global__ void cross_entropy_loss_kernel(const float* yp,
                                                  const float* yt,
@@ -38,10 +39,11 @@ extern "C" float cross_entropy_loss(const fArr2D yp_,
 {
     float* dloss;
     float loss;
+    int shm = THDCNT * sizeof(float);
 
     cudaMalloc(&dloss,sizeof(float));
-    cross_entropy_loss_kernel<<<1,THCNT,THCNT * sizeof(float)>>>(
-        (const float*) yp_,(const float*) yt_,dloss,T * K);
+    cross_entropy_loss_kernel<<<1,THDCNT,shm,cuda_stream()>>>(
+                   (const float*) yp_,(const float*) yt_,dloss,T * K);
     cudaMemcpy(&loss,dloss,sizeof(float),cudaMemcpyDeviceToHost);
     cudaFree(dloss);
 
@@ -81,9 +83,10 @@ extern "C" float sparse_cross_entropy_loss(const fArr2D yp_,
 {
     float* dloss;
     float loss;
+    int shm = THDCNT * sizeof(float);
 
     cudaMalloc(&dloss,sizeof(float));
-    sparse_cross_entropy_loss_kernel<<<1,THCNT,THCNT * sizeof(float)>>>(
+    sparse_cross_entropy_loss_kernel<<<1,THDCNT,shm,cuda_stream()>>>(
         (const float*) yp_,(const float*) yt_,dloss,T,K);
     cudaMemcpy(&loss,dloss,sizeof(float),cudaMemcpyDeviceToHost);
     cudaFree(dloss);
@@ -126,9 +129,10 @@ extern "C" float mean_square_error(const fArr2D y_batch_,
 {
     float* derror;
     float error;
+    int shm = THDCNT * sizeof(float);
 
     cudaMalloc(&derror,sizeof(float));
-    mean_square_error_kernel<<<1,THCNT,THCNT * sizeof(float)>>>(
+    mean_square_error_kernel<<<1,THDCNT,shm,cuda_stream()>>>(
         (const float*) y_batch_,(const float*) y_true_,derror,M * N);
     cudaMemcpy(&error,derror,sizeof(float),cudaMemcpyDeviceToHost);
     cudaFree(derror);
@@ -154,10 +158,10 @@ extern "C" void dLdy_cross_entropy_loss(const fArr2D yp_,
                                         int T, int K)
 {
     int n = T * K;
-    int blocks = (n + THCNT - 1) / THCNT;
+    int blocks = (n + THDCNT - 1) / THDCNT;
 
-    dLdy_cross_entropy_loss_kernel<<<blocks,THCNT>>>(
-        (const float*) yp_,(const float*) yt_,(float*) dy_,n,1.0f / T);
+    dLdy_cross_entropy_loss_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+             (const float*) yp_,(const float*) yt_,(float*) dy_,n,1.0f / T);
 }
 
 
@@ -182,10 +186,10 @@ extern "C" void dLdy_sparse_cross_entropy_loss(const fArr2D yp_,
                                                int T, int K)
 {
     int n = T * K;
-    int blocks = (n + THCNT - 1) / THCNT;
+    int blocks = (n + THDCNT - 1) / THDCNT;
 
-    dLdy_sparse_cross_entropy_loss_kernel<<<blocks,THCNT>>>(
-        (const float*) yp_,(const float*) yt_,(float*) dy_,T,K);
+    dLdy_sparse_cross_entropy_loss_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                       (const float*) yp_,(const float*) yt_,(float*) dy_,T,K);
 }
 
 
@@ -207,9 +211,8 @@ extern "C" void dLdy_mean_square_error(const fArr2D yp_,
                                        int M, int N)
 {
     int n = M * N;
-    int blocks = (n + THCNT - 1) / THCNT;
+    int blocks = (n + THDCNT - 1) / THDCNT;
 
-    dLdy_mean_square_error_kernel<<<blocks,THCNT>>>(
-        (const float*) yp_,(const float*) yt_,(float*) dy_,
-        n,1.0f / (M * N));
+    dLdy_mean_square_error_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+       (const float*) yp_,(const float*) yt_,(float*) dy_,n,1.0f / (M * N));
 }

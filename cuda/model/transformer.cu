@@ -20,7 +20,7 @@
 #include "dense.h"
 #include "transformer.h"
 
-#define THCNT 256
+#define THDCNT 256
 
 /* Allocates a TRANSFORMER and its sub-layers.
  *
@@ -301,7 +301,7 @@ extern "C" void transformer_backward(TRANSFORMER* restrict l,
     const int BT = l->BT;
     const int D = l->D;
     const int n = BT * D;
-
+    int blocks = (n + THDCNT - 1) / THDCNT;
 
     /* Step 4 backward - second residual add + layer norm
      * (reverse of Y = LayerNorm(norm1_out + ffn2_out)):
@@ -336,7 +336,7 @@ extern "C" void transformer_backward(TRANSFORMER* restrict l,
      * d_norm1_in += d_norm2_in
      * (norm1_out feeds both the FFN branch and the AddNorm2 residual)
      */
-    transformer_add_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
+    transformer_add_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
                                (float*)l->d_norm1_in,(float*)l->d_norm2_in,n);
 
     /* Step 2 backward - first residual add + layer norm
@@ -362,6 +362,6 @@ extern "C" void transformer_backward(TRANSFORMER* restrict l,
     mha_backward(l->mha,d_mha_masked,X,dX,lyr);
 
     if (dX != NULL)
-        transformer_add_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
+        transformer_add_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
                                            (float*)dX,(float*)l->d_mha_out,n);
 }

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
+#include "cuctx.h"
 #include "mem.h"
 #include "cuflt.h"
 #include "random.h"
@@ -379,8 +380,8 @@ void mha_forward(MHA* restrict l,
             fArr2D Ah = &Att[base];
             matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
 
-            scale_and_mask_scores<<<blocks,threads>>>(
-                   (float*) Ah,(const int *) pad_mask,b,T,lookahead,scale);
+            scale_and_mask_scores<<<blocks,threads,0,cuda_stream()>>>(
+                    (float*) Ah,(const int *) pad_mask,b,T,lookahead,scale);
 
             /* Compute attention probabilities - Softmax - in Eq. 1 */
             softmax(Ah,T,T);
@@ -499,7 +500,8 @@ void mha_forward_step(MHA* restrict l,
 
         /* Attention of the new token over the n valid cached keys */
         matmulT(AttTemp,Qh,&Kc[hbase],1,Dh,n);
-        scale_scores<<<blocks,threads>>>((float*)AttTemp,n,scale);
+        scale_scores<<<blocks,threads,0,cuda_stream()>>>(
+                                            (float*)AttTemp,n,scale);
         softmax(AttTemp,1,n);
         matmul(Oh,AttTemp,&Vc[hbase],1,n,Dh);
     }
@@ -665,7 +667,8 @@ void mha_backward(MHA* restrict l,
 
             d_softmax(dScores,dAtt,&Att[base],T,T);
 
-            scale_scores<<<blocks,threads>>>((float*)dScores,T * T,scale);
+            scale_scores<<<blocks,threads,0,cuda_stream()>>>(
+                                         (float*)dScores,T * T,scale);
 
             /* Step 3c backward - reverse Scores = Qh @ Kh.T:
              * dQh = dScores @ Kh

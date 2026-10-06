@@ -1,6 +1,7 @@
-/* Copyright (c) 2023-2024 Gilad Odinak */
+/* Copyright (c) 2026 Gilad Odinak */
 /* Function that updates neural network weights */
 #include <cuda_runtime.h>
+#include "cuctx.h"
 #include "arraytypes.h"
 #include "linear.h"
 
@@ -27,8 +28,11 @@ extern "C" void linear_update(fArr2D w_/*[M][N]*/, fArr2D g_/*[M][N]*/,
 {
     int n = M * N;
     int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    float* w = (float*) w_;
+    const float* g = (float*) g_;
 
-    linear_update_kernel<<<(n + threads - 1) / threads,threads>>>(
-        (float*)w_,(const float*)g_,n,learning_rate,weight_decay);
+    linear_update_kernel<<<blocks,threads,0,cuda_stream()>>>(
+                                          w,g,n,learning_rate,weight_decay);
 }
 

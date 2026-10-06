@@ -40,6 +40,7 @@
 #include <strings.h>
 #include <math.h>
 #include <cuda_runtime.h>
+#include "cuctx.h"
 #include "float.h"
 #include "mem.h"
 #include "random.h"
@@ -453,13 +454,12 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
     }
     else {
         graph_record(graph,GRAPH_FORWARD,GRAPH_RECORD_ON);
-        cudaStream_t stream = graph_stream(graph);
 
         for (int t = 0; t < B; t++) {
             /* [f i cc o] += h[t-1] @ U.T */
             addinnermul(f[t],h[t-1],l->Uf,4 * S,S);
 
-            lstm_forward_kernel<<<blocks,THCNT,0,stream>>>(
+            lstm_forward_kernel<<<blocks,THCNT,0,cuda_stream()>>>(
                 (float*)f[t],(const float*)l->bf,(const float*)c[t-1],
                 (float*)c[t],(float*)h[t],S,l->use_bias);
         }
@@ -584,7 +584,6 @@ extern "C" void lstm_backward(LSTM* restrict l,
     }
     else {
         graph_record(graph,GRAPH_BACKWARD,GRAPH_RECORD_ON);
-        cudaStream_t stream = graph_stream(graph);
 
         for (int t = B - 1; t >= 0; t--) {
             const float* ft = (const float*) f[t];
@@ -592,7 +591,7 @@ extern "C" void lstm_backward(LSTM* restrict l,
             const float* cct = (const float*) cc[t];
             const float* ot = (const float*) o[t];
 
-            lstm_backward_kernel<<<blocks,THCNT,0,stream>>>(
+            lstm_backward_kernel<<<blocks,THCNT,0,cuda_stream()>>>(
                 (const float*) dy[t],ft,it,cct,ot,
                 (const float*) c[t-1],(const float*) c[t],
                 dh_next,dc_next,dg[t],(float*) l->gbf,S,l->use_bias);

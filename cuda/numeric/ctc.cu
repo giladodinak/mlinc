@@ -6,13 +6,14 @@
  */
 #include <math.h>
 #include <cuda_runtime.h>
+#include "cuctx.h"
 #include "mem.h"
 #include "float.h"
 #include "array.h"
 #include "editdist.h"
 #include "ctc.h"
 
-#define THCNT 256
+#define THDCNT 256
 
 
 /* Equation 7.18 */
@@ -291,9 +292,9 @@ extern "C" float ctc_loss(CTC* ctc,
      * ctc->label is temporarily:
      *     [ypc[T] | ytc[T]]
      */
-    int blocks = (T + THCNT - 1) / THCNT;
+    int blocks = (T + THDCNT - 1) / THDCNT;
 
-    ctc_decode_kernel<<<blocks,THCNT>>>(
+    ctc_decode_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (const float*)yp_,
         (const float*)yt_,
         (float*)ctc->yp,
@@ -321,16 +322,16 @@ extern "C" float ctc_loss(CTC* ctc,
     /* Note that the referenced equations use 1-based indexing,
      * while C arrays are 0-based; the below code is adjusted accordingly.
      */
-    ctc_forward_backward_kernel<<<1,THCNT>>>(
+    ctc_forward_backward_kernel<<<1,THDCNT,0,cuda_stream()>>>(
         (const float*)ctc->yp,
         (const int*)ctc->label,
         (float*)ctc->alpha,
         (float*)ctc->beta,
         T,L,ctc->S,blank);
 
-    blocks = (T + THCNT - 1) / THCNT;
+    blocks = (T + THDCNT - 1) / THDCNT;
 
-    ctc_prob_kernel<<<blocks,THCNT>>>(
+    ctc_prob_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (const float*)ctc->alpha,
         (const float*)ctc->beta,
         (float*)ctc->prob,
@@ -384,9 +385,9 @@ extern "C" void dLdy_ctc_loss(CTC* ctc,
     (void) yt_;
 
     int n = T * L;
-    int blocks = (n + THCNT - 1) / THCNT;
+    int blocks = (n + THDCNT - 1) / THDCNT;
 
-    dLdy_ctc_loss_kernel<<<blocks,THCNT>>>(
+    dLdy_ctc_loss_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (const float*)ctc->yp,
         (const int*)ctc->label,
         (const float*)ctc->alpha,

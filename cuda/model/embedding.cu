@@ -2,6 +2,7 @@
 /* Embedding neural network layer functions - CUDA */
 #include <math.h>
 #include <cuda_runtime.h>
+#include "cuctx.h"
 #include "float.h"
 #include "mem.h"
 #include "cuflt.h"
@@ -10,7 +11,7 @@
 #include "random.h"
 #include "embedding.h"
 
-#define THCNT 256
+#define THDCNT 256
 
 typedef struct devstat_s {
     float* dX;   /* Device copy of input contexts [B][M] */
@@ -144,8 +145,9 @@ fArr2D embedding_forward(EMBEDDING* restrict l,
     cufltcpy(d->dX,X,l->B * l->M);
 
     int n = l->B * l->E;
-    embedding_forward_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-        d->dX,(const float*)l->Wx,(float*)l->h,l->B,l->M,l->E);
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    embedding_forward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                   d->dX,(const float*)l->Wx,(float*)l->h,l->B,l->M,l->E);
     return l->h;
 }
 
@@ -181,19 +183,20 @@ void embedding_backward(EMBEDDING* restrict l,
         *grcnt = nrows;
 
         if (nrows > 0) {
-            cudaMemcpy(d->drows,grows,nrows * sizeof(int),cudaMemcpyHostToDevice);
+            cudaMemcpy(d->drows,grows,
+                       nrows * sizeof(int),cudaMemcpyHostToDevice);
             int n = nrows * l->E;
-            clear_rows_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-                (float*)gWx,d->drows,nrows,l->E);
+            int blocks = (n + THDCNT - 1) / THDCNT;
+            clear_rows_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                                           (float*)gWx,d->drows,nrows,l->E);
         }
     }
     else {
         cufltclr(gWx,l->D * l->E);
     }
 
-    embedding_backward_kernel<<<l->B,THCNT>>>(
-        (const float*)dy,d->dX,(float*)gWx,
-        l->B,l->M,l->E,l->padinx);
+    embedding_backward_kernel<<<l->B,THDCNT,0,cuda_stream()>>>(
+               (const float*)dy,d->dX,(float*)gWx,l->B,l->M,l->E,l->padinx);
 }
 
 void embedding_update(EMBEDDING* restrict l,
@@ -207,6 +210,7 @@ void embedding_update(EMBEDDING* restrict l,
     cudaMemcpy(d->drows,grows,grcnt * sizeof(int),cudaMemcpyHostToDevice);
 
     int n = grcnt * l->E;
-    embedding_update_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    embedding_update_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (float*)l->Wx,(const float*)gWx,d->drows,grcnt,l->E,learning_rate);
 }

@@ -2,28 +2,11 @@
 /* Accuracy evalutation functions  */
 #include <math.h>
 #include <cuda_runtime.h>
+#include "cuctx.h"
 #include "arraytypes.h"
 #include "accuracy.h"
 
 #define THDCNT 256
-static __global__ void sum_kernel(const float* x, float* sum, int n)
-{
-    __shared__ float s[THDCNT];
-
-    int t = threadIdx.x;
-    int i = blockIdx.x * blockDim.x + t;
-    s[t] = (i < n) ? x[i] : 0.0f;
-    __syncthreads();
-
-    for (int d = blockDim.x / 2; d > 0; d >>= 1) {
-        if (t < d)
-            s[t] += s[t + d];
-        __syncthreads();
-    }
-
-    if (t == 0)
-        atomicAdd(sum,s[0]);
-}
 
 static __global__ void r2_dist_kernel(const float* yp, const float* yt,
                                       float ytmean, float* ypdist,
@@ -62,6 +45,25 @@ static __global__ void r2_dist_kernel(const float* yp, const float* yt,
     }
 }
 
+static __global__ void sum_kernel(const float* x, float* sum, int n)
+{
+    __shared__ float s[THDCNT];
+
+    int t = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + t;
+    s[t] = (i < n) ? x[i] : 0.0f;
+    __syncthreads();
+
+    for (int d = blockDim.x / 2; d > 0; d >>= 1) {
+        if (t < d)
+            s[t] += s[t + d];
+        __syncthreads();
+    }
+
+    if (t == 0)
+        atomicAdd(sum,s[0]);
+}
+
 /* Calculates the R-squared factor between predicted and true values.
  * 
  * This function calculates the numerator of the R-squared factor between M 
@@ -87,6 +89,8 @@ float R2_sum(const fArr2D yp_/*[M][N]*/,
     int n = M * N;
     int threads = THDCNT;
     int blocks = (n + threads - 1) / threads;
+    const float* yp = (const float*) yp_;
+    const float* yt = (const float*) yt_;
 
     float* d_sum;
     float* d_ypdist;
@@ -98,14 +102,14 @@ float R2_sum(const fArr2D yp_/*[M][N]*/,
     cudaMemset(d_ypdist,0,sizeof(float));
     cudaMemset(d_ytdist,0,sizeof(float));
 
-    sum_kernel<<<blocks,threads>>>((const float*)yt_,d_sum,n);
+    sum_kernel<<<blocks,threads,0,cuda_stream()>>>(yt,d_sum,n);
 
     float ytsum;
     cudaMemcpy(&ytsum,d_sum,sizeof(float),cudaMemcpyDeviceToHost);
     float ytmean = ytsum / n;
 
-    r2_dist_kernel<<<blocks,threads>>>(
-        (const float*)yp_,(const float*)yt_,ytmean,d_ypdist,d_ytdist,n);
+    r2_dist_kernel<<<blocks,threads,0,cuda_stream()>>>(
+                                    yp,yt,ytmean,d_ypdist,d_ytdist,n);
 
     float ypdist, ytdist;
     cudaMemcpy(&ypdist,d_ypdist,sizeof(float),cudaMemcpyDeviceToHost);
@@ -171,8 +175,10 @@ float match_sum(const fArr2D yp_/*[M][K]*/,
 
     int threads = THDCNT;
     int blocks = (M + threads - 1) / threads;
-    match_sum_kernel<<<blocks,threads>>>(
-        (const float*)yp_,(const float*)yt_,M,K,d_match_cnt);
+    const float* yp = (const float*) yp_;
+    const float* yt = (const float*) yt_;
+    
+    match_sum_kernel<<<blocks,threads,0,cuda_stream()>>>(yp,yt,M,K,d_match_cnt);
 
     int match_cnt;
     cudaMemcpy(&match_cnt,d_match_cnt,sizeof(int),cudaMemcpyDeviceToHost);

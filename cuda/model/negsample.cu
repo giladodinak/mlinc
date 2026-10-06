@@ -19,7 +19,7 @@ typedef struct devstat_s {
     int* dcorrect;  /* Device correct-count accumulator               */
 } DEVSTAT;
 
-#define THCNT 256
+#define THDCNT 256
 
 /* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
  * vocabulary K is too large for a full softmax. Its forward pass is the
@@ -391,17 +391,20 @@ float negsample_loss(NEGSAMPLE* restrict l,
                cudaMemcpyHostToDevice);
 
     int ng = l->ntouched * E;
-    if (ng > 0)
-        clear_rows_kernel<<<(ng + THCNT - 1) / THCNT,THCNT>>>(
-            (float*)l->gWo,d->dtouched,l->ntouched,E);
+    if (ng > 0) {
+        int blocks = (ng + THDCNT - 1) / THDCNT;
+        clear_rows_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                            (float*)l->gWo,d->dtouched,l->ntouched,E);
+    }
 
     cufltclr(d->dloss,1);
     if (correct != NULL)
         cudaMemset(d->dcorrect,0,sizeof(int));
 
-    negsample_loss_kernel<<<cnt,THCNT,THCNT * sizeof(float)>>>(
-        (const float*)h_,d->dsamples,(float*)dh_,
-        (const float*)l->Wo,(float*)l->gWo,
+    int shm = THDCNT * sizeof(float);
+    negsample_loss_kernel<<<cnt,THDCNT,shm,cuda_stream()>>>(
+        (const float*) h_,d->dsamples,(float*)dh_,
+        (const float*) l->Wo,(float*)l->gWo,
         E,n_neg,cnt,d->dloss,(correct != NULL) ? d->dcorrect : NULL);
 
     float loss = 0.0f;
@@ -432,7 +435,8 @@ void negsample_update(NEGSAMPLE* restrict l,
     const int E = l->E;
 
     int n = l->ntouched * E;
-    negsample_update_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    negsample_update_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (float*)l->Wo,(const float*)l->gWo,d->dtouched,l->ntouched,E,
         learning_rate,weight_decay);
 }

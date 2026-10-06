@@ -6,7 +6,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <cuda_runtime.h>
-
+#include "cuctx.h"
 #include "mem.h"
 #include "float.h"
 #include "arraytypes.h"
@@ -14,7 +14,7 @@
 #include "activation.h"
 #include "dense.h"
 
-#define THCNT 256
+#define THDCNT 256
 
 static __device__ unsigned int dense_hash(unsigned int x)
 {
@@ -113,9 +113,9 @@ extern "C" void dense_init(DENSE* l, int input_dim, int batch_size, int training
 
     int n = l->D * l->S;
     float scale = sqrtf(2.0f / (l->D + l->S));
-    dense_init_weights_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-        (float*)l->Wx,n,scale);
-
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    dense_init_weights_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                                                     (float*)l->Wx,n,scale);
     if (l->training) {
         l->gWx = (fArr2D)cuallocmem(l->D,l->S,float);
         if (l->use_bias)
@@ -174,8 +174,9 @@ extern "C" fArr2D dense_forward(DENSE* restrict l,
 
     if (l->use_bias) {
         int n = l->B * l->S;
-        add_bias_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-            (float*)l->h,(const float*)l->b,l->B,l->S);
+        int blocks = (n + THDCNT - 1) / THDCNT;
+        add_bias_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                             (float*)l->h,(const float*)l->b,l->B,l->S);
     }
 
     switch (l->activation) {
@@ -221,8 +222,9 @@ extern "C" void dense_backward(DENSE* restrict l,
     Tmatmul(l->gWx,X,dy,l->D,l->B,l->S);
 
     if (l->use_bias) {
-        bias_gradient_kernel<<<(l->S + THCNT - 1) / THCNT,THCNT>>>(
-            (float*)l->gb,(const float*)dy,l->B,l->S);
+        int blocks = (l->S + THDCNT - 1) / THDCNT;
+        bias_gradient_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                                  (float*)l->gb,(const float*)dy,l->B,l->S);
     }
 
     if (dx != NULL)

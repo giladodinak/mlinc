@@ -4,7 +4,8 @@
 #include <stdlib.h>
 #include <cuda_runtime.h>
 
-#include "cumem.h"
+#include "cuctx.h"
+#include "mem.h"
 #include "addnorm.h"
 
 static __global__ void addnorm_init_gamma_kernel(float* gamma, int D)
@@ -16,11 +17,7 @@ static __global__ void addnorm_init_gamma_kernel(float* gamma, int D)
 
 extern "C" ADDNORM* addnorm_create()
 {
-    ADDNORM* l = (ADDNORM*)calloc(1,sizeof(ADDNORM));
-    if (l == NULL) {
-        fprintf(stderr,"addnorm_create: out of memory\n");
-        exit(1);
-    }
+    ADDNORM* l = (ADDNORM*) allocmem(1,1,ADDNORM);
     return l;
 }
 
@@ -35,20 +32,20 @@ extern "C" void addnorm_init(ADDNORM* l, int input_dim, int batch_size)
     l->gamma = (fVec)cuallocmem(input_dim,1,float);
     l->beta  = (fVec)cuallocmem(input_dim,1,float);
 
-    int threads = THCNT;
-    addnorm_init_gamma_kernel<<<(input_dim + threads - 1) / threads,threads>>>(
-        (float*)l->gamma,input_dim);
+    int thds = THDCNT;
+    int blks = (input_dim + thds - 1) / thds;
+    float* gamma = (float*) l->gamma;
+    addnorm_init_gamma_kernel<<<blks,thds,0,cuda_stream()>>>(gamma,input_dim);
 }
 
 extern "C" void addnorm_free(ADDNORM* l)
 {
-    if (l == NULL)
-        return;
+    if (l == NULL) return;
 
     cufreemem(l->mean);
     cufreemem(l->sdev);
     cufreemem(l->xn);
     cufreemem(l->gamma);
     cufreemem(l->beta);
-    free(l);
+    freemem(l);
 }

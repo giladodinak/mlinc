@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <curand_kernel.h>
+#include "cuctx.h"
 #include "float.h"
 #include "mem.h"
 #include "random.h"
@@ -192,7 +193,7 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
     int quads = (n + 3) / 4;
     int blocks = (quads + THDCNT - 1) / THDCNT;
 
-    dropout_forward_kernel<<<blocks,THDCNT>>>(
+    dropout_forward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (float*) mx_,(float*) l->mask,n,rate,rng->seed,rng->counter);
 
     rng->counter += 4; /* Number of random numbers generated */
@@ -217,6 +218,6 @@ void dropout_backward(DROPOUT* restrict l,
     if (blocks < 1)
         blocks = 1;
 
-    dropout_backward_kernel<<<blocks,THDCNT>>>(
+    dropout_backward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (const float*) in_,(const float*) l->mask,(float*) out_,n);
 }

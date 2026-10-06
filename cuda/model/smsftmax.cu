@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <cuda_runtime.h>
+#include "cuctx.h"
 #include "mem.h"
 #include "cumem.h"
 #include "cuflt.h"
@@ -12,7 +13,7 @@
 #include "random.h"
 #include "smsftmax.h"
 
-#define THCNT 256
+#define THDCNT 256
 
 typedef struct devstat_s {
     int* hsamples;    /* Host target/negative samples [B][n_neg+1]  */
@@ -498,16 +499,17 @@ float smsftmax_loss(SMSFTMAX* restrict l,
                    l->ntouched * sizeof(int),cudaMemcpyHostToDevice);
 
         int n = l->ntouched * E;
-        clear_rows_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
-            (float*)gWo,d->dtouched,l->ntouched,E);
+        int blocks = (n + THDCNT - 1) / THDCNT;
+        clear_rows_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                              (float*)gWo,d->dtouched,l->ntouched,E);
     }
 
     cufltclr(d->dloss,1);
     if (correct != NULL)
         cudaMemset(d->dcorrect,0,sizeof(int));
 
-    size_t shmem = (THCNT + 2 * k) * sizeof(float);
-    smsftmax_loss_kernel<<<cnt,THCNT,shmem>>>(
+    size_t shm = (THDCNT + 2 * k) * sizeof(float);
+    smsftmax_loss_kernel<<<cnt,THDCNT,shm,cuda_stream()>>>(
         (const float*)h,d->dsamples,(float*)dh,
         (const float*)l->Wo,(float*)gWo,d->dlogq,
         E,k,cnt,d->dloss,(correct != NULL) ? d->dcorrect : NULL);
@@ -532,7 +534,8 @@ void smsftmax_update(SMSFTMAX* restrict l, fArr2D gWo,
 
     DEVSTAT* d = (DEVSTAT*) l->devstat;
     int n = l->ntouched * l->E;
-    smsftmax_update_kernel<<<(n + THCNT - 1) / THCNT,THCNT>>>(
+    int blocks = (n + THDCNT - 1) / THDCNT;
+    smsftmax_update_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (float*)l->Wo,(const float*)gWo,d->dtouched,l->ntouched,l->E,
         learning_rate,weight_decay);
 }
