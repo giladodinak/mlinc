@@ -74,6 +74,7 @@ typedef struct {
     fArr2D Kh_cache;     /* [H*T][Dh] rotated keys ring buffer */
     fArr2D Vh_cache;     /* [H*T][Dh] values ring buffer       */
 
+    void* state; /* Implementation specific (NULL if not used) */
 } MHA;
 
 #ifdef __cplusplus

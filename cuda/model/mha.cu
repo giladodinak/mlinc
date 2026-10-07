@@ -1,7 +1,7 @@
 /* Copyright (c) 2026 Gilad Odinak */
 /* Multi-Head Attention layer functions */
 /* References:
- * Attention Is All You Need, 2023. https://arxiv.org/pdf/1706.03762v7 
+ * Attention Is All You Need, 2023. https://arxiv.org/pdf/1706.03762v7
  * Roformer: Enhanced transformer with Rotary Position Embedding, 2023.
  * https://arxiv.org/pdf/2104.09864
  */
@@ -18,6 +18,7 @@
 #include "arraytypes.h"
 #include "array.h"
 #include "mha.h"
+#include "graph.h"
 
 /* Creates a Multi-Head Attention layer.
  *
@@ -129,24 +130,25 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
     rope_init(l->theta,l->Dh);
 
-    if (!training) return;
+    if (training) {
+        l->dOut = (fArr2D) cuallocmem(l->BT,l->D,float);
 
-    l->dOut = (fArr2D) cuallocmem(l->BT,l->D,float);
+        l->dQ = (fArr2D) cuallocmem(l->BT,l->D,float);
+        l->dK = (fArr2D) cuallocmem(l->BT,l->D,float);
+        l->dV = (fArr2D) cuallocmem(l->BT,l->D,float);
 
-    l->dQ = (fArr2D) cuallocmem(l->BT,l->D,float);
-    l->dK = (fArr2D) cuallocmem(l->BT,l->D,float);
-    l->dV = (fArr2D) cuallocmem(l->BT,l->D,float);
+        /* Not used: l->dQh l->dKh l->dVh */
 
-    /* Not used: l->dQh l->dKh l->dVh */
+        /* Not used: l->dOh */
+        l->dAtt = (fArr2D) cuallocmem(l->T,l->T,float);
+        l->dScores = (fArr2D) cuallocmem(l->T,l->T,float);
 
-    /* Not used: l->dOh */
-    l->dAtt = (fArr2D) cuallocmem(l->T,l->T,float);
-    l->dScores = (fArr2D) cuallocmem(l->T,l->T,float);
-
-    l->gWq = (fArr2D) cuallocmem(l->D,l->D,float);
-    l->gWk = (fArr2D) cuallocmem(l->D,l->D,float);
-    l->gWv = (fArr2D) cuallocmem(l->D,l->D,float);
-    l->gWo = (fArr2D) cuallocmem(l->D,l->D,float);
+        l->gWq = (fArr2D) cuallocmem(l->D,l->D,float);
+        l->gWk = (fArr2D) cuallocmem(l->D,l->D,float);
+        l->gWv = (fArr2D) cuallocmem(l->D,l->D,float);
+        l->gWo = (fArr2D) cuallocmem(l->D,l->D,float);
+    }
+    l->state = graph_create();
 }
 
 /* Releases all memory owned by an MHA layer.
@@ -160,6 +162,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
  */
 void mha_free(MHA* l)
 {
+    graph_destroy((GRAPH*) l->state);
     cufreemem(l->Wq);
     cufreemem(l->Wk);
     cufreemem(l->Wv);
@@ -222,9 +225,9 @@ static __global__ void scale_and_mask_scores(float* Scores,
     if (k < n) {
         int i = k / T;
         int j = k % T;
-        
+
         float v;
-        
+
         /* Causal / lookahead masking (Sec. 3.2.3, Fig. 2 generalised):
          *   lookahead <  0 : skip - fully bidirectional attention
          *   lookahead == 0 : strictly causal (mask every future frame)
@@ -260,7 +263,7 @@ static __global__ void scale_and_mask_scores(float* Scores,
  *               If NULL, no padding mask is applied.
  *   Y         : Output 2D array of shape [B*T][D];
                  if NULL, output projection is skipped.
- *   offset    : Position index of the first token in the sequence
+ *   offset    : Must be 0, not used
  *   training  : Non-zero during training (applies attention dropout); 0
  *               during inference/generation (no dropout, deterministic).
  *   lyr       : Layer index.
@@ -291,12 +294,10 @@ static __global__ void scale_and_mask_scores(float* Scores,
  *     Out = Concat(Oh_0, ..., Oh_{H-1})
  *     Y   = Out @ Wo if Y != NULL
  *
- * Notes: 
+ * Notes:
  *  1. Padding is not allowed at the beginning of a sequence;
  *     only trailing (right-aligned) padding is supported.
- *  2. Offset is used when training overlapping windows:
- *     each batch's start position advances by the window stride.
- *  3. Q, K, and V stay in their natural [B*T][D] storage.  A head is a
+ *  2. Q, K, and V stay in their natural [B*T][D] storage.  A head is a
  *     strided view Q[b,t,h,:], K[b,t,h,:], V[b,t,h,:], where D=H*Dh.
  *     Splitting into heads is therefore a logical view, not a data copy.
  *     Att is stored per (b,h) for backward.
@@ -320,6 +321,11 @@ void mha_forward(MHA* restrict l,
     const int Dh = l->Dh;
     const int BT = l->BT;
     const int lookahead = l->lookahead;
+
+    if (offset != 0) {
+        fprintf(stderr,"mha_forward: non zero offset not supported\n");
+        exit(1);
+    }
 
     typedef float (*ArrDD)[D];
     typedef float (*ArrBTD)[D];
@@ -351,56 +357,69 @@ void mha_forward(MHA* restrict l,
     matmul(V,X,Wv,BT,D,D);
     cufltclr(Out,BT * D);
 
-    for (int b = 0; b < B; b++) {
-        for (int h = 0; h < H; h++) {
+    GRAPH* graph = (GRAPH*) l->state;
 
-            int base = (b * H + h) * T; /* Row offset into [BHT][...] buffers */
+    int gid = training ? GRAPH_FORWARD_TRAIN : GRAPH_FORWARD_INFER;
+    if (graph_record_exists(graph,gid)) {
+        graph_play(graph,gid);
+    }
+    else {
+        graph_record(graph,gid,GRAPH_RECORD_ON);
 
-            /* Step 2 - Split into heads (Sec. 3.2.2).
-             *
-             * Notice that Q/K/V are physically [B*T][D], which is also
-             * [B][T][H][Dh].  For this (b,h), Qh/Kh/Vh point at the first
-             * Dh-vector and successive token rows are D elements apart
-             */
-            fArr2D Qh = (fArr2D) &Q[b * T][h * Dh];
-            fArr2D Kh = (fArr2D) &K[b * T][h * Dh];
-            fArr2D Vh = (fArr2D) &V[b * T][h * Dh];
+        /* Apply RoPE to the entire batch */
+        rope_batch_apply_ld(Q,l->theta,0,0,B,H,T,Dh,D);
+        rope_batch_apply_ld(K,l->theta,0,0,B,H,T,Dh,D);
 
-            rope_apply_ld(Qh,l->theta,0,offset,T,Dh,D);
-            rope_apply_ld(Kh,l->theta,0,offset,T,Dh,D);
+        for (int b = 0; b < B; b++) {
+            for (int h = 0; h < H; h++) {
 
-            /* Step 3 - Scaled dot-product Attention (in Eq. 1, Sec. 3.2.1):
-             * Att  = Qh @ Kh.T
-             * Att /= sqrt(Dh)
-             * mask(Att)
-             * softmax(Att)
-             * [optional] dropout(Att)
-             * Oh = Att @ Vh
-             */
-            fArr2D Ah = &Att[base];
-            matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
+                int base = (b * H + h) * T; /* Row offset into [BHT][...] buffers */
 
-            scale_and_mask_scores<<<blocks,threads,0,cuda_stream()>>>(
-                    (float*) Ah,(const int *) pad_mask,b,T,lookahead,scale);
+                /* Step 2 - Split into heads (Sec. 3.2.2).
+                 *
+                 * Notice that Q/K/V are physically [B*T][D], which is also
+                 * [B][T][H][Dh].  For this (b,h), Qh/Kh/Vh point at the first
+                 * Dh-vector and successive token rows are D elements apart
+                 */
+                fArr2D Qh = (fArr2D) &Q[b * T][h * Dh];
+                fArr2D Kh = (fArr2D) &K[b * T][h * Dh];
+                fArr2D Vh = (fArr2D) &V[b * T][h * Dh];
 
-            /* Compute attention probabilities - Softmax - in Eq. 1 */
-            softmax(Ah,T,T);
+                /* Step 3 - Scaled dot-product Attention (in Eq. 1, Sec. 3.2.1):
+                 * Att  = Qh @ Kh.T
+                 * Att /= sqrt(Dh)
+                 * mask(Att)
+                 * softmax(Att)
+                 * [optional] dropout(Att)
+                 * Oh = Att @ Vh
+                 */
+                fArr2D Ah = &Att[base];
+                matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
 
-            if (training && l->training)
-                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
-                    cufltcpy(AttTemp,Ah,T * T);
-                    dropout_forward(l->dropout[b * H + h],AttTemp);
-                    Ah = AttTemp;
-                }
+                scale_and_mask_scores<<<blocks,threads,0,cuda_stream()>>>(
+                        (float*) Ah,(const int *) pad_mask,b,T,lookahead,scale);
 
-            /* In Eq. 1: Attention @ V */
-            /* Write this head directly into its slice of Out.  The output
-             * is logically [T][Dh] with row stride D, so concatenation is
-             * again just a view: no Oh -> Out copies are required.
-             */
-            fArr2D Oh = (fArr2D) &Out[b * T][h * Dh];
-            matmul_ld(Oh,Ah,Vh,T,T,Dh,T,D,D);
+                /* Compute attention probabilities - Softmax - in Eq. 1 */
+                softmax(Ah,T,T);
+
+                if (training && l->training)
+                    if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
+                        cufltcpy(AttTemp,Ah,T * T);
+                        dropout_forward(l->dropout[b * H + h],AttTemp);
+                        Ah = AttTemp;
+                    }
+
+                /* In Eq. 1: Attention @ V */
+                /* Write this head directly into its slice of Out.  The output
+                 * is logically [T][Dh] with row stride D, so concatenation is
+                 * again just a view: no Oh -> Out copies are required.
+                 */
+                fArr2D Oh = (fArr2D) &Out[b * T][h * Dh];
+                matmul_ld(Oh,Ah,Vh,T,T,Dh,T,D,D);
+            }
         }
+        graph_record(graph,gid,GRAPH_RECORD_OFF);
+        graph_play(graph,gid);
     }
     /* Step 4 continued - output projection (Eq. 2, Sec. 3.2.2):
      * Y = Out @ Wo
@@ -427,6 +446,8 @@ void mha_forward(MHA* restrict l,
  *   Y      - output row [1][D]
  *   offset - absolute position of this token (0-based)
  *   lyr    - layer index (informational)
+ *
+ * Note that mha_forward_step work only with models trained with lookahead=0.
  */
 void mha_forward_step(MHA* restrict l,
                       const fArr2D restrict x/*[1][D]*/,
@@ -453,7 +474,7 @@ void mha_forward_step(MHA* restrict l,
     Arr1D K = (Arr1D) l->K;
     Arr1D V = (Arr1D) l->V;
     Arr1D Out = (Arr1D) l->Out;
-    
+
     if (l->Kh_cache == NULL) {
         l->Kh_cache = (fArr2D) cuallocmem(H * T,Dh,float);
         l->Vh_cache = (fArr2D) cuallocmem(H * T,Dh,float);
@@ -481,7 +502,7 @@ void mha_forward_step(MHA* restrict l,
     for (int h = 0; h < H; h++) {
 
         int hbase = h * T; /* This head's cache offset */
-        
+
         /* Q/K/V are [1][D] arrays for the current token.
          * Qh/Kh/Vh/Oh are [1][Dh] views for head h.
          */
@@ -621,71 +642,82 @@ void mha_backward(MHA* restrict l,
     cufltclr(dK,BT * D);
     cufltclr(dV,BT * D);
 
-    for (int b = 0; b < B; b++) {
-        for (int h = 0; h < H; h++) {
+    GRAPH* graph = (GRAPH*) l->state;
 
-            int base = (b * H + h) * T; /* row offset into [BHT][...] buffers */
+    if (graph_record_exists(graph,GRAPH_BACKWARD)) {
+        graph_play(graph,GRAPH_BACKWARD);
+    }
+    else {
+        graph_record(graph,GRAPH_BACKWARD,GRAPH_RECORD_ON);
 
-            /* Per-head views.  Each row contains Dh contiguous values;
-             * Q/K/V (and the derivaties) are physically [B*T][D], which
-             * is also [B][T][H][Dh].  For this (b,h), Qh/Kh/Vh (and the
-             * derivaties) point at the first Dh-vector and successive
-             * rows are D elements apart.
-             */
-            fArr2D Qh  = (fArr2D) &Q[b * T][h * Dh];
-            fArr2D Kh  = (fArr2D) &K[b * T][h * Dh];
-            fArr2D Vh  = (fArr2D) &V[b * T][h * Dh];
-            fArr2D dOh = (fArr2D) &dOut[b * T][h * Dh];
-            fArr2D dQh = (fArr2D) &dQ[b * T][h * Dh];
-            fArr2D dKh = (fArr2D) &dK[b * T][h * Dh];
-            fArr2D dVh = (fArr2D) &dV[b * T][h * Dh];
+        for (int b = 0; b < B; b++) {
+            for (int h = 0; h < H; h++) {
 
-            /* Step 3a backward - reverse Oh = Att @ Vh:
-             * dVh  = Att.T @ dOh
-             * dAtt = dOh @ Vh.T
-             *
-             * Note that stored Att contains the pre-dropout values.
-             * With dropout, AttTemp reconstructs the post-dropout values
-             * needed for the dVh calculation.
-             */
-            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
-                /* Use AttTemp as scratch buffer */
-                dropout_backward(l->dropout[b * H + h],&Att[base],AttTemp);
-                Tmatmul_ld(dVh,AttTemp,dOh,T,T,Dh,T,D,D);
+                int base = (b * H + h) * T; /* row offset into [BHT][...] buffers */
+
+                /* Per-head views.  Each row contains Dh contiguous values;
+                 * Q/K/V (and the derivaties) are physically [B*T][D], which
+                 * is also [B][T][H][Dh].  For this (b,h), Qh/Kh/Vh (and the
+                 * derivaties) point at the first Dh-vector and successive
+                 * rows are D elements apart.
+                 */
+                fArr2D Qh  = (fArr2D) &Q[b * T][h * Dh];
+                fArr2D Kh  = (fArr2D) &K[b * T][h * Dh];
+                fArr2D Vh  = (fArr2D) &V[b * T][h * Dh];
+                fArr2D dOh = (fArr2D) &dOut[b * T][h * Dh];
+                fArr2D dQh = (fArr2D) &dQ[b * T][h * Dh];
+                fArr2D dKh = (fArr2D) &dK[b * T][h * Dh];
+                fArr2D dVh = (fArr2D) &dV[b * T][h * Dh];
+
+                /* Step 3a backward - reverse Oh = Att @ Vh:
+                 * dVh  = Att.T @ dOh
+                 * dAtt = dOh @ Vh.T
+                 *
+                 * Note that stored Att contains the pre-dropout values.
+                 * With dropout, AttTemp reconstructs the post-dropout values
+                 * needed for the dVh calculation.
+                 */
+                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
+                    /* Use AttTemp as scratch buffer */
+                    dropout_backward(l->dropout[b * H + h],&Att[base],AttTemp);
+                    Tmatmul_ld(dVh,AttTemp,dOh,T,T,Dh,T,D,D);
+                }
+                else
+                    Tmatmul_ld(dVh,&Att[base],dOh,T,T,Dh,T,D,D);
+
+                matmulT_ld(dAtt,dOh,Vh,T,Dh,T,D,D,T);
+
+                /* Step 3b backward - reverse Att = softmax(Scores):
+                 * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
+                 * dScores /= sqrt(Dh)                  (reverse scaling)
+                 */
+                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
+                    dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
+
+                d_softmax(dScores,dAtt,&Att[base],T,T);
+
+                scale_scores<<<blocks,threads,0,cuda_stream()>>>(
+                                             (float*)dScores,T * T,scale);
+
+                /* Step 3c backward - reverse Scores = Qh @ Kh.T:
+                 * dQh = dScores @ Kh
+                 * dKh = dScores.T @ Qh
+                 * then apply inverse RoPE to dQh and dKh
+                 */
+                matmul_ld(dQh,dScores,Kh,T,T,Dh,T,D,D);
+                Tmatmul_ld(dKh,dScores,Qh,T,T,Dh,T,D,D);
+
+                rope_apply_ld(dQh,l->theta,1,0,T,Dh,D);
+                rope_apply_ld(dKh,l->theta,1,0,T,Dh,D);
+
+                /* Step 2 backward - dQ/dK/dV were written directly into the
+                 * appropriate head slices, so no gradient concatenation copies
+                 * are required.
+                 */
             }
-            else
-                Tmatmul_ld(dVh,&Att[base],dOh,T,T,Dh,T,D,D);
-
-            matmulT_ld(dAtt,dOh,Vh,T,Dh,T,D,D,T);
-
-            /* Step 3b backward - reverse Att = softmax(Scores):
-             * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
-             * dScores /= sqrt(Dh)                  (reverse scaling)
-             */
-            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
-                dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
-
-            d_softmax(dScores,dAtt,&Att[base],T,T);
-
-            scale_scores<<<blocks,threads,0,cuda_stream()>>>(
-                                         (float*)dScores,T * T,scale);
-
-            /* Step 3c backward - reverse Scores = Qh @ Kh.T:
-             * dQh = dScores @ Kh
-             * dKh = dScores.T @ Qh
-             * then apply inverse RoPE to dQh and dKh
-             */
-            matmul_ld(dQh,dScores,Kh,T,T,Dh,T,D,D);
-            Tmatmul_ld(dKh,dScores,Qh,T,T,Dh,T,D,D);
-
-            rope_apply_ld(dQh,l->theta,1,0,T,Dh,D);
-            rope_apply_ld(dKh,l->theta,1,0,T,Dh,D);
-
-            /* Step 2 backward - dQ/dK/dV were written directly into the
-             * appropriate head slices, so no gradient concatenation copies
-             * are required.
-             */
         }
+        graph_record(graph,GRAPH_BACKWARD,GRAPH_RECORD_OFF);
+        graph_play(graph,GRAPH_BACKWARD);
     }
 
     /* Step 1 backward - reverse Q=X@Wq, K=X@Wk, V=X@Wv:
