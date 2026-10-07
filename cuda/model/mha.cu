@@ -151,6 +151,23 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->state = graph_create();
 }
 
+/* Sets a padding mask
+ *
+ * Parameters:
+ *   l        - Pointer to the MHA layer from mha_create().
+ *   pad_mask - An integer array of length [B*T];
+ *              entries are 1 for real tokens, 0 for padding.
+ *
+ * Notes:
+ *   - This function may be called only once, after mha_init and before
+ *     the first invocation of mha_forward.
+ *   - pad_mask content may be set before calling mha_forward.
+ */
+void mha_set_pad_mask(MHA* l, const iVec pad_mask)
+{
+    l->pad_mask = pad_mask;
+}
+
 /* Releases all memory owned by an MHA layer.
  *
  * Frees the projection weights, RoPE table, forward scratch buffers, and
@@ -258,11 +275,8 @@ static __global__ void scale_and_mask_scores(float* Scores,
  *               buffers, and dimensions.
  *   X         : Input 2D array of shape [B*T][D], where:
  *               B = batch size, T = sequence length, D = model dimension.
- *   pad_mask  : Optional integer array of length [B*T];
- *               entries are 1 for real tokens, 0 for padding.
- *               If NULL, no padding mask is applied.
  *   Y         : Output 2D array of shape [B*T][D];
-                 if NULL, output projection is skipped.
+ *               if NULL, output projection is skipped.
  *   offset    : Must be 0, not used
  *   training  : Non-zero during training (applies attention dropout); 0
  *               during inference/generation (no dropout, deterministic).
@@ -307,7 +321,6 @@ static __global__ void scale_and_mask_scores(float* Scores,
  */
 void mha_forward(MHA* restrict l,
                  const fArr2D restrict X/*[BT][D]*/,
-                 const iVec restrict pad_mask/*[BT]*/,
                  fArr2D Y/*[BT][D]*/,
                  int offset,
                  int training,
@@ -396,8 +409,9 @@ void mha_forward(MHA* restrict l,
                 fArr2D Ah = &Att[base];
                 matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
 
+                const int* pad_mask = (const int*) l->pad_mask;
                 scale_and_mask_scores<<<blocks,threads,0,cuda_stream()>>>(
-                        (float*) Ah,(const int *) pad_mask,b,T,lookahead,scale);
+                                     (float*) Ah,pad_mask,b,T,lookahead,scale);
 
                 /* Compute attention probabilities - Softmax - in Eq. 1 */
                 softmax(Ah,T,T);

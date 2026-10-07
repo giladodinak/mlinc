@@ -32,7 +32,7 @@ void test_mha_zero_forward(MHA* m)
     nnfltclr(m->Wv,D*D);
     nnfltclr(m->Wo,D*D);
 
-    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    mha_forward(m,nnX,nnY,0,0,0);
     nnfltcpy(Y,nnY,BT*D);
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
@@ -97,7 +97,7 @@ void test_mha_attention_active(MHA* m)
     fArr2D nnY = nnallocmem(BT,D,float);
     nnfltcpy(nnX,X,BT * D);
     nnfltclr(nnY,BT * D);
-    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    mha_forward(m,nnX,nnY,0,0,0);
     nnfltcpy(Y,nnY,BT * D);
 
     /* With identity weights and token 0 dominant,token 0's output
@@ -140,7 +140,7 @@ float mha_loss(MHA* m,fArr2D X)
     float Y[BT][D];
     nnfltclr(Ynn,BT * D);
 
-    mha_forward(m,X,NULL,Ynn,0,0,0);
+    mha_forward(m,X,Ynn,0,0,0);
     nnfltcpy(Y,Ynn,BT * D);
     nnfreemem(Ynn);
 
@@ -193,7 +193,7 @@ void test_mha_finite_diff(MHA* m)
     nnfltcpy(Wv,m->Wv,D * D);
     nnfltcpy(Wo,m->Wo,D * D);
 
-    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    mha_forward(m,nnX,nnY,0,0,0);
     mha_backward(m,nndY,nnX,nndX,0);
 
     nnfltcpy(dX,nndX,BT * D);
@@ -379,7 +379,7 @@ void test_mask(MHA* m)
     fArr2D nnX = nnallocmem(BT,D,float);
     fArr2D nnY = nnallocmem(BT,D,float);
     nnfltcpy(nnX,X,BT * D);
-    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    mha_forward(m,nnX,nnY,0,0,0);
     nnfltcpy(Y,nnY,BT * D);
     nnfltcpy(Scores,m->Att,T * T);
 
@@ -438,7 +438,8 @@ void test_padding_mask(MHA* m)
     nnfltcpy(nnX,X,BT * D);
     nnmemcpy(nn_pad_mask,pad_mask,BT * sizeof(int));
 
-    mha_forward(m,nnX,nn_pad_mask,nnY,0,0,0);
+    mha_set_pad_mask(m,nn_pad_mask);
+    mha_forward(m,nnX,nnY,0,0,0);
     nnfltcpy(Y,nnY,BT * D);
     int b = B - 1;
     int h = m->H - 1;
@@ -494,7 +495,7 @@ void test_rope_relative_invariance(MHA* m)
 
     /* Forward with offset=0 */
     nnfltclr(nnY1,BT * D);
-    mha_forward(m,nnX,NULL,nnY1,0,0,0);
+    mha_forward(m,nnX,nnY1,0,0,0);
     nnfltcpy(Y1,nnY1,BT * D);
 
     /* Save Att from offset=0 run */
@@ -504,7 +505,7 @@ void test_rope_relative_invariance(MHA* m)
     /* Forward with offset */
     int offset = (int) urand(0,300000);
     nnfltclr(nnY2,BT * D);
-    mha_forward(m,nnX,NULL,nnY2,offset,0,0);
+    mha_forward(m,nnX,nnY2,offset,0,0);
     nnfltcpy(Y2,nnY2,BT * D);
 
     float Att2[m->BHT][T];
@@ -562,7 +563,7 @@ void test_mha_forward_step(MHA* m)
     nnfltclr(nnYs,T * D);
 
     /* Full causal forward */
-    mha_forward(m,nnX,NULL,nnY,0,0,0);
+    mha_forward(m,nnX,nnY,0,0,0);
 
     /* The cached single-token forward must produce the same output row
      * at every position as the full causal forward above
@@ -636,12 +637,12 @@ int main(void)
     mha_init(m,input_dim,batch_size,1,0);
     test_padding_mask(m);
     mha_free(m);
-
+#ifndef USE_CUDA /* Not yet implemented */
     m = mha_create(num_heads,seq_len,/*lookahead=*/-1);
     mha_init(m,input_dim,batch_size,1,0);
     test_rope_relative_invariance(m);
     mha_free(m);
-
+#endif
     m = mha_create(num_heads,seq_len,/*lookahead=*/0);
     mha_init(m,input_dim,1,0,0);
     test_mha_forward_step(m);

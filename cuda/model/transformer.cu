@@ -101,6 +101,11 @@ extern "C" void transformer_init(TRANSFORMER* l,
     }
 }
 
+extern "C" void transformer_set_pad_mask(TRANSFORMER* l, const iVec pad_mask)
+{
+    mha_set_pad_mask(l->mha,pad_mask);
+}
+
 extern "C" void transformer_free(TRANSFORMER* l)
 {
     if (l == NULL) return;
@@ -139,7 +144,6 @@ extern "C" void transformer_free(TRANSFORMER* l)
  * Parameters:
  *   l        - pointer to the TRANSFORMER layer
  *   X        - input  [B*T][D]
- *   pad_mask - optional padding mask [B*T]; 1 = real token, 0 = pad.
  *   training - non zero if in training path, zero if in inference path
  *   Y        - output [B*T][D]
  *   lyr      - layer index (informational)
@@ -166,7 +170,6 @@ extern "C" void transformer_free(TRANSFORMER* l)
  */
 extern "C" void transformer_forward(TRANSFORMER* restrict l,
                                     const fArr2D restrict X,
-                                    const iVec restrict pad_mask,
                                     int training,
                                     fArr2D Y,
                                     int lyr)
@@ -175,7 +178,7 @@ extern "C" void transformer_forward(TRANSFORMER* restrict l,
      * mha_out = MaskedMHA(X)
      * mha_out = dropout(mha_out)
      */
-    mha_forward(l->mha,X,pad_mask,l->mha_out,0,training,lyr);
+    mha_forward(l->mha,X,l->mha_out,0,training,lyr);
     if (training && l->training && l->dropout1 != NULL)
         dropout_forward(l->dropout1,l->mha_out);
 

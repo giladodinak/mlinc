@@ -34,12 +34,17 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     m->emb = lmemb_create(model_dim,seq_len,/*padinx=*/0);
     lmemb_init(m->emb,vocab,batch,/*training=*/1,/*tied=*/0);
 
+    /* pad mask (common to all layers) */
+    LMSTAT* s = allocmem(1,1,LMSTAT);
+    s->nn_pad_mask = (iVec) nnallocmem(m->BT,1,int);
+    m->devstat = s;
+
     /* Transformer stack, each wrapped in a LAYER */
     m->tr = allocmem(layers,1,LAYER);
     for (int i = 0; i < layers; i++) {
-        TRANSFORMER* t = transformer_create(heads,seq_len,model_dim,
-                                            ffn_dim,/*lookahead=*/0);
-        transformer_init(t,batch,/*training=*/1,dropout);
+        TRANSFORMER* t = transformer_create(heads,seq_len,model_dim,ffn_dim,0);
+        transformer_init(t,batch,1,dropout);
+        transformer_set_pad_mask(t,s->nn_pad_mask);
         m->tr[i].type = 't';
         m->tr[i].transformer = t;
         layer_alloc_opt_state(&m->tr[i],optimizer);
@@ -61,9 +66,6 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     m->pad_mask = allocmem(m->BT,1,int);
     m->labels = allocmem(m->BT,1,float);
     m->ids = allocmem(m->BT,1,int);
-    LMSTAT* s = allocmem(1,1,LMSTAT);
-    s->nn_pad_mask = (iVec) nnallocmem(m->BT,1,int);
-    m->devstat = s;
     return m;
 }
 
@@ -108,8 +110,7 @@ fArr2D lm_forward(LM* m, int training)
     nnmemcpy(s->nn_pad_mask,m->pad_mask,m->BT * sizeof(int));
     for (int i = 0; i < m->N; i++)
         transformer_forward(m->tr[i].transformer,
-                            m->acts[i],s->nn_pad_mask,
-                            training,m->acts[i + 1],i);
+                            m->acts[i],training,m->acts[i + 1],i);
     return m->acts[m->N];
 }
 

@@ -85,6 +85,20 @@ TRANSFORMER* transformer_create(int heads, int steps,
  */
 void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropout_rate);
 
+/* Sets a padding mask
+ *
+ * Parameters:
+ *   l        - Pointer to the TRANSFORMER layer from transformer_create().
+ *   pad_mask - An integer array of length [B*T];
+ *              entries are 1 for real tokens, 0 for padding.
+ *
+ * Notes:
+ *   - This function may be called only once, after transformer_init and
+ *     before the first invocation of transformer_forward.
+ *   - pad_mask content may be set before calling mha_forward.
+ */
+void transformer_set_pad_mask(TRANSFORMER* l, const iVec pad_mask);
+
 /* transformer_free - releases all memory owned by the layer. */
 void transformer_free(TRANSFORMER* l);
 
@@ -98,7 +112,6 @@ void transformer_free(TRANSFORMER* l);
  * Parameters:
  *   l        - pointer to the TRANSFORMER layer
  *   X        - input  [B*T][D]
- *   pad_mask - optional padding mask [B*T]; 1 = real token, 0 = pad.
  *   training - non zero if in training path, zero if in inference path
  *   Y        - output [B*T][D]
  *   lyr      - layer index (informational)
@@ -125,7 +138,6 @@ void transformer_free(TRANSFORMER* l);
  */
 void transformer_forward(TRANSFORMER* restrict l,
                          const fArr2D restrict X  /*[BT][D]*/,
-                         const iVec restrict pad_mask /*[BT]*/,
                          int training,
                          fArr2D Y /*[BT][D]*/,
                          int lyr);

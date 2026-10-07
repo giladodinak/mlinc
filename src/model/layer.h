@@ -79,7 +79,7 @@ static inline fArr2D layer_forward(LAYER* l,
         case 'd': return dense_forward(l->dense,X,lyr);
         case 'l': return lstm_forward(l->lstm,X,lyr);
         case 't':
-            transformer_forward(l->transformer,X,NULL,training,l->out,lyr);
+            transformer_forward(l->transformer,X,training,l->out,lyr);
             return l->out;
         case 'n': return negsample_forward(l->negsample,X,lyr);
     }

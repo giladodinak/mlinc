@@ -26,7 +26,7 @@ static void transformer_forward_host(TRANSFORMER* l,
     fArr2D Xnn = nnallocmem(BT,D,float);
     fArr2D Ynn = nnallocmem(BT,D,float);
     nnfltcpy(Xnn,X,BT * D);
-    transformer_forward(l,Xnn,NULL,1,Ynn,0);
+    transformer_forward(l,Xnn,1,Ynn,0);
     nnfltcpy(Y,Ynn,BT * D);
     nnfreemem(Xnn);
     nnfreemem(Ynn);
@@ -41,7 +41,7 @@ static float transformer_loss(TRANSFORMER* l,
 {
     float Y[BT][D];
     nnfltcpy(Xnn,X_flat,BT * D);
-    transformer_forward(l,Xnn,NULL,1,Ynn,0);
+    transformer_forward(l,Xnn,1,Ynn,0);
     nnfltcpy(Y,Ynn,BT * D);
 
     float L = 0;
@@ -184,7 +184,7 @@ void test_transformer_finite_diff(TRANSFORMER* l)
     fArr2D dYnn = nnallocmem(BT,D,float);
     nnfltcpy(Xnn,X,BT * D);
     nnfltcpy(dYnn,dY,BT * D);
-    transformer_forward(l,Xnn,NULL,1,Ynn,0);
+    transformer_forward(l,Xnn,1,Ynn,0);
     transformer_backward(l,dYnn,Xnn,dXnn,0);
     nnfltcpy(Y,Ynn,BT * D);
     nnfltcpy(dX,dXnn,BT * D);
@@ -335,10 +335,10 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
 
     /* Training: two passes should differ */
     nnfltclr(Y1nn,BT * D);
-    transformer_forward(l_train,Xnn,NULL,1,Y1nn,0);
+    transformer_forward(l_train,Xnn,1,Y1nn,0);
     nnfltcpy(Y1,Y1nn,BT * D);
     nnfltclr(Y2nn,BT * D);
-    transformer_forward(l_train,Xnn,NULL,1,Y2nn,0);
+    transformer_forward(l_train,Xnn,1,Y2nn,0);
     nnfltcpy(Y2,Y2nn,BT * D);
 
     float diff = 0;
@@ -353,10 +353,10 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
 
     /* Inference: two passes must be identical */
     nnfltclr(Y1nn,BT * D);
-    transformer_forward(l_infer,Xnn,NULL,1,Y1nn,0);
+    transformer_forward(l_infer,Xnn,1,Y1nn,0);
     nnfltcpy(Y1,Y1nn,BT * D);
     nnfltclr(Y2nn,BT * D);
-    transformer_forward(l_infer,Xnn,NULL,1,Y2nn,0);
+    transformer_forward(l_infer,Xnn,1,Y2nn,0);
     nnfltcpy(Y2,Y2nn,BT * D);
 
     diff = 0;
@@ -543,7 +543,7 @@ void training_test(void)
         /* Forward pass */
 
         for (int i = 0; i < NLYR; i++)
-            transformer_forward(layers[i],act[i],NULL,1,act[i + 1],0);
+            transformer_forward(layers[i],act[i],1,act[i + 1],0);
 
         fArr2D yp = dense_forward(out,act[NLYR],0);
 
@@ -583,9 +583,9 @@ void training_test(void)
     printf("\n");
 
     /* Evaluate: forward pass with final weights */
-    transformer_forward(layers[0],act[0],NULL,1,act[1],0);
+    transformer_forward(layers[0],act[0],1,act[1],0);
     for (int i = 1; i < NLYR; i++)
-        transformer_forward(layers[i],act[i],NULL,1,act[i + 1],0);
+        transformer_forward(layers[i],act[i],1,act[i + 1],0);
     fArr2D yp = dense_forward(out,act[NLYR],0);
 
     nnfltcpy(probs,yp,BT * K);
