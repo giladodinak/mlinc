@@ -3,6 +3,7 @@
 #ifndef ROPE_H
 #define ROPE_H
 #include <math.h>
+#include "cuctx.h"
 #include "array.h"
 
 /* Precomputes the RoPE theta table for a given head dimension.
@@ -94,6 +95,70 @@ static inline void rope_apply(fArr2D x/*[T][Dh]*/,
                               int T, int Dh)
 {
     rope_apply_ld(x,theta,inverse,offset,T,Dh,Dh);
+}
+
+/* Applies RoPE in-place to all heads in a batch.
+ *
+ * x is logically [B][T][H][Dh], stored as [B*T][H*Dh].
+ * Each batch uses the same positions offset ... offset+T-1, and each
+ * head uses the same theta[Dh/2] frequency table.
+ *
+ * Parameters:
+ *   x       : CUDA device pointer to [B*T][H*Dh]
+ *   theta   : CUDA device frequency table of length Dh/2
+ *   inverse : If non-zero, applies the inverse rotation
+ *   offset  : Position of the first token in each sequence
+ *   B       : Batch size
+ *   H       : Number of heads
+ *   T       : Sequence length
+ *   Dh      : Head dimension
+ *   ld      : Physical row stride of x, in floats
+ */
+static __global__ void rope_batch_apply_kernel_ld(float* x,
+                                                  const float* theta,
+                                                  int inverse,
+                                                  int offset,
+                                                  int B, int H,
+                                                  int T, int Dh, int ld)
+{
+    float sign = inverse ? -1.0f : 1.0f;
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    int D2 = Dh / 2;
+    int n = B * H * T * D2;
+
+    if (k < n) {
+        int i = k % D2;
+        int q = k / D2;
+        int h = q % H;
+        q /= H;
+        int t = q % T;
+        int b = q / T;
+
+        float angle = (offset + t) * theta[i];
+        float cos_a, sin_a;
+        sincosf(angle,&sin_a,&cos_a);
+        sin_a *= sign;
+
+        int p = (b * T + t) * ld + h * Dh + 2 * i;
+        float x0 = x[p];
+        float x1 = x[p + 1];
+        x[p]     = x0 * cos_a - x1 * sin_a;
+        x[p + 1] = x0 * sin_a + x1 * cos_a;
+    }
+}
+
+static inline void rope_batch_apply_ld(fArr2D x/*[B*T][H*Dh]*/,
+                                       const float* theta,
+                                       int inverse,
+                                       int offset,
+                                       int B, int H,
+                                       int T, int Dh, int ld)
+{
+    int n = B * H * T * (Dh / 2);
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    rope_batch_apply_kernel_ld<<<blocks,threads,0,cuda_stream()>>>(
+        (float*)x,theta,inverse,offset,B,H,T,Dh,ld);
 }
 
 #endif
