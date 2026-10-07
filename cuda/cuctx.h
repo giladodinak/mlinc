@@ -16,12 +16,17 @@ public:
     cublasHandle_t handle;
     cudaStream_t stream;
 
-    CudaContext() : handle(NULL), stream(0)
+    CudaContext() : handle(NULL), stream(cudaStreamPerThread)
     {
-        /* cublasCreate sets cuBLAS stream to the default null (0) stream */
         cublasStatus_t status = cublasCreate(&handle);
         if (status != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr,"cublasCreate failed (%d)\n",(int) status);
+            fprintf(stderr,"cublasCreate failed (%d)\n",(int)status);
+            exit(1);
+        }
+
+        status = cublasSetStream(handle,stream);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            fprintf(stderr,"cublasSetStream failed (%d)\n",(int)status);
             exit(1);
         }
     }
