@@ -94,7 +94,7 @@ void graph_play(GRAPH* g, int id)
     if (g == NULL || id < 0 || id >= GRAPH_COUNT || g->exec[id] == NULL)
         goto Err;
 
-    err = cudaGraphLaunch(g->exec[id],g->stream);
+    err = cudaGraphLaunch(g->exec[id],cuda_stream());
     if (err != cudaSuccess) goto Err;
     
     return;

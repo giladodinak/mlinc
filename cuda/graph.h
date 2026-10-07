@@ -5,9 +5,13 @@
 
 #include <cuda_runtime.h>
 
-#define GRAPH_FORWARD   0
-#define GRAPH_BACKWARD  1
-#define GRAPH_COUNT     2
+#define GRAPH_FORWARD_TRAIN  0
+#define GRAPH_FORWARD_INFER  1
+#define GRAPH_BACKWARD       2
+#define GRAPH_COUNT          3
+
+/* Generic forward graph for layers that do not distinguish train/infer */
+#define GRAPH_FORWARD GRAPH_FORWARD_TRAIN
 
 #define GRAPH_RECORD_OFF 0
 #define GRAPH_RECORD_ON  1
