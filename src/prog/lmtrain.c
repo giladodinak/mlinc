@@ -546,8 +546,7 @@ int main(int argc, char** argv)
 
             /* Slide over the token stream in windows of T, B windows/batch.
              * Each batch fills ids[BT], labels[BT] (next token), pad_mask[BT].
-             * Windows advance by T (non-overlapping) so every token is a
-             * target once per epoch.
+             * Windows advance by T so every token is a target once per epoch.
              */
             int stride = seq_len;
             int pos = 0;
