@@ -15,9 +15,13 @@
 
 #define THDCNT 256
 
+/* The seed is constant for the life of the layer and may be passed to
+ * kernels by value. The call counter lives in device memory so that it
+ * advances on every execution, including replays of a recorded CUDA graph.
+ */
 typedef struct {
     unsigned long long seed;
-    unsigned long long counter;
+    unsigned long long* counter; /* Device memory, one element */
 } DROPOUT_RNG;
 
 /* Mixes random seed into a well distributed 64 bit key.
@@ -42,14 +46,14 @@ static __global__ void dropout_forward_kernel(float* mx,
                                               float* mask,
                                               int n, float rate,
                                               unsigned long long seed,
-                                              unsigned long long counter)
+                                              const unsigned long long* counter)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     int i = 4 * k;
     if (i >= n) return;
 
     curandStatePhilox4_32_10_t st;
-    curand_init(seed,(unsigned long long) k,counter,&st);
+    curand_init(seed,(unsigned long long) k,*counter,&st);
     float4 r = curand_uniform4(&st);
 
     float u[4] = { r.x, r.y, r.z, r.w };
@@ -64,6 +68,17 @@ static __global__ void dropout_forward_kernel(float* mx,
             mask[idx] = value;
         }
     }
+}
+
+/* Advances the device-resident call counter.
+ *
+ * Launched after dropout_forward_kernel on the same stream, so all threads
+ * of the forward kernel have read the counter before it changes.
+ */
+static __global__ void dropout_advance_kernel(unsigned long long* counter,
+                                              unsigned long long step)
+{
+    *counter += step;
 }
 
 /* Applies an already-generated dropout mask */
@@ -108,8 +123,8 @@ DROPOUT* dropout_create(float rate)
  *
  * Notes:
  *   Allocates the device mask array and seeds this layer's counter based
- *   RNG. The RNG state itself lives in host memory; the device needs only
- *   the seed and the call counter, which are passed as kernel arguments.
+ *   RNG. The seed is kept in host memory and passed to kernels by value;
+ *   the call counter is kept in device memory (zero-initialized).
  */
 void dropout_init(DROPOUT* l, int input_dim, int batch_size)
 {
@@ -119,7 +134,7 @@ void dropout_init(DROPOUT* l, int input_dim, int batch_size)
 
     DROPOUT_RNG* rng = (DROPOUT_RNG*) allocmem(1,1,DROPOUT_RNG);
     rng->seed = dropout_mix_seed((unsigned long long) lrng());
-    rng->counter = 0;
+    rng->counter = (unsigned long long*) cuallocmem(1,1,unsigned long long);
     l->rng_state = rng;
 }
 
@@ -148,7 +163,11 @@ void dropout_free(DROPOUT* l)
 {
     if (l == NULL) return;
     cufreemem(l->mask);
-    freemem(l->rng_state);
+    if (l->rng_state != NULL) {
+        DROPOUT_RNG* rng = (DROPOUT_RNG*) l->rng_state;
+        cufreemem(rng->counter);
+        freemem(rng);
+    }
     freemem(l);
 }
 
@@ -159,18 +178,23 @@ void dropout_free(DROPOUT* l)
  *
  * Notes:
  *   Rewinds the RNG call counter, so a run repeated from here produces the
- *   same sequence of masks.
+ *   same sequence of masks. The reset is ordered on the current stream.
  */
 void dropout_reset(DROPOUT* l)
 {
     if (l == NULL || l->rng_state == NULL) return;
-    ((DROPOUT_RNG*) l->rng_state)->counter = 0;
+    DROPOUT_RNG* rng = (DROPOUT_RNG*) l->rng_state;
+    cudaMemsetAsync(rng->counter,0,sizeof(*rng->counter),cuda_stream());
 }
 
 /* Applies dropout to a 2D array in-place (training only).
  *
  * Parameters:
  *   mx   : Pointer to the 2D array to be processed
+ *
+ * Notes:
+ *   In a CUDA graph each replay reads and advances the
+ *   device-resident counter, so every execution draws a new mask.
  */
 void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
 {
@@ -178,12 +202,10 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
     float rate = l->rate;
 
     if (n <= 0) return;
+    if (rate <= 0.0f) return;
 
-    if (rate == 1.0f) {
-        cufltclr(mx_,n);
-        cufltclr(l->mask,n);
-        return;
-    }
+    if (rate >= 1.0f)
+        rate = nextafterf(1.0f,0.0f);
 
     DROPOUT_RNG* rng = (DROPOUT_RNG*) l->rng_state;
 
@@ -196,7 +218,8 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
     dropout_forward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
         (float*) mx_,(float*) l->mask,n,rate,rng->seed,rng->counter);
 
-    rng->counter += 4; /* Number of random numbers generated */
+    /* Number of random numbers generated per thread */
+    dropout_advance_kernel<<<1,1,0,cuda_stream()>>>(rng->counter,4);
 }
 
 /* Applies a precomputed dropout mask to an input array, writing the
