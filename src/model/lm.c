@@ -105,11 +105,11 @@ fArr2D lm_forward(LM* m, int training)
     nnfltcpy(m->acts[0],h,m->BT * m->E);
 
     LMSTAT* s = (LMSTAT*) m->devstat;
-    nnmemcpy(s->nn_pad_mask,m->pad_mask,m->BT);
+    nnmemcpy(s->nn_pad_mask,m->pad_mask,m->BT * sizeof(int));
     for (int i = 0; i < m->N; i++)
         transformer_forward(m->tr[i].transformer,
                             m->acts[i],s->nn_pad_mask,
-                            training,m->acts[i+1],i);
+                            training,m->acts[i + 1],i);
     return m->acts[m->N];
 }
 
