@@ -5,6 +5,10 @@
 
 #include <cuda_runtime.h>
 
+#ifdef  __cplusplus
+#include "cuctx.h"
+#endif
+
 /* Sets an array of floats in GPU memory to zero.
  * 
  * Sets each element of the array pointed to by v to zero. 
@@ -13,9 +17,15 @@
  *   v : Pointer to the array of floats to be cleared.
  *   n : Number of elements in the array.
  */
-static inline void cufltclr(void* restrict v, int n)
+static inline void cufltclr(void* v, int n)
 {
-    cudaMemset(v,0,n * sizeof(float));
+#ifdef  __cplusplus
+    cudaStream_t stream = cuda_stream();
+    if (stream != cudaStreamPerThread)
+        cudaMemsetAsync(v,0,n * sizeof(float),stream);
+    else
+#endif
+        cudaMemset(v,0,n * sizeof(float));
 }
 
 /* Copies an array of n floats.
@@ -31,7 +41,12 @@ static inline void cufltclr(void* restrict v, int n)
  */
 static inline void cufltcpy(void* restrict d, const void* restrict s, int n)
 {
-    cudaMemcpy(d,s,n * sizeof(float),cudaMemcpyDefault);
+#ifdef  __cplusplus
+    cudaStream_t stream = cuda_stream();
+    if (stream != cudaStreamPerThread)
+        cudaMemcpyAsync(d,s,n * sizeof(float),cudaMemcpyDefault,stream);
+    else
+#endif
+        cudaMemcpy(d,s,n * sizeof(float),cudaMemcpyDefault);
 }
-
 #endif
