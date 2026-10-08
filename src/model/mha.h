@@ -10,56 +10,48 @@
 #include "rope.h"
 
 typedef struct {
-    /* dimensions */
     int B;      /* Batch size      */
     int T;      /* Sequence length */
     int D;      /* Model dimension */
     int H;      /* Number of heads */
-    int Dh;     /* D / H     */
-    int BT;     /* B * T     */
-    int BHT;    /* B * H * T */
+    int Dh;     /* D / H           */
+    int BT;     /* B * T           */
+    int BHT;    /* B * H * T       */
 
-    int lookahead;      /* Causal masking, set at create time below  */
-    int training;       /* 1 if training, 0 if inference             */
-    float dropout_rate; /* Attention dropout rate                    */
+    int lookahead;      /* Causal masking (see below)    */
+    int training;       /* 1 if training, 0 if inference */
+    float dropout_rate; /* Attention dropout rate        */
+    DROPOUT** dropout;  /* [B * H] masks                 */
+    fVec theta;         /* [Dh/2] RoPE frequency table   */
+    iVec pad_mask;      /* [BT]                          */
 
-    fArr2D Wq;  /* [D][D] */
-    fArr2D Wk;  /* [D][D] */
-    fArr2D Wv;  /* [D][D] */
-    fArr2D Wo;  /* [D][D] */
+    fArr2D Wq;  /* [D][D]  */
+    fArr2D Wk;  /* [D][D]  */
+    fArr2D Wv;  /* [D][D]  */
+    fArr2D Wo;  /* [D][D]  */
 
     fArr2D Q;   /* [BT][D] */
     fArr2D K;   /* [BT][D] */
     fArr2D V;   /* [BT][D] */
+    fArr2D Out; /* [BT][D] */
 
-    fVec theta; /* [Dh/2] RoPE frequency table */
-
-    /* Attention weights stored by forward for backward/reference tests. */
-    fArr2D Att;     /* [BHT][T] row (b*H+h)*T+t */
-
-    fArr2D Out;     /* [BT][D] */
-
-    iVec pad_mask;  /* [BT]    */
-
-    /* backward buffers */
+    /* Backward buffers */
     fArr2D dOut;    /* [BT][D] */
-
     fArr2D dQ;      /* [BT][D] */
     fArr2D dK;      /* [BT][D] */
     fArr2D dV;      /* [BT][D] */
 
-    /* parameter gradients */
+    /* Parameter gradients */
     fArr2D gWq;     /* [D][D] */
     fArr2D gWk;     /* [D][D] */
     fArr2D gWv;     /* [D][D] */
     fArr2D gWo;     /* [D][D] */
 
-
     void* state; /* Implementation specific (NULL if not used) */
 } MHA;
 
 #ifdef __cplusplus
-extern "C" { /* nvcc is a c++ compiler */
+extern "C" {
 #endif
 
 /* Creates a Multi-Head Attention layer.
@@ -117,7 +109,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
  * Notes:
  *   - This function may be called only once, after mha_init and before
  *     the first invocation of mha_forward.
- *   - pad_mask content may be set before calling mha_forward.
+ *   - pad_mask content may be set before each invocation of mha_forward.
  */
 void mha_set_pad_mask(MHA* l, const iVec pad_mask);
 
@@ -145,7 +137,7 @@ void mha_free(MHA* l);
  *   X         : Input 2D array of shape [B*T][D], where:
  *               B = batch size, T = sequence length, D = model dimension.
  *   Y         : Output 2D array of shape [B*T][D];
-                 if NULL, output projection is skipped.
+ *               if NULL, output projection is skipped.
  *   offset    : Position index of the first token in the sequence
  *   training  : Non-zero during training (applies attention dropout); 0
  *               during inference/generation (no dropout, deterministic).
@@ -172,11 +164,11 @@ void mha_forward(MHA* restrict l,
  * Processes one token at absolute position 'offset'.
  *
  * Parameters:
- *   l      - MHA layer
- *   x      - the new token's input row [1][D]
- *   Y      - output row [1][D]
- *   offset - absolute position of this token (0-based)
- *   lyr    - layer index (informational)
+ *   l         : MHA layer
+ *   x         : the new token's input row [1][D]
+ *   Y         : output row [1][D]
+ *   offset    : absolute position of this token (0-based)
+ *   lyr       : layer index (informational)
  */
 void mha_forward_step(MHA* restrict l,
                       const fArr2D restrict x/*[1][D]*/,
@@ -190,16 +182,18 @@ void mha_forward_step(MHA* restrict l,
  * reversing each step of mha_forward in order.
  *
  * Parameters:
- *   l   - MHA layer
- *   dY  - gradient of loss w.r.t. MHA output [BT][D]
- *   X   - original MHA input [BT][D]
- *   dX  - gradient of loss w.r.t. MHA input [BT][D], or NULL
- *   lyr - layer index (informational)
+ *   l         : MHA layer
+ *   dY        : gradient of loss w.r.t. MHA output [BT][D]
+ *   X         : original MHA input [BT][D]
+ *   dX        : gradient of loss w.r.t. MHA input [BT][D], or NULL
+ *   offset    : Position index of the first token in the sequence
+ *   lyr       : layer index (informational)
  */
 void mha_backward(MHA* restrict l,
                   fArr2D restrict dY /*[BT][D]*/,
                   const fArr2D restrict X/*[BT][D]*/,
                   fArr2D dX,
+                  int offset,
                   int lyr);
 
 #ifdef __cplusplus

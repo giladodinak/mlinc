@@ -17,23 +17,18 @@
 #include "mha.h"
 
 typedef struct {
-    /* CPU implementation-specific forward buffers */
-    fArr2D Qh;      /* [BHT][Dh] */
-    fArr2D Kh;      /* [BHT][Dh] */
-    fArr2D Vh;      /* [BHT][Dh] */
-    DROPOUT** dropout; /* [B*H]  */
-    fArr2D Scores;  /* [T][T]    */
-    fArr2D Oh;      /* [T][Dh]   */
-
-    /* CPU implementation-specific backward */
-    fArr2D dQh;     /* [T][Dh] */
-    fArr2D dKh;     /* [T][Dh] */
-    fArr2D dVh;     /* [T][Dh] */
-    fArr2D dOh;     /* [T][Dh] */
-    fArr2D dAtt;    /* [T][T]  */
-    fArr2D dScores; /* [T][T]  */
-
-    /* KV cache for single-token generation */
+    fArr2D Qh;      /* [BHT][Dh]  */
+    fArr2D Kh;      /* [BHT][Dh]  */
+    fArr2D Vh;      /* [BHT][Dh]  */
+    fArr2D Att;     /* [BHT][T]   */
+    fArr2D Scores;  /* [T][T]     */
+    fArr2D Oh;      /* [T][Dh]    */
+    fArr2D dQh;     /* [T][Dh]    */
+    fArr2D dKh;     /* [T][Dh]    */
+    fArr2D dVh;     /* [T][Dh]    */
+    fArr2D dOh;     /* [T][Dh]    */
+    fArr2D dAtt;    /* [T][T]     */
+    fArr2D dScores; /* [T][T]     */
     fArr2D Kh_cache; /* [H*T][Dh] */
     fArr2D Vh_cache; /* [H*T][Dh] */
 } MHA_STATE;
@@ -124,13 +119,13 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     s->Kh = allocmem(l->BHT,l->Dh,float);
     s->Vh = allocmem(l->BHT,l->Dh,float);
 
-    l->Att = allocmem(l->BHT,l->T,float);
+    s->Att = allocmem(l->BHT,l->T,float);
 
     if (dropout_rate > 0) {
-        s->dropout = allocmem(l->B * l->H,1,DROPOUT*);
+        l->dropout = allocmem(l->B * l->H,1,DROPOUT*);
         for (int i = 0; i < l->B * l->H; i++) {
-            s->dropout[i] = dropout_create(dropout_rate);
-            dropout_init(s->dropout[i],l->T,l->T);
+            l->dropout[i] = dropout_create(dropout_rate);
+            dropout_init(l->dropout[i],l->T,l->T);
         }
     }
 
@@ -186,7 +181,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
  * Notes:
  *   - This function may be called only once, after mha_init and before
  *     the first invocation of mha_forward.
- *   - pad_mask content may be set before calling mha_forward.
+ *   - pad_mask content may be set before each invocation of mha_forward.
  */
 void mha_set_pad_mask(MHA* l, const iVec pad_mask)
 {
@@ -220,12 +215,12 @@ void mha_free(MHA* l)
     freemem(s->Kh);
     freemem(s->Vh);
 
-    freemem(l->Att);
+    freemem(s->Att);
 
-    if (s->dropout != NULL) {
+    if (l->dropout != NULL) {
         for (int i = 0; i < l->B * l->H; i++)
-            dropout_free(s->dropout[i]);
-        freemem(s->dropout);
+            dropout_free(l->dropout[i]);
+        freemem(l->dropout);
     }
 
     freemem(s->Scores);
@@ -395,7 +390,7 @@ void mha_forward(MHA* restrict l,
     ArrBHTDh Vh = (ArrBHTDh) s->Vh;
 
     ArrTT Scores = (ArrTT) s->Scores;
-    ArrBHTT Att = (ArrBHTT) l->Att;
+    ArrBHTT Att = (ArrBHTT) s->Att;
     ArrTDh Oh = (ArrTDh) s->Oh;
 
     ArrBTD Out = (ArrBTD) l->Out;
@@ -449,8 +444,8 @@ void mha_forward(MHA* restrict l,
             fltcpy(&Att[base],Scores,T * T);
 
             if (training && l->training)
-                if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0)
-                    dropout_forward(s->dropout[b * H + h],Scores);
+                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
+                    dropout_forward(l->dropout[b * H + h],Scores);
 
             /* In Eq. 1: Attention @ V */
             matmul(Oh,Scores,&Vh[base],T,T,Dh);
@@ -570,11 +565,12 @@ void mha_forward_step(MHA* restrict l,
  * reversing each step of mha_forward in order.
  *
  * Parameters:
- *   l   - MHA layer
- *   dY  - gradient of loss w.r.t. MHA output [BT][D]
- *   X   - original MHA input [BT][D]
- *   dX  - gradient of loss w.r.t. MHA input [BT][D], or NULL
- *   lyr - layer index (informational)
+ *   l      - MHA layer
+ *   dY     - gradient of loss w.r.t. MHA output [BT][D]
+ *   X      - original MHA input [BT][D]
+ *   dX     - gradient of loss w.r.t. MHA input [BT][D], or NULL
+ *   offset - Position index of the first token in the sequence
+ *   lyr    - layer index (informational)
  *
  * Reads back the per-(b,h) Qh, Kh, Vh, and Att stored by mha_forward
  * for the same (b,h) pair, rather than recomputing them, so the values
@@ -610,6 +606,7 @@ void mha_backward(MHA* restrict l,
                   fArr2D restrict dY/*[BT][D]*/,
                   const fArr2D restrict X/*[BT][D]*/,
                   fArr2D dX,
+                  int offset,
                   int lyr)
 {
     (void) lyr;
@@ -658,7 +655,7 @@ void mha_backward(MHA* restrict l,
     ArrBHTDh Kh = (ArrBHTDh) s->Kh;
     ArrBHTDh Vh = (ArrBHTDh) s->Vh;
 
-    ArrBHTT Att = (ArrBHTT) l->Att;
+    ArrBHTT Att = (ArrBHTT) s->Att;
 
     ArrBTD Out = (ArrBTD) l->Out;
 
@@ -699,9 +696,9 @@ void mha_backward(MHA* restrict l,
              * whereas dVh calculation uses the post-dropout values, which
              * can be resoncstructed by applying the dropout mask.
              */
-            if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0) {
+            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                 /* Use Scroes as scratch buffer */
-                dropout_backward(s->dropout[b * H + h],&Att[base],s->Scores);
+                dropout_backward(l->dropout[b * H + h],&Att[base],s->Scores);
                 Tmatmul(dVh,s->Scores,dOh,T,T,Dh);
             }
             else
@@ -713,8 +710,8 @@ void mha_backward(MHA* restrict l,
              * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
              * dScores /= sqrt(Dh)                  (reverse scaling)
              */
-            if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0)
-                dropout_backward(s->dropout[b * H + h],dAtt,dAtt);
+            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
+                dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
 
             d_softmax(dScores,dAtt,&Att[base],T,T);
 
@@ -728,8 +725,8 @@ void mha_backward(MHA* restrict l,
             matmul(dQh,dScores,&Kh[base],T,T,Dh);
             Tmatmul(dKh,dScores,&Qh[base],T,T,Dh);
 
-            rope_apply(dQh,l->theta,1,0,T,Dh);
-            rope_apply(dKh,l->theta,1,0,T,Dh);
+            rope_apply(dQh,l->theta,1,offset,T,Dh);
+            rope_apply(dKh,l->theta,1,offset,T,Dh);
 
             /* Step 2 backward - concatenate head gradients
              * dQ dimentsions B x T x D dQh dimensions B x T x Dh

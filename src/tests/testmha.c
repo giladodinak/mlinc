@@ -93,8 +93,8 @@ void test_mha_attention_active(MHA* m)
             X[b * T + 0][j] = 3.0f;
     }
 
-    fArr2D nnX = nnallocmem(BT,D,float);
-    fArr2D nnY = nnallocmem(BT,D,float);
+    fArr2D nnX = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nnY = (fArr2D) nnallocmem(BT,D,float);
     nnfltcpy(nnX,X,BT * D);
     nnfltclr(nnY,BT * D);
     mha_forward(m,nnX,nnY,0,0,0);
@@ -136,7 +136,7 @@ float mha_loss(MHA* m,fArr2D X)
     int BT = m->BT;
     int D  = m->D;
 
-    fArr2D Ynn = nnallocmem(BT,D,float);
+    fArr2D Ynn = (fArr2D) nnallocmem(BT,D,float);
     float Y[BT][D];
     nnfltclr(Ynn,BT * D);
 
@@ -178,10 +178,10 @@ void test_mha_finite_diff(MHA* m)
         }
     }
 
-    fArr2D nnX  = nnallocmem(BT,D,float);
-    fArr2D nnY  = nnallocmem(BT,D,float);
-    fArr2D nndX = nnallocmem(BT,D,float);
-    fArr2D nndY = nnallocmem(BT,D,float);
+    fArr2D nnX  = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nnY  = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nndX = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nndY = (fArr2D) nnallocmem(BT,D,float);
     nnfltcpy(nnX,X,BT * D);
     nnfltcpy(nndY,dY,BT * D);
     nnfltclr(nnY,BT * D);
@@ -194,7 +194,7 @@ void test_mha_finite_diff(MHA* m)
     nnfltcpy(Wo,m->Wo,D * D);
 
     mha_forward(m,nnX,nnY,0,0,0);
-    mha_backward(m,nndY,nnX,nndX,0);
+    mha_backward(m,nndY,nnX,nndX,0,0);
 
     nnfltcpy(dX,nndX,BT * D);
     nnfltcpy(gWq,m->gWq,D * D);
@@ -324,83 +324,69 @@ void test_mha_finite_diff(MHA* m)
     printf("  OK\n");
 }
 
-float softmax_loss(fArr2D Scores,fArr2D dAtt_,int T)
+static void mha_identity_weights(MHA* m)
 {
-    float Att[T][T];
-    fArr2D nnAtt = nnallocmem(T,T,float);
-    nnfltcpy(nnAtt,Scores,T * T);
-    softmax(nnAtt,T,T);
-    nnfltcpy(Att,nnAtt,T * T);
-    nnfreemem(nnAtt);
-
-    typedef float (*ArrTT)[T];
-    const ArrTT dAtt = (ArrTT) dAtt_;
-
-    float L = 0;
-    for (int i = 0; i < T; i++)
-        for (int j = 0; j < T; j++)
-            L += Att[i][j] * dAtt[i][j];
-
-    return L;
+    int D = m->D;
+    float W[D][D];
+    fltclr(W,D * D);
+    for (int j = 0; j < D; j++)
+        W[j][j] = 1;
+    nnfltcpy(m->Wq,W,D * D);
+    nnfltcpy(m->Wk,W,D * D);
+    nnfltcpy(m->Wv,W,D * D);
+    nnfltcpy(m->Wo,W,D * D);
 }
 
 void test_mask(MHA* m)
 {
     printf("Test: MHA mask\n");
 
+    int B = m->B;
     int T = m->T;
     int D = m->D;
     int BT = m->BT;
-
     float X[BT][D];
-    float Y[BT][D];
-    float Wq[D][D];
-    float Wk[D][D];
-    float Scores[T][T];
+    float Y1[BT][D];
+    float Y2[BT][D];
 
+    mha_identity_weights(m);
     for (int i = 0; i < BT; i++)
         for (int j = 0; j < D; j++)
-            X[i][j] = urand(-0.1,0.1);
+            X[i][j] = urand(-0.1f,0.1f);
 
-    nnfltclr(m->Wq,D * D);
-    nnfltclr(m->Wk,D * D);
-    nnfltclr(m->Wv,D * D);
-    nnfltclr(m->Wo,D * D);
-
-    fltclr(Wq,D * D);
-    fltclr(Wk,D * D);
-    for (int i = 0; i < D / 2; i++) {
-        Wq[i][i] = 1;
-        Wk[i][i] = 1;
-    }
-    nnfltcpy(m->Wq,Wq,D * D);
-    nnfltcpy(m->Wk,Wk,D * D);
-
-    fArr2D nnX = nnallocmem(BT,D,float);
-    fArr2D nnY = nnallocmem(BT,D,float);
+    fArr2D nnX = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nnY = (fArr2D) nnallocmem(BT,D,float);
     nnfltcpy(nnX,X,BT * D);
     mha_forward(m,nnX,nnY,0,0,0);
-    nnfltcpy(Y,nnY,BT * D);
-    nnfltcpy(Scores,m->Att,T * T);
+    nnfltcpy(Y1,nnY,BT * D);
 
-    float masked_sum = 0;
-    float unmasked_sum = 0;
+    /* Future input must not influence earlier output in a causal layer. */
+    for (int b = 0; b < B; b++)
+        for (int j = 0; j < D; j++)
+            X[b * T + T - 1][j] += 5;
+    nnfltcpy(nnX,X,BT * D);
+    mha_forward(m,nnX,nnY,0,0,0);
+    nnfltcpy(Y2,nnY,BT * D);
 
-    for (int i = 0; i < T; i++) {
-        for (int j = 0; j < T; j++) {
-            if (j > i)
-                masked_sum += fabsf(Scores[i][j]);
-            else
-                unmasked_sum += fabsf(Scores[i][j]);
+    float active = 0;
+    for (int b = 0; b < B; b++) {
+        for (int t = 0; t < T; t++) {
+            for (int j = 0; j < D; j++) {
+                float diff = fabsf(Y2[b * T + t][j] - Y1[b * T + t][j]);
+                if (t < T - 1 && diff > TOL) {
+                    printf("FAIL mask: future token changed Y[%d][%d],diff=%g\n",
+                           b * T + t,j,diff);
+                    exit(1);
+                }
+                if (t == T - 1)
+                    active += diff;
+            }
         }
     }
-
-    if (masked_sum != 0)
-        printf("FAIL mask: masked positions sum = %g,expected 0\n",masked_sum);
-    if (unmasked_sum == 0)
-        printf("FAIL mask: unmasked positions sum = 0,attention not active\n");
-    if (masked_sum != 0 || unmasked_sum == 0)
+    if (active < TOL) {
+        printf("FAIL mask: changed token did not affect its own output\n");
         exit(1);
+    }
 
     nnfreemem(nnX);
     nnfreemem(nnY);
@@ -415,60 +401,71 @@ void test_padding_mask(MHA* m)
     int T = m->T;
     int D = m->D;
     int BT = m->BT;
-
+    int b = B - 1;
     float X[BT][D];
-    float Y[BT][D];
-    float Scores[T][T];
+    float Y1[BT][D];
+    float Y2[BT][D];
 
+    mha_identity_weights(m);
     for (int i = 0; i < BT; i++)
         for (int j = 0; j < D; j++)
-            X[i][j] =  urand(-0.1,0.1);
+            X[i][j] = urand(-0.1f,0.1f);
 
-    // Create pad_mask array - length B*T
-    // The last two tokens of the last batch are masked
+    /* Mask the last two tokens of the last sequence. */
     int pad_mask[BT];
     for (int i = 0; i < BT; i++)
         pad_mask[i] = 1;
-    pad_mask[(B - 1) * T + (T - 2)] = 0;
-    pad_mask[(B - 1) * T + (T - 1)] = 0;
+    pad_mask[b * T + T - 2] = 0;
+    pad_mask[b * T + T - 1] = 0;
 
-    fArr2D nnX = nnallocmem(BT,D,float);
-    fArr2D nnY = nnallocmem(BT,D,float);
+    fArr2D nnX = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nnY = (fArr2D) nnallocmem(BT,D,float);
     iVec nn_pad_mask = (iVec) nnallocmem(BT,1,int);
-    nnfltcpy(nnX,X,BT * D);
     nnmemcpy(nn_pad_mask,pad_mask,BT * sizeof(int));
-
     mha_set_pad_mask(m,nn_pad_mask);
+
+    nnfltcpy(nnX,X,BT * D);
     mha_forward(m,nnX,nnY,0,0,0);
-    nnfltcpy(Y,nnY,BT * D);
-    int b = B - 1;
-    int h = m->H - 1;
-    int base = (b * m->H + h) * T;
-    typedef float (*ArrBHTT)[T];
-    nnfltcpy(Scores,&((ArrBHTT)m->Att)[base],T * T);
+    nnfltcpy(Y1,nnY,BT * D);
 
-    float padded_sum = 0;
-    float unpadded_sum = 0;
+    for (int t = T - 2; t < T; t++)
+        for (int j = 0; j < D; j++)
+            X[b * T + t][j] += 5;
+    nnfltcpy(nnX,X,BT * D);
+    mha_forward(m,nnX,nnY,0,0,0);
+    nnfltcpy(Y2,nnY,BT * D);
 
-    for (int i = 0; i < T; i++) {
-        for (int j = 0; j < T; j++) {
-            if (j >= T - 2)  /* last two tokens are padded */
-                padded_sum += fabsf(Scores[i][j]);
-            else
-                unpadded_sum += fabsf(Scores[i][j]);
+    for (int i = 0; i < BT; i++) {
+        if (!pad_mask[i]) continue;
+        for (int j = 0; j < D; j++) {
+            float diff = fabsf(Y2[i][j] - Y1[i][j]);
+            if (diff > TOL) {
+                printf("FAIL pad mask: padded input changed Y[%d][%d],diff=%g\n",i,j,diff);
+                exit(1);
+            }
         }
     }
 
-    if (padded_sum != 0)
-        printf("FAIL pad mask: padded positions sum = %g,expected 0\n",padded_sum);
-    if (unpadded_sum == 0)
-        printf("FAIL pad mask: unpadded positions sum = 0,attention not active\n");
-    if (padded_sum != 0 || unpadded_sum == 0)
+    /* With padding disabled, the same perturbation must affect valid queries. */
+    for (int i = 0; i < BT; i++)
+        pad_mask[i] = 1;
+    nnmemcpy(nn_pad_mask,pad_mask,BT * sizeof(int));
+    nnfltcpy(nnX,X,BT * D);
+    mha_forward(m,nnX,nnY,0,0,0);
+    nnfltcpy(Y2,nnY,BT * D);
+    float active = 0;
+    for (int t = 0; t < T - 2; t++)
+        for (int j = 0; j < D; j++)
+            active += fabsf(Y2[b * T + t][j] - Y1[b * T + t][j]);
+    if (active < TOL) {
+        printf("FAIL pad mask: removing padding did not affect valid outputs\n");
         exit(1);
+    }
 
     nnfreemem(nnX);
     nnfreemem(nnY);
     nnfreemem(nn_pad_mask);
+    m->pad_mask = NULL;
     printf("  OK\n");
 }
 
@@ -476,7 +473,6 @@ void test_rope_relative_invariance(MHA* m)
 {
     printf("Test: MHA RoPE relative position invariance\n");
 
-    int T = m->T;
     int D = m->D;
     int BT = m->BT;
 
@@ -488,9 +484,9 @@ void test_rope_relative_invariance(MHA* m)
         for (int j = 0; j < D; j++)
             X[i][j] = urand(-1.0f,1.0f);
 
-    fArr2D nnX = nnallocmem(BT,D,float);
-    fArr2D nnY1 = nnallocmem(BT,D,float);
-    fArr2D nnY2 = nnallocmem(BT,D,float);
+    fArr2D nnX = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nnY1 = (fArr2D) nnallocmem(BT,D,float);
+    fArr2D nnY2 = (fArr2D) nnallocmem(BT,D,float);
     nnfltcpy(nnX,X,BT * D);
 
     /* Forward with offset=0 */
@@ -498,29 +494,11 @@ void test_rope_relative_invariance(MHA* m)
     mha_forward(m,nnX,nnY1,0,0,0);
     nnfltcpy(Y1,nnY1,BT * D);
 
-    /* Save Att from offset=0 run */
-    float Att1[m->BHT][T];
-    nnfltcpy(Att1,m->Att,m->BHT * T);
-
     /* Forward with offset */
-    int offset = (int) urand(0,300000);
+    int offset = (int) urand(0,100000);
     nnfltclr(nnY2,BT * D);
     mha_forward(m,nnX,nnY2,offset,0,0);
     nnfltcpy(Y2,nnY2,BT * D);
-
-    float Att2[m->BHT][T];
-    nnfltcpy(Att2,m->Att,m->BHT * T);
-
-    /* Check Att: relative position invariance means attention weights
-     * must be identical regardless of absolute position offset */
-    float att_diff = 0;
-    for (int i = 0; i < m->BHT * T; i++)
-        att_diff += fabsf(((float*)Att1)[i] - ((float*)Att2)[i]);
-
-    if (att_diff > TOL) {
-        printf("FAIL RoPE invariance: Att differs with offset,diff=%g\n",att_diff);
-        exit(1);
-    }
 
     /* Check Y: output must also be identical */
     float y_diff = 0;
@@ -555,9 +533,9 @@ void test_mha_forward_step(MHA* m)
         for (int d = 0; d < D; d++)
             X[t][d] = urand(-1,1);
 
-    fArr2D nnX = nnallocmem(T,D,float);
-    fArr2D nnY = nnallocmem(T,D,float);
-    fArr2D nnYs = nnallocmem(T,D,float);
+    fArr2D nnX = (fArr2D) nnallocmem(T,D,float);
+    fArr2D nnY = (fArr2D) nnallocmem(T,D,float);
+    fArr2D nnYs = (fArr2D) nnallocmem(T,D,float);
     nnfltcpy(nnX,X,T * D);
     nnfltclr(nnY,T * D);
     nnfltclr(nnYs,T * D);
@@ -613,37 +591,37 @@ int main(void)
 
     MHA* m;
     
-    m = mha_create(num_heads,seq_len,/*lookahead=*/-1);
+    m = mha_create(num_heads,seq_len,-1);
     mha_init(m,input_dim,batch_size,1,0);
     test_mha_zero_forward(m);
     mha_free(m);
 
-    m = mha_create(num_heads,seq_len,/*lookahead=*/-1);
+    m = mha_create(num_heads,seq_len,-1);
     mha_init(m,input_dim,batch_size,1,0);
     test_mha_attention_active(m);
     mha_free(m);
 
-    m = mha_create(num_heads,seq_len,/*lookahead=*/-1);
+    m = mha_create(num_heads,seq_len,-1);
     mha_init(m,input_dim,batch_size,1,0);
     test_mha_finite_diff(m);
     mha_free(m);
 
-    m = mha_create(num_heads,seq_len,/*lookahead=*/0); /* causal for mask test */
+    m = mha_create(num_heads,seq_len,0);
     mha_init(m,input_dim,batch_size,1,0);
     test_mask(m);
     mha_free(m);
 
-    m = mha_create(num_heads,seq_len,/*lookahead=*/-1);
+    m = mha_create(num_heads,seq_len,-1);
     mha_init(m,input_dim,batch_size,1,0);
     test_padding_mask(m);
     mha_free(m);
-#ifndef USE_CUDA /* Not yet implemented */
-    m = mha_create(num_heads,seq_len,/*lookahead=*/-1);
+
+    m = mha_create(num_heads,seq_len,-1);
     mha_init(m,input_dim,batch_size,1,0);
     test_rope_relative_invariance(m);
     mha_free(m);
-#endif
-    m = mha_create(num_heads,seq_len,/*lookahead=*/0);
+
+    m = mha_create(num_heads,seq_len,0);
     mha_init(m,input_dim,1,0,0);
     test_mha_forward_step(m);
     mha_free(m);

@@ -21,15 +21,12 @@
 #include "graph.h"
 
 typedef struct {
-    DROPOUT** dropout; /* [B*H]  */
-    fArr2D Scores;     /* [T][T] */
-    fArr2D dAtt;       /* [T][T] */
-    fArr2D dScores;    /* [T][T] */
-
-    /* KV cache for single-token generation */
-    fArr2D Kh_cache;   /* [H*T][Dh] */
-    fArr2D Vh_cache;   /* [H*T][Dh] */
-
+    fArr2D Att;      /* [BHT][T]  */
+    fArr2D Scores;   /* [T][T]    */
+    fArr2D dAtt;     /* [T][T]    */
+    fArr2D dScores;  /* [T][T]    */
+    fArr2D Kh_cache; /* [H*T][Dh] */
+    fArr2D Vh_cache; /* [H*T][Dh] */
     GRAPH* graph;
 } MHA_STATE;
 
@@ -115,13 +112,13 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
     l->theta = (fVec) cuallocmem(1,l->Dh / 2,float);
 
-    l->Att = (fArr2D) cuallocmem(l->BHT,l->T,float);
+    s->Att = (fArr2D) cuallocmem(l->BHT,l->T,float);
 
     if (dropout_rate > 0) {
-        s->dropout = (DROPOUT**) allocmem(l->B * l->H,1,DROPOUT*);
+        l->dropout = (DROPOUT**) allocmem(l->B * l->H,1,DROPOUT*);
         for (int i = 0; i < l->B * l->H; i++) {
-            s->dropout[i] = dropout_create(dropout_rate);
-            dropout_init(s->dropout[i],l->T,l->T);
+            l->dropout[i] = dropout_create(dropout_rate);
+            dropout_init(l->dropout[i],l->T,l->T);
         }
     }
 
@@ -173,7 +170,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
  * Notes:
  *   - This function may be called only once, after mha_init and before
  *     the first invocation of mha_forward.
- *   - pad_mask content may be set before calling mha_forward.
+ *   - pad_mask content may be set before each invocation of mha_forward.
  */
 void mha_set_pad_mask(MHA* l, const iVec pad_mask)
 {
@@ -204,12 +201,12 @@ void mha_free(MHA* l)
 
     cufreemem(l->theta);
 
-    cufreemem(l->Att);
+    cufreemem(s->Att);
 
-    if (s->dropout != NULL) {
+    if (l->dropout != NULL) {
         for (int i = 0; i < l->B * l->H; i++)
-            dropout_free(s->dropout[i]);
-        freemem(s->dropout);
+            dropout_free(l->dropout[i]);
+        freemem(l->dropout);
     }
 
     cufreemem(s->Scores);
@@ -350,11 +347,6 @@ void mha_forward(MHA* restrict l,
     const int lookahead = l->lookahead;
     MHA_STATE* s = (MHA_STATE*) l->state;
 
-    if (offset != 0) {
-        fprintf(stderr,"mha_forward: non zero offset not supported\n");
-        exit(1);
-    }
-
     typedef float (*ArrDD)[D];
     typedef float (*ArrBTD)[D];
     typedef float (*ArrTT)[T];
@@ -370,7 +362,7 @@ void mha_forward(MHA* restrict l,
     ArrBTD V = (ArrBTD) l->V;
 
     ArrTT AttTemp = (ArrTT) s->Scores;
-    ArrBHTT Att = (ArrBHTT) l->Att;
+    ArrBHTT Att = (ArrBHTT) s->Att;
     ArrBTD Out = (ArrBTD) l->Out;
 
     float scale = 1.0 / sqrtf((float) Dh);
@@ -385,18 +377,16 @@ void mha_forward(MHA* restrict l,
     matmul(V,X,Wv,BT,D,D);
     cufltclr(Out,BT * D);
 
-    GRAPH* graph = s->graph;
+    rope_batch_apply_ld(Q,l->theta,0,offset,B,H,T,Dh,D);
+    rope_batch_apply_ld(K,l->theta,0,offset,B,H,T,Dh,D);
 
+    GRAPH* graph = s->graph;
     int gid = training ? GRAPH_FORWARD_TRAIN : GRAPH_FORWARD_INFER;
     if (graph_record_exists(graph,gid)) {
         graph_play(graph,gid);
     }
     else {
         graph_record(graph,gid,GRAPH_RECORD_ON);
-
-        /* Apply RoPE to the entire batch */
-        rope_batch_apply_ld(Q,l->theta,0,0,B,H,T,Dh,D);
-        rope_batch_apply_ld(K,l->theta,0,0,B,H,T,Dh,D);
 
         for (int b = 0; b < B; b++) {
             for (int h = 0; h < H; h++) {
@@ -432,9 +422,9 @@ void mha_forward(MHA* restrict l,
                 softmax(Ah,T,T);
 
                 if (training && l->training)
-                    if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0) {
+                    if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                         cufltcpy(AttTemp,Ah,T * T);
-                        dropout_forward(s->dropout[b * H + h],AttTemp);
+                        dropout_forward(l->dropout[b * H + h],AttTemp);
                         Ah = AttTemp;
                     }
 
@@ -567,11 +557,12 @@ void mha_forward_step(MHA* restrict l,
  * reversing each step of mha_forward in order.
  *
  * Parameters:
- *   l   - MHA layer
- *   dY  - gradient of loss w.r.t. MHA output [BT][D]
- *   X   - original MHA input [BT][D]
- *   dX  - gradient of loss w.r.t. MHA input [BT][D], or NULL
- *   lyr - layer index (informational)
+ *   l      - MHA layer
+ *   dY     - gradient of loss w.r.t. MHA output [BT][D]
+ *   X      - original MHA input [BT][D]
+ *   dX     - gradient of loss w.r.t. MHA input [BT][D], or NULL
+ *   offset - Position index of the first token in the sequence
+ *   lyr    - layer index (informational)
  *
  * Q, K, and V are read directly from their [B*T][D] storage as strided
  * per-head views.  Att is read back per (b,h) from mha_forward.
@@ -604,6 +595,7 @@ void mha_backward(MHA* restrict l,
                   fArr2D restrict dY/*[BT][D]*/,
                   const fArr2D restrict X/*[BT][D]*/,
                   fArr2D dX,
+                  int offset,
                   int lyr)
 {
     (void) lyr;
@@ -645,7 +637,7 @@ void mha_backward(MHA* restrict l,
     ArrDD Wv = (ArrDD) l->Wv;
     ArrDD Wo = (ArrDD) l->Wo;
 
-    ArrBHTT Att = (ArrBHTT) l->Att;
+    ArrBHTT Att = (ArrBHTT) s->Att;
 
     ArrTT AttTemp = (ArrTT) s->Scores;
 
@@ -708,9 +700,9 @@ void mha_backward(MHA* restrict l,
                  * With dropout, AttTemp reconstructs the post-dropout values
                  * needed for the dVh calculation.
                  */
-                if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0) {
+                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                     /* Use AttTemp as scratch buffer */
-                    dropout_backward(s->dropout[b * H + h],&Att[base],AttTemp);
+                    dropout_backward(l->dropout[b * H + h],&Att[base],AttTemp);
                     Tmatmul_ld(dVh,AttTemp,dOh,T,T,Dh,T,D,D);
                 }
                 else
@@ -722,8 +714,8 @@ void mha_backward(MHA* restrict l,
                  * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
                  * dScores /= sqrt(Dh)                  (reverse scaling)
                  */
-                if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0)
-                    dropout_backward(s->dropout[b * H + h],dAtt,dAtt);
+                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
+                    dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
 
                 d_softmax(dScores,dAtt,&Att[base],T,T);
 
@@ -738,9 +730,6 @@ void mha_backward(MHA* restrict l,
                 matmul_ld(dQh,dScores,Kh,T,T,Dh,T,D,D);
                 Tmatmul_ld(dKh,dScores,Qh,T,T,Dh,T,D,D);
 
-                rope_apply_ld(dQh,l->theta,1,0,T,Dh,D);
-                rope_apply_ld(dKh,l->theta,1,0,T,Dh,D);
-
                 /* Step 2 backward - dQ/dK/dV were written directly into the
                  * appropriate head slices, so no gradient concatenation copies
                  * are required.
@@ -750,6 +739,9 @@ void mha_backward(MHA* restrict l,
         graph_record(graph,GRAPH_BACKWARD,GRAPH_RECORD_OFF);
         graph_play(graph,GRAPH_BACKWARD);
     }
+
+    rope_batch_apply_ld(dQ,l->theta,1,offset,B,H,T,Dh,D);
+    rope_batch_apply_ld(dK,l->theta,1,offset,B,H,T,Dh,D);
 
     /* Step 1 backward - reverse Q=X@Wq, K=X@Wk, V=X@Wv:
      * gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV

@@ -383,7 +383,7 @@ void transformer_backward(TRANSFORMER* restrict l,
     else
         d_mha_masked = l->d_mha_out;
 
-    mha_backward(l->mha,d_mha_masked,X,dX,lyr);
+    mha_backward(l->mha,d_mha_masked,X,dX,0,lyr);
 
     if (dX != NULL) {
         for (int i = 0; i < BT * D; i++)
