@@ -20,9 +20,9 @@
  *   Pointer to the read MHA layer if successful, NULL otherwise
  *
  * Notes:
- *   - Only the projection weights (Wq, Wk, Wv, Wo) are persisted; all
- *     other buffers are scratch and are (re)allocated here. The RoPE
- *     frequency table (theta) is derived and rebuilt via rope_init().
+ *   - Only the layer configuration and projection weights (Wq, Wk, Wv, Wo)
+ *     are persisted; implementation-specific buffers are (re)allocated here.
+ *     The RoPE frequency table (theta) is derived and rebuilt via rope_init().
  *   - Backward/gradient buffers are allocated only when the stored
  *     training flag is non-zero.
  */
@@ -83,7 +83,7 @@ err: /* error exit */
 int write_mha(const MHA* l, int final, FILE* fp)
 {
     int training = final ? 0 : l->training;
-    float dropout_rate = final ? 0.0f : (l->dropout && l->dropout[0]->rate);
+    float dropout_rate = final ? 0.0f : l->dropout_rate;
     int cnt = fprintf(fp,"MHA H %d T %d D %d B %d lookahead %d"
                          " training %d dropout %.9g\n",
                       l->H,l->T,l->D,l->B,l->lookahead,

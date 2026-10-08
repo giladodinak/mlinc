@@ -21,6 +21,7 @@ typedef struct {
 
     int lookahead;      /* Causal masking, set at create time below  */
     int training;       /* 1 if training, 0 if inference             */
+    float dropout_rate; /* Attention dropout rate                    */
 
     fArr2D Wq;  /* [D][D] */
     fArr2D Wk;  /* [D][D] */
@@ -33,19 +34,8 @@ typedef struct {
 
     fVec theta; /* [Dh/2] RoPE frequency table */
 
-    /* Per-(b,h,t) split heads and attention weights, stored for the
-     * entire batch so backward can read back exactly what forward
-     * computed for each (b,h) pair, rather than recomputing it. 
-     */
-    fArr2D Qh;      /* [BHT][Dh] row (b*H+h)*T+t */
-    fArr2D Kh;      /* [BHT][Dh] row (b*H+h)*T+t */
-    fArr2D Vh;      /* [BHT][Dh] row (b*H+h)*T+t */
-
+    /* Attention weights stored by forward for backward/reference tests. */
     fArr2D Att;     /* [BHT][T] row (b*H+h)*T+t */
-    DROPOUT** dropout;  /* [B*H] */
-
-    fArr2D Scores;  /* [T][T]   scratch, not persisted */
-    fArr2D Oh;      /* [T][Dh]  scratch, not persisted */
 
     fArr2D Out;     /* [BT][D] */
 
@@ -58,23 +48,12 @@ typedef struct {
     fArr2D dK;      /* [BT][D] */
     fArr2D dV;      /* [BT][D] */
 
-    fArr2D dQh;     /* [T][Dh] */
-    fArr2D dKh;     /* [T][Dh] */
-    fArr2D dVh;     /* [T][Dh] */
-
-    fArr2D dOh;     /* [T][Dh] */
-    fArr2D dAtt;    /* [T][T]  */
-    fArr2D dScores; /* [T][T]  */
-
     /* parameter gradients */
     fArr2D gWq;     /* [D][D] */
     fArr2D gWk;     /* [D][D] */
     fArr2D gWv;     /* [D][D] */
     fArr2D gWo;     /* [D][D] */
 
-    /* KV cache for single-token generation (mha_forward_step) */
-    fArr2D Kh_cache;     /* [H*T][Dh] rotated keys ring buffer */
-    fArr2D Vh_cache;     /* [H*T][Dh] values ring buffer       */
 
     void* state; /* Implementation specific (NULL if not used) */
 } MHA;

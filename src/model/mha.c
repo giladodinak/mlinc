@@ -16,6 +16,29 @@
 #include "array.h"
 #include "mha.h"
 
+typedef struct {
+    /* CPU implementation-specific forward buffers */
+    fArr2D Qh;      /* [BHT][Dh] */
+    fArr2D Kh;      /* [BHT][Dh] */
+    fArr2D Vh;      /* [BHT][Dh] */
+    DROPOUT** dropout; /* [B*H]  */
+    fArr2D Scores;  /* [T][T]    */
+    fArr2D Oh;      /* [T][Dh]   */
+
+    /* CPU implementation-specific backward */
+    fArr2D dQh;     /* [T][Dh] */
+    fArr2D dKh;     /* [T][Dh] */
+    fArr2D dVh;     /* [T][Dh] */
+    fArr2D dOh;     /* [T][Dh] */
+    fArr2D dAtt;    /* [T][T]  */
+    fArr2D dScores; /* [T][T]  */
+
+    /* KV cache for single-token generation */
+    fArr2D Kh_cache; /* [H*T][Dh] */
+    fArr2D Vh_cache; /* [H*T][Dh] */
+} MHA_STATE;
+
+
 /* Creates a Multi-Head Attention layer.
  *
  * Allocates the MHA container and records its structural parameters.
@@ -81,7 +104,11 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->BHT = l->B * l->H * l->T;
 
     l->training = training;
+    l->dropout_rate = dropout_rate;
     
+    MHA_STATE* s = allocmem(1,1,MHA_STATE);
+    l->state = s;
+
     l->Wq = allocmem(l->D,l->D,float);
     l->Wk = allocmem(l->D,l->D,float);
     l->Wv = allocmem(l->D,l->D,float);
@@ -93,22 +120,22 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
     l->theta = allocmem(1,l->Dh / 2,float);
 
-    l->Qh = allocmem(l->BHT,l->Dh,float);
-    l->Kh = allocmem(l->BHT,l->Dh,float);
-    l->Vh = allocmem(l->BHT,l->Dh,float);
+    s->Qh = allocmem(l->BHT,l->Dh,float);
+    s->Kh = allocmem(l->BHT,l->Dh,float);
+    s->Vh = allocmem(l->BHT,l->Dh,float);
 
     l->Att = allocmem(l->BHT,l->T,float);
 
     if (dropout_rate > 0) {
-        l->dropout = allocmem(l->B * l->H,1,DROPOUT*);
+        s->dropout = allocmem(l->B * l->H,1,DROPOUT*);
         for (int i = 0; i < l->B * l->H; i++) {
-            l->dropout[i] = dropout_create(dropout_rate);
-            dropout_init(l->dropout[i],l->T,l->T);
+            s->dropout[i] = dropout_create(dropout_rate);
+            dropout_init(s->dropout[i],l->T,l->T);
         }
     }
 
-    l->Scores = allocmem(l->T,l->T,float);
-    l->Oh = allocmem(l->T,l->Dh,float);
+    s->Scores = allocmem(l->T,l->T,float);
+    s->Oh = allocmem(l->T,l->Dh,float);
     
     l->Out = allocmem(l->BT,l->D,float);
 
@@ -135,13 +162,13 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->dK = allocmem(l->BT,l->D,float);
     l->dV = allocmem(l->BT,l->D,float);
 
-    l->dQh = allocmem(l->T,l->Dh,float);
-    l->dKh = allocmem(l->T,l->Dh,float);
-    l->dVh = allocmem(l->T,l->Dh,float);
+    s->dQh = allocmem(l->T,l->Dh,float);
+    s->dKh = allocmem(l->T,l->Dh,float);
+    s->dVh = allocmem(l->T,l->Dh,float);
 
-    l->dOh = allocmem(l->T,l->Dh,float);
-    l->dAtt = allocmem(l->T,l->T,float);
-    l->dScores = allocmem(l->T,l->T,float);
+    s->dOh = allocmem(l->T,l->Dh,float);
+    s->dAtt = allocmem(l->T,l->T,float);
+    s->dScores = allocmem(l->T,l->T,float);
 
     l->gWq = allocmem(l->D,l->D,float);
     l->gWk = allocmem(l->D,l->D,float);
@@ -177,6 +204,7 @@ void mha_set_pad_mask(MHA* l, const iVec pad_mask)
  */
 void mha_free(MHA* l)
 {
+    MHA_STATE* s = (MHA_STATE*) l->state;
     freemem(l->Wq);
     freemem(l->Wk);
     freemem(l->Wv);
@@ -188,20 +216,20 @@ void mha_free(MHA* l)
 
     freemem(l->theta);
 
-    freemem(l->Qh);
-    freemem(l->Kh);
-    freemem(l->Vh);
+    freemem(s->Qh);
+    freemem(s->Kh);
+    freemem(s->Vh);
 
     freemem(l->Att);
 
-    if (l->dropout != NULL) {
+    if (s->dropout != NULL) {
         for (int i = 0; i < l->B * l->H; i++)
-            dropout_free(l->dropout[i]);
-        freemem(l->dropout);
+            dropout_free(s->dropout[i]);
+        freemem(s->dropout);
     }
 
-    freemem(l->Scores);
-    freemem(l->Oh);
+    freemem(s->Scores);
+    freemem(s->Oh);
     
     freemem(l->Out);
 
@@ -212,22 +240,23 @@ void mha_free(MHA* l)
     freemem(l->dK);
     freemem(l->dV);
 
-    freemem(l->dQh);
-    freemem(l->dKh);
-    freemem(l->dVh);
+    freemem(s->dQh);
+    freemem(s->dKh);
+    freemem(s->dVh);
 
-    freemem(l->dOh);
-    freemem(l->dAtt);
-    freemem(l->dScores);
+    freemem(s->dOh);
+    freemem(s->dAtt);
+    freemem(s->dScores);
 
     freemem(l->gWq);
     freemem(l->gWk);
     freemem(l->gWv);
     freemem(l->gWo);
 
-    freemem(l->Kh_cache);
-    freemem(l->Vh_cache);
+    freemem(s->Kh_cache);
+    freemem(s->Vh_cache);
 
+    freemem(s);
     freemem(l);
 }
 
@@ -343,6 +372,7 @@ void mha_forward(MHA* restrict l,
     const int Dh = l->Dh;
     const int BT = l->BT;
     const int lookahead = l->lookahead;
+    MHA_STATE* s = (MHA_STATE*) l->state;
 
     typedef float (*ArrDD)[D];
     typedef float (*ArrBTD)[D];
@@ -360,13 +390,13 @@ void mha_forward(MHA* restrict l,
     ArrBTD K = (ArrBTD) l->K;
     ArrBTD V = (ArrBTD) l->V;
 
-    ArrBHTDh Qh = (ArrBHTDh) l->Qh;
-    ArrBHTDh Kh = (ArrBHTDh) l->Kh;
-    ArrBHTDh Vh = (ArrBHTDh) l->Vh;
+    ArrBHTDh Qh = (ArrBHTDh) s->Qh;
+    ArrBHTDh Kh = (ArrBHTDh) s->Kh;
+    ArrBHTDh Vh = (ArrBHTDh) s->Vh;
 
-    ArrTT Scores = (ArrTT) l->Scores;
+    ArrTT Scores = (ArrTT) s->Scores;
     ArrBHTT Att = (ArrBHTT) l->Att;
-    ArrTDh Oh = (ArrTDh) l->Oh;
+    ArrTDh Oh = (ArrTDh) s->Oh;
 
     ArrBTD Out = (ArrBTD) l->Out;
 
@@ -419,8 +449,8 @@ void mha_forward(MHA* restrict l,
             fltcpy(&Att[base],Scores,T * T);
 
             if (training && l->training)
-                if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
-                    dropout_forward(l->dropout[b * H + h],Scores);
+                if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0)
+                    dropout_forward(s->dropout[b * H + h],Scores);
 
             /* In Eq. 1: Attention @ V */
             matmul(Oh,Scores,&Vh[base],T,T,Dh);
@@ -471,6 +501,7 @@ void mha_forward_step(MHA* restrict l,
     const int D = l->D;
     const int H = l->H;
     const int Dh = l->Dh;
+    MHA_STATE* s = (MHA_STATE*) l->state;
 
     typedef float (*ArrDD)[D];
     typedef float (*Arr1D)[D];
@@ -486,13 +517,13 @@ void mha_forward_step(MHA* restrict l,
     Arr1D V = (Arr1D) l->V;
     Arr1D Out = (Arr1D) l->Out;
 
-    if (l->Kh_cache == NULL) {
-        l->Kh_cache = allocmem(H * T,Dh,float);
-        l->Vh_cache = allocmem(H * T,Dh,float);
+    if (s->Kh_cache == NULL) {
+        s->Kh_cache = allocmem(H * T,Dh,float);
+        s->Vh_cache = allocmem(H * T,Dh,float);
     }
 
-    ArrHTDh Kc = (ArrHTDh) l->Kh_cache;
-    ArrHTDh Vc = (ArrHTDh) l->Vh_cache;
+    ArrHTDh Kc = (ArrHTDh) s->Kh_cache;
+    ArrHTDh Vc = (ArrHTDh) s->Vh_cache;
 
     /* Project the single new token */
     matmul(Q,x,Wq,1,D,D);
@@ -523,10 +554,10 @@ void mha_forward_step(MHA* restrict l,
         fltcpy(&Vc[hbase + slot][0],Vh,Dh);
 
         /* Attention of the new token over the n valid cached keys */
-        matmulT(l->Scores,Qh,&Kc[hbase],1,Dh,n);
-        scale_scores(l->Scores,1,n,scale);
-        softmax(l->Scores,1,n);
-        matmul(Oh,l->Scores,&Vc[hbase],1,n,Dh);
+        matmulT(s->Scores,Qh,&Kc[hbase],1,Dh,n);
+        scale_scores(s->Scores,1,n,scale);
+        softmax(s->Scores,1,n);
+        matmul(Oh,s->Scores,&Vc[hbase],1,n,Dh);
     }
 
     if (Y != NULL)
@@ -590,6 +621,7 @@ void mha_backward(MHA* restrict l,
     const int H = l->H;
     const int Dh = l->Dh;
     const int BT = l->BT;
+    MHA_STATE* s = (MHA_STATE*) l->state;
 
     typedef float (*ArrBTD)[D];
     typedef float (*ArrBHTDh)[Dh];
@@ -604,13 +636,13 @@ void mha_backward(MHA* restrict l,
     ArrBTD dK = (ArrBTD) l->dK;
     ArrBTD dV = (ArrBTD) l->dV;
 
-    ArrTDh dQh = (ArrTDh) l->dQh;
-    ArrTDh dKh = (ArrTDh) l->dKh;
-    ArrTDh dVh = (ArrTDh) l->dVh;
+    ArrTDh dQh = (ArrTDh) s->dQh;
+    ArrTDh dKh = (ArrTDh) s->dKh;
+    ArrTDh dVh = (ArrTDh) s->dVh;
 
-    ArrTDh dOh = (ArrTDh) l->dOh;
-    ArrTT dAtt = (ArrTT) l->dAtt;
-    ArrTT dScores = (ArrTT) l->dScores;
+    ArrTDh dOh = (ArrTDh) s->dOh;
+    ArrTT dAtt = (ArrTT) s->dAtt;
+    ArrTT dScores = (ArrTT) s->dScores;
 
     ArrDD gWq = (ArrDD) l->gWq;
     ArrDD gWk = (ArrDD) l->gWk;
@@ -622,9 +654,9 @@ void mha_backward(MHA* restrict l,
     ArrDD Wv = (ArrDD) l->Wv;
     ArrDD Wo = (ArrDD) l->Wo;
 
-    ArrBHTDh Qh = (ArrBHTDh) l->Qh;
-    ArrBHTDh Kh = (ArrBHTDh) l->Kh;
-    ArrBHTDh Vh = (ArrBHTDh) l->Vh;
+    ArrBHTDh Qh = (ArrBHTDh) s->Qh;
+    ArrBHTDh Kh = (ArrBHTDh) s->Kh;
+    ArrBHTDh Vh = (ArrBHTDh) s->Vh;
 
     ArrBHTT Att = (ArrBHTT) l->Att;
 
@@ -667,10 +699,10 @@ void mha_backward(MHA* restrict l,
              * whereas dVh calculation uses the post-dropout values, which
              * can be resoncstructed by applying the dropout mask.
              */
-            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
+            if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0) {
                 /* Use Scroes as scratch buffer */
-                dropout_backward(l->dropout[b * H + h],&Att[base],l->Scores);
-                Tmatmul(dVh,l->Scores,dOh,T,T,Dh);
+                dropout_backward(s->dropout[b * H + h],&Att[base],s->Scores);
+                Tmatmul(dVh,s->Scores,dOh,T,T,Dh);
             }
             else
                 Tmatmul(dVh,&Att[base],dOh,T,T,Dh);
@@ -681,8 +713,8 @@ void mha_backward(MHA* restrict l,
              * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
              * dScores /= sqrt(Dh)                  (reverse scaling)
              */
-            if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
-                dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
+            if (s->dropout != NULL && s->dropout[b * H + h]->rate > 0)
+                dropout_backward(s->dropout[b * H + h],dAtt,dAtt);
 
             d_softmax(dScores,dAtt,&Att[base],T,T);
 
