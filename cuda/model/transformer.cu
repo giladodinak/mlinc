@@ -131,7 +131,7 @@ extern "C" void transformer_free(TRANSFORMER* l)
     cufreemem(l->dg2);
     cufreemem(l->db2);
 
-    free(l);
+    freemem(l);
 }
 
 /* transformer_forward - forward pass of a decoder-only transformer layer.
