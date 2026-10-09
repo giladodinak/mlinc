@@ -235,43 +235,54 @@ void mha_free(MHA* l)
     freemem(l);
 }
 
-/* Multiplies all elemensts of x by scale */
-static __global__ void scale_scores(float* x, int n, float scale)
+/* Fused score scaling, causal/padding masks, and row-wise softmax.
+ * One CUDA block processes one attention row. The scores are normalized
+ * in-place, without an intermediate global-memory scale/mask pass.
+ * Uses only device-resident inputs, so the launch is CUDA Graph capturable.
+ */
+static __global__ void scale_mask_softmax_kernel(float* Scores,
+                                                 const int* pad_mask,
+                                                 int b, int T,
+                                                 int lookahead, float scale)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) x[i] *= scale;
-}
+    const int i = blockIdx.x;
+    const int tid = threadIdx.x;
+    __shared__ float reduce[256];
 
-/* Multiplies all elemensts of x by scale, then apply masks */
-static __global__ void scale_and_mask_scores(float* Scores,
-                                             const int* pad_mask,
-                                             int b, int T,
-                                             int lookahead, float scale)
-{
-    int k = blockIdx.x * blockDim.x + threadIdx.x;
-    int n = T * T;
-    if (k < n) {
-        int i = k / T;
-        int j = k % T;
-
-        float v;
-
-        /* Causal / lookahead masking (Sec. 3.2.3, Fig. 2 generalised):
-         *   lookahead <  0 : skip - fully bidirectional attention
-         *   lookahead == 0 : strictly causal (mask every future frame)
-         *   lookahead == L : allow L future frames, mask beyond that
-         * Position i attends to j only where j <= i + lookahead
-         */
-        if (lookahead >= 0 && j > i + lookahead)
-            v = -1e9;
-        else
-        if (pad_mask != NULL && !pad_mask[b * T + j])
-            v = -1e9;
-        else
-            v = Scores[k] * scale;
-
-        Scores[k] = v;
+    float vmax = -INFINITY;
+    for (int j = tid; j < T; j += blockDim.x) {
+        float v = Scores[i * T + j] * scale;
+        if ((lookahead >= 0 && j > i + lookahead) ||
+            (pad_mask != NULL && !pad_mask[b * T + j]))
+            v = -1e9f;
+        Scores[i * T + j] = v;
+        vmax = fmaxf(vmax,v);
     }
+    reduce[tid] = vmax;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            reduce[tid] = fmaxf(reduce[tid],reduce[tid + stride]);
+        __syncthreads();
+    }
+    const float maxval = reduce[0];
+
+    float sum = 0.0f;
+    for (int j = tid; j < T; j += blockDim.x) {
+        float e = expf(Scores[i * T + j] - maxval);
+        Scores[i * T + j] = e;
+        sum += e;
+    }
+    reduce[tid] = sum;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            reduce[tid] += reduce[tid + stride];
+        __syncthreads();
+    }
+    const float invsum = 1.0f / reduce[0];
+    for (int j = tid; j < T; j += blockDim.x)
+        Scores[i * T + j] *= invsum;
 }
 
 /* mha_forward - forward pass of Multi-Head Attention (MHA) layer
@@ -322,7 +333,7 @@ static __global__ void scale_and_mask_scores(float* Scores,
  * Notes:
  *  1. Padding is not allowed at the beginning of a sequence;
  *     only trailing (right-aligned) padding is supported.
- *  2. Q, K, and V stay in their natural [B*T][D] storage.  A head is a
+ *  2. Q, K, and V stay in their [B*T][D] storage.  A head is a
  *     strided view Q[b,t,h,:], K[b,t,h,:], V[b,t,h,:], where D=H*Dh.
  *     Splitting into heads is therefore a logical view, not a data copy.
  *     Att is stored per (b,h) for backward.
@@ -366,8 +377,6 @@ void mha_forward(MHA* restrict l,
     ArrBTD Out = (ArrBTD) l->Out;
 
     float scale = 1.0 / sqrtf((float) Dh);
-    int threads = 256;
-    int blocks = (T * T + threads - 1) / threads;
 
     /* Step 1 - Linear projections (in Eq. 1, Sec. 3.2.2):
      * Q = X @ Wq,  K = X @ Wk,  V = X @ Wv
@@ -415,11 +424,10 @@ void mha_forward(MHA* restrict l,
                 matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
 
                 const int* pad_mask = (const int*) l->pad_mask;
-                scale_and_mask_scores<<<blocks,threads,0,cuda_stream()>>>(
-                                     (float*) Ah,pad_mask,b,T,lookahead,scale);
-
-                /* Compute attention probabilities - Softmax - in Eq. 1 */
-                softmax(Ah,T,T);
+                const int threads = 256; /* Tunable: multiple of 32, maximum 1024  */
+                const int blocks = T;    /* One block per row for row-wise softmax */
+                scale_mask_softmax_kernel<<<blocks,threads,0,cuda_stream()>>>(
+                    (float*) Ah,pad_mask,b,T,lookahead,scale);
 
                 if (training && l->training)
                     if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
@@ -445,6 +453,13 @@ void mha_forward(MHA* restrict l,
      */
     if (Y != NULL)
         matmul(Y,Out,Wo,BT,D,D);
+}
+
+/* Multiplies all elemensts of x by scale */
+static __global__ void scale_scores(float* x, int n, float scale)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) x[i] *= scale;
 }
 
 /* mha_forward_step - single-token cached forward (B=1, inference only).
@@ -516,9 +531,6 @@ void mha_forward_step(MHA* restrict l,
 
     float scale = 1.0 / sqrtf((float) Dh);
 
-    int threads = 256;
-    int blocks = (n + threads - 1) / threads;
-
     for (int h = 0; h < H; h++) {
 
         int hbase = h * T; /* This head's cache offset */
@@ -541,6 +553,8 @@ void mha_forward_step(MHA* restrict l,
 
         /* Attention of the new token over the n valid cached keys */
         matmulT(AttTemp,Qh,&Kc[hbase],1,Dh,n);
+        const int threads = 256;
+        const int blocks = (n + threads - 1) / threads;
         scale_scores<<<blocks,threads,0,cuda_stream()>>>(
                                             (float*)AttTemp,n,scale);
         softmax(AttTemp,1,n);
@@ -549,6 +563,40 @@ void mha_forward_step(MHA* restrict l,
 
     if (Y != NULL)
         matmul(Y,Out,Wo,1,D,D);
+}
+
+/* Fused backward softmax derivative and attention score scaling.
+ * One CUDA block processes one attention row, computing the softmax
+ * gradient and applying the scale factor in a single pass.
+ * Eliminates a separate global-memory scaling pass and kernel launch.
+ */
+static __global__ void d_softmax_scaled_kernel(float* dScores,
+                                                const float* dAtt,
+                                                const float* Att,
+                                                int T, float scale)
+{
+    int i = blockIdx.x;
+    int tid = threadIdx.x;
+    int base = i * T;
+    __shared__ float reduce[256];
+
+    float sum = 0.0f;
+    for (int j = tid; j < T; j += blockDim.x)
+        sum += dAtt[base + j] * Att[base + j];
+    reduce[tid] = sum;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride)
+            reduce[tid] += reduce[tid + stride];
+        __syncthreads();
+    }
+
+    float dot = reduce[0];
+    for (int j = tid; j < T; j += blockDim.x) {
+        int p = base + j;
+        dScores[p] = scale * Att[p] * (dAtt[p] - dot);
+    }
 }
 
 /* mha_backward - backward pass of Multi-Head Attention (MHA) layer.
@@ -645,9 +693,6 @@ void mha_backward(MHA* restrict l,
 
     float scale = 1.0 / sqrtf((float) Dh);
 
-    int threads = 256;
-    int blocks = (T * T + threads - 1) / threads;
-
     /* Step 4 backward - output projection (reverse of Y = Out @ Wo):
      * gWo  = Out.T @ dY
      * dOut = dY @ Wo.T
@@ -717,10 +762,10 @@ void mha_backward(MHA* restrict l,
                 if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
                     dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
 
-                d_softmax(dScores,dAtt,&Att[base],T,T);
-
-                scale_scores<<<blocks,threads,0,cuda_stream()>>>(
-                                             (float*)dScores,T * T,scale);
+                const int threads = 256; /* Tunable: multiple of 32, maximum 1024  */
+                const int blocks = T;    /* One block per row for row-wise softmax */
+                d_softmax_scaled_kernel<<<blocks,threads,0,cuda_stream()>>>(
+                      (float*)dScores,(float*)dAtt,(float*)&Att[base],T,scale);
 
                 /* Step 3c backward - reverse Scores = Qh @ Kh.T:
                  * dQh = dScores @ Kh
