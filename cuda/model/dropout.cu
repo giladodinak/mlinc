@@ -1,5 +1,29 @@
 /* Copyright (c) 2026 Gilad Odinak */
 /* Dropout layer data functions    */
+
+/* dropout.cu implements the same inverted-dropout operation as the
+ * textbook dropout.c, but reorganizes the computation for GPU execution.
+ *
+ * The CPU version generates random values sequentially, applies the
+ * corresponding dropout factors, and stores the mask for backward propagation.
+ *
+ * The CUDA version processes elements in parallel, using the counter-based
+ * Philox random number generator. Each thread processes four elements,
+ * generating four random values with a single curand_uniform4() call.
+ * Both implementations zero dropped elements and scale retained elements
+ * by 1/(1 - rate), preserving the same mathematical operation.
+ *
+ * Unlike the CPU version, CUDA does not store the dropout mask. Instead,
+ * it maintains a random seed and a device-resident counter. Forward advances
+ * the counter after generating the mask, while backward regenerates the
+ * identical mask using the preceding counter value.
+ *
+ * This requires each dropout layer's forward and backward operations to
+ * be paired before another forward on that layer. The mathematical dropout
+ * operation is unchanged; the differences are parallel random-number
+ * generation, mask regeneration, and CUDA Graph compatibility.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -38,18 +62,19 @@ static unsigned long long dropout_mix_seed(unsigned long long x)
     return x ^ (x >> 31);
 }
 
+#define CURAND4 4  /* Number of floats returned by curand_uniform4() */
+
 /* Generates a dropout mask and applies it in place.
  *
  * curand_uniform() returns values in (0,1]
  */
 static __global__ void dropout_forward_kernel(float* mx,
-                                              float* mask,
                                               int n, float rate,
                                               unsigned long long seed,
                                               const unsigned long long* counter)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
-    int i = 4 * k;
+    int i = CURAND4 * k;
     if (i >= n) return;
 
     curandStatePhilox4_32_10_t st;
@@ -60,12 +85,11 @@ static __global__ void dropout_forward_kernel(float* mx,
     float scale = 1.0f / (1.0f - rate);
 
     #pragma unroll
-    for (int j = 0; j < 4; j++) {
+    for (int j = 0; j < CURAND4; j++) {
         int idx = i + j;
         if (idx < n) {
             float value = (u[j] >= rate) ? scale : 0.0f;
             mx[idx] *= value;
-            mask[idx] = value;
         }
     }
 }
@@ -81,17 +105,41 @@ static __global__ void dropout_advance_kernel(unsigned long long* counter,
     *counter += step;
 }
 
-/* Applies an already-generated dropout mask */
+/* Regenerates the forward dropout factors from the preceding Philox
+ * counter value. Forward advances the counter by four after each call.
+ * Forward and backward must be paired before the next forward on this layer.
+ */
 static __global__ void dropout_backward_kernel(const float* in,
-                                               const float* restrict mask,
                                                float* out,
-                                               int n)
+                                               int n, float rate,
+                                               unsigned long long seed,
+                                               const unsigned long long* counter)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    int i = CURAND4 * k;
+    if (i >= n) return;
+
+    curandStatePhilox4_32_10_t st;
+    curand_init(seed,(unsigned long long) k,*counter - 4ULL,&st);
+    float4 r = curand_uniform4(&st);
+    float u[4] = { r.x, r.y, r.z, r.w };
+    float scale = 1.0f / (1.0f - rate);
+
+    #pragma unroll
+    for (int j = 0; j < CURAND4; j++) {
+        int idx = i + j;
+        if (idx < n)
+            out[idx] = in[idx] * ((u[j] >= rate) ? scale : 0.0f);
+    }
+}
+
+/* Copies input to output when dropout is disabled (supports in-place). */
+static __global__ void dropout_copy_kernel(const float* in,float* out,int n)
 {
     int k = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
-
     for (int i = k; i < n; i += stride)
-        out[i] = in[i] * mask[i];
+        out[i] = in[i];
 }
 
 /* Creates a dropout layer.
@@ -122,15 +170,14 @@ DROPOUT* dropout_create(float rate)
  *   input_dim  - Size of input vectors
  *
  * Notes:
- *   Allocates the device mask array and seeds this layer's counter based
- *   RNG. The seed is kept in host memory and passed to kernels by value;
+ *   Seeds this layer's counter-based RNG; no mask array is stored.
+ *   The seed is kept in host memory and passed to kernels by value;
  *   the call counter is kept in device memory (zero-initialized).
  */
 void dropout_init(DROPOUT* l, int input_dim, int batch_size)
 {
     l->B = batch_size;
     l->D = input_dim;
-    l->mask = (fArr2D) cuallocmem(l->B,l->D,float);
 
     DROPOUT_RNG* rng = (DROPOUT_RNG*) allocmem(1,1,DROPOUT_RNG);
     rng->seed = dropout_mix_seed((unsigned long long) lrng());
@@ -150,8 +197,6 @@ void dropout_set_batch_size(DROPOUT* l, int batch_size)
 {
     if (l->B == 0 || l->B == batch_size) return;
     l->B = batch_size;
-    cufreemem(l->mask);
-    l->mask = (fArr2D) cuallocmem(l->B,l->D,float);
 }
 
 /* Frees the memory allocated by dropout_create() / dropout_init().
@@ -162,7 +207,6 @@ void dropout_set_batch_size(DROPOUT* l, int batch_size)
 void dropout_free(DROPOUT* l)
 {
     if (l == NULL) return;
-    cufreemem(l->mask);
     if (l->rng_state != NULL) {
         DROPOUT_RNG* rng = (DROPOUT_RNG*) l->rng_state;
         cufreemem(rng->counter);
@@ -212,19 +256,20 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
     /* One thread per four elements; the whole array is covered in one
      * launch, so every element's mask comes from a distinct counter block.
      */
-    int quads = (n + 3) / 4;
+    int quads = (n + CURAND4 - 1) / CURAND4;
     int blocks = (quads + THDCNT - 1) / THDCNT;
 
     dropout_forward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
-        (float*) mx_,(float*) l->mask,n,rate,rng->seed,rng->counter);
+        (float*) mx_,n,rate,rng->seed,rng->counter);
 
     /* Number of random numbers generated per thread */
-    dropout_advance_kernel<<<1,1,0,cuda_stream()>>>(rng->counter,4);
+    dropout_advance_kernel<<<1,1,0,cuda_stream()>>>(rng->counter,CURAND4);
 }
 
-/* Applies a precomputed dropout mask to an input array, writing the
- * result to an output array, which may be the same array as the input
- * (in-place); partial overlap is not supported.
+/* Regenerates the preceding forward dropout mask and applies it to the
+ * input, writing to an output array (in-place supported). Partial overlap
+ * is not supported. Requires one forward per backward on this dropout layer.
+ * This also works with CUDA Graph replay, because the counter is on device.
  *
  * Parameters:
  *   in  : Pointer to the 2D input array to be masked
@@ -237,10 +282,22 @@ void dropout_backward(DROPOUT* restrict l,
     int n = l->B * l->D;
     if (n <= 0) return;
 
-    int blocks = (n + THDCNT - 1) / THDCNT;
-    if (blocks < 1)
-        blocks = 1;
+    float rate = l->rate;
+    if (rate >= 1.0f)
+        rate = nextafterf(1.0f,0.0f);
 
+    if (rate <= 0.0f) {
+        if (in_ != out_) {
+            int blocks = (n + THDCNT - 1) / THDCNT;
+            dropout_copy_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
+                (const float*)in_,(float*)out_,n);
+        }
+        return;
+    }
+
+    DROPOUT_RNG* rng = (DROPOUT_RNG*) l->rng_state;
+    int quads = (n + CURAND4 - 1) / CURAND4;
+    int blocks = (quads + THDCNT - 1) / THDCNT;
     dropout_backward_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
-        (const float*) in_,(const float*) l->mask,(float*) out_,n);
+        (const float*) in_,(float*) out_,n,rate,rng->seed,rng->counter);
 }

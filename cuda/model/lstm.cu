@@ -53,7 +53,6 @@
 
 #define THCNT 256
 
-
 /* Creates a long short term memory (LSTM) neural network.
  *
  * Parameters:
