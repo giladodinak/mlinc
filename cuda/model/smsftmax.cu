@@ -230,6 +230,76 @@ static __global__ void smsftmax_update_kernel(float* Wo,
     }
 }
 
+/* Merges two (max, sum-of-exp, argmax) partial states. Ties on the max
+ * keep the lower index, matching a left-to-right strict '>' scan.
+ */
+static __device__ __forceinline__ void eval_merge(float* m, float* s, int* ix,
+                                                  float m2, float s2, int ix2)
+{
+    if (m2 > *m || (m2 == *m && ix2 < *ix)) {
+        if (*m != -INFINITY)
+            s2 += *s * expf(*m - m2);
+        *m = m2; *s = s2; *ix = ix2;
+    }
+    else if (m2 != -INFINITY)
+        *s += s2 * expf(m2 - *m);
+}
+
+/* Full-vocabulary evaluation. One block per row: a single online pass over
+ * logits[row][1..K-1] computes max, argmax and sum exp(z - max); index 0
+ * (PAD) is excluded. Accumulates -log p(target) and top-1 hits.
+ */
+static __global__ void smsftmax_eval_kernel(const float* logits,
+                                            const int* targets,
+                                            int K, int cnt,
+                                            float* nll, int* correct)
+{
+    int i = blockIdx.x;
+    int tid = threadIdx.x;
+    if (i >= cnt)
+        return;
+    int target = targets[i];
+    if (target <= 0 || target >= K)
+        return;
+
+    __shared__ float sm[THDCNT];
+    __shared__ float ss[THDCNT];
+    __shared__ int   si[THDCNT];
+
+    const float* z = logits + (size_t) i * K;
+    float m = -INFINITY, s = 0.0f;
+    int ix = K;
+    for (int k = 1 + tid; k < K; k += blockDim.x) {
+        float v = z[k];
+        if (v > m) {
+            s = (m == -INFINITY) ? 1.0f : s * expf(m - v) + 1.0f;
+            m = v;
+            ix = k;
+        }
+        else
+            s += expf(v - m);
+    }
+    sm[tid] = m; ss[tid] = s; si[tid] = ix;
+    __syncthreads();
+
+    for (int n = blockDim.x / 2; n > 0; n >>= 1) {
+        if (tid < n) {
+            float a = sm[tid], b = ss[tid];
+            int c = si[tid];
+            eval_merge(&a,&b,&c,sm[tid + n],ss[tid + n],si[tid + n]);
+            sm[tid] = a; ss[tid] = b; si[tid] = c;
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        float logp = (z[target] - sm[0]) - logf(ss[0]);
+        atomicAdd(nll,-logp);
+        if (si[0] == target)
+            atomicAdd(correct,1);
+    }
+}
+
 /* Creates a sampled-softmax layer.
  *
  * Parameters:
@@ -558,4 +628,55 @@ void smsftmax_logits(SMSFTMAX* restrict l,
 
     matmulT((fArr2D)d->dlogits,h,l->Wo,cnt,l->E,l->K);
     cufltcpy(logits,d->dlogits,cnt * l->K);
+}
+
+/* Full-vocabulary evaluation for validation. Scores the first 'cnt' rows of
+ * h against all of Wo on the GPU and reduces each row on the GPU; only the
+ * summed NLL and the hit count are copied back.
+ */
+float smsftmax_eval(SMSFTMAX* restrict l,
+                    const fArr2D restrict h,
+                    const fArr2D restrict labels,
+                    int cnt, int* correct)
+{
+    DEVSTAT* d = (DEVSTAT*) l->devstat;
+    const int K = l->K;
+
+    if (cnt <= 0)
+        return 0.0f;
+    if (cnt > l->B) {
+        fflush(stdout);
+        fprintf(stderr,"smsftmax_eval: cnt %d exceeds batch size %d\n",
+                cnt,l->B);
+        exit(-1);
+    }
+
+    if (cnt > d->logits_rows) {
+        cufreemem(d->dlogits);
+        d->dlogits = (float*) cuallocmem(cnt,K,float);
+        d->logits_rows = cnt;
+    }
+
+    /* Targets as ints; hsamples/dsamples hold >= B*(n_neg+1) entries. */
+    const float* lab = (const float*) labels;
+    for (int i = 0; i < cnt; i++)
+        d->hsamples[i] = (int) lab[i];
+    cudaMemcpy(d->dsamples,d->hsamples,cnt * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    matmulT((fArr2D)d->dlogits,h,l->Wo,cnt,l->E,K);
+
+    cufltclr(d->dloss,1);
+    cudaMemset(d->dcorrect,0,sizeof(int));
+    smsftmax_eval_kernel<<<cnt,THDCNT,0,cuda_stream()>>>(
+        d->dlogits,d->dsamples,K,cnt,d->dloss,d->dcorrect);
+
+    float nll = 0.0f;
+    cudaMemcpy(&nll,d->dloss,sizeof(float),cudaMemcpyDeviceToHost);
+    if (correct != NULL) {
+        int c = 0;
+        cudaMemcpy(&c,d->dcorrect,sizeof(int),cudaMemcpyDeviceToHost);
+        *correct += c;
+    }
+    return nll;
 }

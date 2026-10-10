@@ -159,9 +159,8 @@ static void print_validation_status(long long correct, long long positions,
                                     double val_start)
 {
     int sec = (int) (current_time() - val_start);
-    double t1 = positions ?
-                100.0 * (double) correct / (double) positions : 0.0;
-    double pp = positions ? exp(nll / (double) positions) : 0.0;
+    double t1 = positions ? 100.0 * correct / positions : 0.0;
+    double pp = positions ? exp(nll / positions) : 0.0;
     char buf[128]; /* Larger than needed, to pacify gcc */
     snprintf(buf,sizeof(buf),
         "Validating: top-1 %4.1f%% perplexity %8.2f (%d/%d files) %d:%02d:%02d",
@@ -186,7 +185,6 @@ void validate(LM* m, const VOCAB* vocab, char** files, int nfiles,
     const int batch_size = m->B;
     const int K = m->V;
 
-    fArr2D logits = allocmem(BT,K,float); /* Full-vocab scores */
     long long correct = 0;
     long long positions = 0;
     double nll = 0.0; /* Summed negative log-likelihood */
@@ -231,49 +229,29 @@ void validate(LM* m, const VOCAB* vocab, char** files, int nfiles,
 
             fArr2D hhead = lm_forward(m,0);
 
-            /* Full-vocabulary logits for every row in the batch */
-            smsftmax_logits(m->head,hhead,logits,BT);
+            /* Full-vocabulary NLL and top-1 hits, reduced by the head */
+            int hits = 0;
+            nll += smsftmax_eval(m->head,hhead,m->labels,BT,&hits);
+            correct += hits;
 
-            typedef float (*ArrBK)[K];
-            ArrBK lg = (ArrBK) logits;
             const float* labels = (const float*) m->labels;
-
             for (int row = 0; row < BT; row++) {
                 int target = (int) labels[row];
-                if (target <= 0 || target >= K)
-                    continue; /* PAD / OOV target: skip */
-
-                /* argmax and log-sum-exp over the full vocabulary */
-                int best = 1;
-                float maxl = lg[row][1];
-                for (int c = 2; c < K; c++) {
-                    if (lg[row][c] > maxl) {
-                        maxl = lg[row][c];
-                        best = c;
-                    }
-                }
-                float sum = 0.0;
-                for (int c = 1; c < K; c++)
-                    sum += expf(lg[row][c] - maxl);
-                float logp = (lg[row][target] - maxl) - logf(sum);
-
-                nll -= (double) logp;
-                if (best == target)
-                    correct++;
-                positions++;
+                if (target > 0 && target < K)
+                    positions++; /* PAD / OOV targets are not scored */
             }
             if (current_time() - last_report >= 1.0) {
                 last_report = current_time();
-                print_validation_status(correct,positions,nll,fi,nfiles,val_start);
+                print_validation_status(
+                                    correct,positions,nll,fi,nfiles,val_start);
             }
         }
     }
     print_validation_status(correct,positions,nll,nfiles - 1,nfiles,val_start);
     printf("\n");
-    freemem(logits);
 
-    *out_top1 = positions ? 100.0 * (double) correct / (double) positions : 0.0;
-    *out_ppl  = positions ? exp(nll / (double) positions) : 0.0;
+    *out_top1 = positions ? 100.0 * correct / positions : 0.0;
+    *out_ppl  = positions ? exp(nll / positions) : 0.0;
 }
 
 

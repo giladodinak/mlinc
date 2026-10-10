@@ -150,6 +150,25 @@ void smsftmax_logits(SMSFTMAX* restrict l,
                      fArr2D restrict logits/*[cnt][K]*/,
                      int cnt);
 
+/* Full-vocabulary evaluation. For each of the first 'cnt' rows whose target
+ * is a valid word (0 < target < K), computes -log softmax(h . Wo^T)[target]
+ * over words 1..K-1 (PAD excluded) and the top-1 argmax.
+ *
+ * Parameters:
+ *   l       - Pointer to the layer
+ *   h       - Input embeddings [cnt][E]
+ *   labels  - Target word indices [cnt][1] (stored as floats)
+ *   cnt     - Number of rows (<= B)
+ *   correct - If not NULL, incremented per row whose target is the argmax
+ *
+ * Returns:
+ *   The summed negative log-likelihood over the valid rows.
+ */
+float smsftmax_eval(SMSFTMAX* restrict l,
+                    const fArr2D restrict h/*[cnt][E]*/,
+                    const fArr2D restrict labels/*[cnt][1]*/,
+                    int cnt, int* correct);
+
 #ifdef __cplusplus
 }
 #endif

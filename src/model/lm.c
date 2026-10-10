@@ -192,6 +192,41 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
     return m->acts[m->N];
 }
 
+/* Returns the k-th largest value (1-based) of a[0..n-1] in expected O(n).
+ * Iterative form of Hoare's FIND algorithm using Hoare partitioning.
+ * Reorders a[].
+ *
+ * C.A.R. Hoare, Algorithm 65: FIND, CACM 4(7), 1961.
+ * https://courses.cs.vt.edu/~cs3114/Summer17/Notes/Supplemental/p321-hoare.pdf
+ */
+static float kth_largest(float* a, int n, int k)
+{
+    const int t = k - 1;
+    int lo = 0;
+    int hi = n - 1;
+    while (lo < hi) {
+        float pivot = a[lo + (hi - lo) / 2];
+        int i = lo;
+        int j = hi;
+        while (i <= j) {
+            while (a[i] > pivot) i++;
+            while (a[j] < pivot) j--;
+            if (i <= j) {
+                float x = a[i]; a[i] = a[j]; a[j] = x; /* Swap */
+                i++; j--;
+            }
+        }
+        if (t <= j)
+            hi = j;
+        else
+        if (t >= i)
+            lo = i;
+        else
+            break; /* a[j+1..i-1] == pivot */
+    }
+    return a[t];
+}
+
 /* Generates tokens continuing from a prompt.
  *
  * Autoregressive generation: each new token is sampled conditional on
@@ -249,6 +284,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
     int s = 0;
 
     float* logits = allocmem(1,K,float);
+    float* tmp = allocmem(1,K,float); /* Top-k selection */
 
     /* Ring of recently generated tokens for the repetition penalty */
     int* recent = (rep_win_len > 0) ? allocmem(rep_win_len,1,int) : NULL;
@@ -351,28 +387,10 @@ int lm_generate(LM* m, HASHMAP* hmap,
              */
             if (top_k > 0 && top_k < K - 1) {
                 float neginf = -1e30;
-                float tmp[K];
-                for (int k = 1; k < K; k++)
-                    tmp[k] = logits[k];
+                memcpy(tmp,logits + 1,(K - 1) * sizeof(float));
 
-                /* Selection pass: pull off the top_k maxima to
-                 * locate the cutoff score without a full sort.
-                 */
-                float thresh = neginf;
-                for (int r = 0; r < top_k; r++) {
-                    float mv = neginf;
-                    int mi = -1;
-
-                    for (int k = 1; k < K; k++)
-                        if (tmp[k] > mv) {
-                            mv = tmp[k];
-                            mi = k;
-                        }
-
-                    if (mi < 0) break;
-                    thresh = mv;
-                    tmp[mi] = neginf;
-                }
+                /* Select the top_k-th largest score as the cutoff */
+                float thresh = kth_largest(tmp,K - 1,top_k);
 
                 for (int k = 1; k < K; k++)
                     if (logits[k] < thresh)
@@ -444,6 +462,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
         buffer[bufpos - 1] = '\0';
     lm_use_cache(m,0); /* Restore batch row counts */
     freemem(logits);
+    freemem(tmp);
     freemem(recent);
     return s; /* Actual number of words generated (excluding seed) */
 }
