@@ -1,5 +1,33 @@
-/* Copyright (c) 2026 Gilad Odinak            */
-/* Sampled-softmax output layer functions - CUDA */
+/* Copyright (c) 2026 Gilad Odinak        */
+/* Sampled-softmax output layer functions */
+
+/* smsftmax.cu implements the same corrected sampled-softmax layer as the
+ * textbook smsftmax.c, but reorganizes the computation for GPU execution.
+ *
+ * Negative sampling stays on the host and uses the same random sequence as
+ * the CPU version. The sampled ids are copied to the device, and the rows of
+ * gWo they touch are zeroed by a separate kernel before the loss kernel runs,
+ * instead of being zeroed inline on first touch.
+ *
+ * The loss kernel processes one batch row per CUDA block, computing the
+ * target and negative scores with block-wide reductions. Because different
+ * rows can touch the same Wo rows, gradient contributions to gWo, as well as
+ * the loss and correct counts, are accumulated with atomic adds. The update
+ * applies the same sparse SGD step to the touched rows, one thread per
+ * element.
+ *
+ * Full-vocabulary scoring processes rows in chunks into a reused device
+ * buffer. Each row is reduced in a single online pass that computes the
+ * max, sum of exponentials and argmax together, with ties resolved to the
+ * lower index as in the CPU version. Only the summed NLL and hit count
+ * are copied back to the host.
+ *
+ * The mathematical operations are unchanged. Atomic accumulation makes the
+ * summation order nondeterministic, and the NLL is accumulated in float
+ * rather than double, so results can differ from the CPU version, and
+ * between runs, in the last bits.
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -14,6 +42,7 @@
 #include "smsftmax.h"
 
 #define THDCNT 256
+#define EVAL_CHUNK 256 /* Rows per full-vocabulary scoring pass */
 
 typedef struct devstat_s {
     int* hsamples;    /* Host target/negative samples [B][n_neg+1]  */
@@ -620,14 +649,21 @@ void smsftmax_logits(SMSFTMAX* restrict l,
 {
     DEVSTAT* d = (DEVSTAT*) l->devstat;
 
-    if (cnt > d->logits_rows) {
+    /* Rows are scored in chunks so dlogits holds at most EVAL_CHUNK rows */
+    int rows = (cnt < EVAL_CHUNK) ? cnt : EVAL_CHUNK;
+    if (rows > d->logits_rows) {
         cufreemem(d->dlogits);
-        d->dlogits = (float*) cuallocmem(cnt,l->K,float);
-        d->logits_rows = cnt;
+        d->dlogits = (float*) cuallocmem(rows,l->K,float);
+        d->logits_rows = rows;
     }
 
-    matmulT((fArr2D)d->dlogits,h,l->Wo,cnt,l->E,l->K);
-    cufltcpy(logits,d->dlogits,cnt * l->K);
+    for (int r0 = 0; r0 < cnt; r0 += rows) {
+        int n = (cnt - r0 < rows) ? cnt - r0 : rows;
+        matmulT((fArr2D)d->dlogits,(fArr2D)((float*)h + (size_t) r0 * l->E),
+                l->Wo,n,l->E,l->K);
+        cufltcpy((fArr2D)((float*)logits + (size_t) r0 * l->K),d->dlogits,
+                 n * l->K);
+    }
 }
 
 /* Full-vocabulary evaluation for validation. Scores the first 'cnt' rows of
@@ -651,10 +687,12 @@ float smsftmax_eval(SMSFTMAX* restrict l,
         exit(-1);
     }
 
-    if (cnt > d->logits_rows) {
+    /* Rows are scored in chunks so dlogits holds at most EVAL_CHUNK rows */
+    int rows = (cnt < EVAL_CHUNK) ? cnt : EVAL_CHUNK;
+    if (rows > d->logits_rows) {
         cufreemem(d->dlogits);
-        d->dlogits = (float*) cuallocmem(cnt,K,float);
-        d->logits_rows = cnt;
+        d->dlogits = (float*) cuallocmem(rows,K,float);
+        d->logits_rows = rows;
     }
 
     /* Targets as ints; hsamples/dsamples hold >= B*(n_neg+1) entries. */
@@ -664,12 +702,15 @@ float smsftmax_eval(SMSFTMAX* restrict l,
     cudaMemcpy(d->dsamples,d->hsamples,cnt * sizeof(int),
                cudaMemcpyHostToDevice);
 
-    matmulT((fArr2D)d->dlogits,h,l->Wo,cnt,l->E,K);
-
     cufltclr(d->dloss,1);
     cudaMemset(d->dcorrect,0,sizeof(int));
-    smsftmax_eval_kernel<<<cnt,THDCNT,0,cuda_stream()>>>(
-        d->dlogits,d->dsamples,K,cnt,d->dloss,d->dcorrect);
+    for (int r0 = 0; r0 < cnt; r0 += rows) {
+        int n = (cnt - r0 < rows) ? cnt - r0 : rows;
+        matmulT((fArr2D)d->dlogits,(fArr2D)((float*)h + (size_t) r0 * l->E),
+                l->Wo,n,l->E,K);
+        smsftmax_eval_kernel<<<n,THDCNT,0,cuda_stream()>>>(
+            d->dlogits,d->dsamples + r0,K,n,d->dloss,d->dcorrect);
+    }
 
     float nll = 0.0f;
     cudaMemcpy(&nll,d->dloss,sizeof(float),cudaMemcpyDeviceToHost);
