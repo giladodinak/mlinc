@@ -3,7 +3,7 @@
 #include <math.h>
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "scaler.h"
 
 /* Constructs a processor that normalizes features by scaling them to have

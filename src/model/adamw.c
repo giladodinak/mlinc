@@ -3,8 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include "array.h"
-#include "clip.h"
+#include "arraytypes.h"
 #include "adamw.h"
 
 /* Adaptive Moment Estimation with weight decay
@@ -60,10 +59,6 @@ void adamw_update(fArr2D w_/*[M][N]*/,fArr2D g_/*[M][N]*/,
     ArrMN m = (ArrMN) m_;
     ArrMN v = (ArrMN) v_;
 
-    clip_gradients(g,M,N,1.0e-16,10.0);
-
-    /* Compute the bias-correction denominators once per update, not once
-     * per weight. beta1^t and beta2^t depend only on the step number. */
     float bc1 = 1.0f / (1.0f - powf(beta1,update_step));
     float bc2 = 1.0f / (1.0f - powf(beta2,update_step));
 

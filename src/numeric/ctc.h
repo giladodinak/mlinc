@@ -20,6 +20,10 @@ typedef struct ctc_s {
     fArr2D beta;  /* backward probabilities [T][2*T+1] */
     fVec prob;    /* Final probabilities [T]           */
 } CTC;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
     
 /* Creates a Contectionist Temporal Classification loss calculator.
  * 
@@ -55,9 +59,10 @@ void ctc_free(CTC* ctc);
  *   when batch size is smaller than sequence length.
  * 
  */
-float ctc_loss(CTC* ctc, const fArr2D yp_/*[T][L]*/, 
-                         const fArr2D yt_/*[T][L]*/,
-                         int T, int L);
+float ctc_loss(CTC* ctc,
+               const fArr2D yp_/*[T][L]*/, 
+               const fArr2D yt_/*[T][L]*/,
+               int T, int L);
 
 /* Calculates the gradient of the ctc loss with respect to prediction (dL/dy)
  * for predicted vectors and their true labels.
@@ -71,10 +76,11 @@ float ctc_loss(CTC* ctc, const fArr2D yp_/*[T][L]*/,
  * Returns:
  *   dy - array of T vectors, each having L gradients (output)
  */
-void dLdy_ctc_loss(CTC* ctc, const fArr2D yp_/*[T][L]*/,
-                             const fArr2D yt_/*[T][L]*/,
-                             fArr2D dy_/*[T][L]*/,
-                             int T, int L);
+void dLdy_ctc_loss(CTC* ctc,
+                   const fArr2D yp_/*[T][L]*/,
+                   const fArr2D yt_/*[T][L]*/,
+                   fArr2D dy_/*[T][L]*/,
+                   int T, int L);
 
 /* Calculates the accuracy factor between predicted classes and true labels.
  * 
@@ -97,8 +103,14 @@ void dLdy_ctc_loss(CTC* ctc, const fArr2D yp_/*[T][L]*/,
  * Returns:
  *   Accuracy factor numerator value
  */
-float ctc_accuracy(CTC* ctc, const fArr2D yp_/*[T][L]*/,
+float ctc_accuracy(CTC* ctc,
+                   const fArr2D yp_/*[T][L]*/,
                    const fArr2D yt_/*[T][L]*/, 
                    int T, int L);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

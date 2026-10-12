@@ -39,7 +39,7 @@ CTC* ctc_create(int T, int L, int blank)
     ctc->label = allocmem(ctc->S,1,int);
     ctc->alpha = allocmem(T,ctc->S,float);
     ctc->beta = allocmem(T,ctc->S,float);
-    ctc->prob = allocmem(T,L,float);
+    ctc->prob = allocmem(T,1,float);
     return ctc;
 }
 
@@ -47,6 +47,7 @@ CTC* ctc_create(int T, int L, int blank)
  */
 void ctc_free(CTC* ctc)
 {
+    if (ctc == NULL) return;
     freemem(ctc->yp);
     freemem(ctc->ypc);
     freemem(ctc->ytc);
@@ -90,9 +91,10 @@ static inline float logsumexp(float a, float b)
  *    alignment is known, the later approch yields better results
  *    when batch size is smaller than sequence length.
  */
-float ctc_loss(CTC* ctc, const fArr2D yp_/*[T][L]*/,
-                         const fArr2D yt_/*[T][L]*/,
-                         int T, int L)
+float ctc_loss(CTC* ctc,
+               const fArr2D yp_/*[T][L]*/,
+               const fArr2D yt_/*[T][L]*/,
+               int T, int L)
 {
     const int blank = ctc->blank;
     typedef float (*ArrTL)[L];
@@ -233,10 +235,11 @@ float ctc_loss(CTC* ctc, const fArr2D yp_/*[T][L]*/,
  * Similarily it does not used the apssed in yt, instead using the
  * padded lables created by ctc_loss and stored in ctc.
  */
-void dLdy_ctc_loss(CTC* ctc, const fArr2D yp_/*[T][L]*/,
-                             const fArr2D yt_/*[T][L]*/,
-                             fArr2D dy_/*[T][L]*/,
-                             int T, int L)
+void dLdy_ctc_loss(CTC* ctc,
+                   const fArr2D yp_/*[T][L]*/,
+                   const fArr2D yt_/*[T][L]*/,
+                   fArr2D dy_/*[T][L]*/,
+                   int T, int L)
 
 {
     (void) yp_;

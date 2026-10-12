@@ -33,6 +33,7 @@ typedef struct lm_s {
     iVec pad_mask;      /* [BT]  1 real / 0 pad                   */
     fArr2D labels;      /* [BT][1] next-token targets (as floats) */
     iVec ids;           /* [BT]  input token ids                  */
+    void* devstat;      /* Additional implementation state        */
 } LM;
 
 LM* lm_create(int vocab, int model_dim, int heads, int seq_len,

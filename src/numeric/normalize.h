@@ -2,7 +2,12 @@
 /* Data normalization functions    */
 #ifndef NORMALIZE_H
 #define NORMALIZE_H
-#include "array.h"
+#include "arraytypes.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Calculates the mean and standard deviation of an array of feature vectors 
  * by feature (i.e., by column) and returns these values in mean and sdev 
  * vectors respectively.
@@ -51,5 +56,10 @@ void normalize(fArr2D x_/*[B][D]*/,
                const fVec mean_/*[D | D-1]*/, 
                const fVec sdev_/*[D | D-1]*/, 
                int exc_last);
+
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

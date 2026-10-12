@@ -79,7 +79,7 @@ static inline fArr2D layer_forward(LAYER* l,
         case 'd': return dense_forward(l->dense,X,lyr);
         case 'l': return lstm_forward(l->lstm,X,lyr);
         case 't':
-            transformer_forward(l->transformer,X,NULL,training,l->out,lyr);
+            transformer_forward(l->transformer,X,training,l->out,lyr);
             return l->out;
         case 'n': return negsample_forward(l->negsample,X,lyr);
     }
@@ -131,6 +131,9 @@ void layer_set_batch_size(LAYER* l, int batch_size);
  * l->opt_state / l->num_opt_state.
  */
 void layer_alloc_opt_state(LAYER* l, char optimizer);
+
+/* Frees the memory allocated by layer_alloc_opt_state */
+void layer_free_opt_state(LAYER* l);
 
 /* Applies one optimizer step. */
 void layer_update(LAYER* l, char optimizer,

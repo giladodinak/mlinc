@@ -1,85 +1,58 @@
 /* Copyright (c) 2026 Gilad Odinak */
 /* Multi-Head Attention layer data structures and functions */
-/* References:
- * Attention Is All You Need, 2023. https://arxiv.org/pdf/1706.03762v7 
- * Roformer: Enhanced transformer with Rotary Position Embedding, 2023.
- * https://arxiv.org/pdf/2104.09864
- */
 #ifndef MHA_H
 #define MHA_H
 #include "float.h"
 #include "mem.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "activation.h"
 #include "dropout.h"
 #include "rope.h"
 
 typedef struct {
-    /* dimensions */
     int B;      /* Batch size      */
     int T;      /* Sequence length */
     int D;      /* Model dimension */
     int H;      /* Number of heads */
-    int Dh;     /* D / H     */
-    int BT;     /* B * T     */
-    int BHT;    /* B * H * T */
+    int Dh;     /* D / H           */
+    int BT;     /* B * T           */
+    int BHT;    /* B * H * T       */
 
-    int lookahead;      /* Causal masking, set at create time below  */
-    int training;       /* 1 if training, 0 if inference             */
+    int lookahead;      /* Causal masking (see below)    */
+    int training;       /* 1 if training, 0 if inference */
+    float dropout_rate; /* Attention dropout rate        */
+    DROPOUT** dropout;  /* [B * H] masks                 */
+    fVec theta;         /* [Dh/2] RoPE frequency table   */
+    iVec pad_mask;      /* [BT]                          */
 
-    fArr2D Wq;  /* [D][D] */
-    fArr2D Wk;  /* [D][D] */
-    fArr2D Wv;  /* [D][D] */
-    fArr2D Wo;  /* [D][D] */
+    fArr2D Wq;  /* [D][D]  */
+    fArr2D Wk;  /* [D][D]  */
+    fArr2D Wv;  /* [D][D]  */
+    fArr2D Wo;  /* [D][D]  */
 
     fArr2D Q;   /* [BT][D] */
     fArr2D K;   /* [BT][D] */
     fArr2D V;   /* [BT][D] */
+    fArr2D Out; /* [BT][D] */
 
-    fVec theta; /* [Dh/2] RoPE frequency table */
-
-    /* Per-(b,h,t) split heads and attention weights, stored for the
-     * entire batch so backward can read back exactly what forward
-     * computed for each (b,h) pair, rather than recomputing it. 
-     */
-    fArr2D Qh;      /* [BHT][Dh] row (b*H+h)*T+t */
-    fArr2D Kh;      /* [BHT][Dh] row (b*H+h)*T+t */
-    fArr2D Vh;      /* [BHT][Dh] row (b*H+h)*T+t */
-
-    fArr2D Att;     /* [BHT][T] row (b*H+h)*T+t */
-    DROPOUT** dropout;  /* [B*H] */
-
-    fArr2D Scores;  /* [T][T]   scratch, not persisted */
-    fArr2D Oh;      /* [T][Dh]  scratch, not persisted */
-
-    fArr2D Out;     /* [BT][D] */
-
-    /* backward buffers */
+    /* Backward buffers */
     fArr2D dOut;    /* [BT][D] */
-
     fArr2D dQ;      /* [BT][D] */
     fArr2D dK;      /* [BT][D] */
     fArr2D dV;      /* [BT][D] */
 
-    fArr2D dQh;     /* [T][Dh] */
-    fArr2D dKh;     /* [T][Dh] */
-    fArr2D dVh;     /* [T][Dh] */
-
-    fArr2D dOh;     /* [T][Dh] */
-    fArr2D dAtt;    /* [T][T]  */
-    fArr2D dScores; /* [T][T]  */
-
-    /* parameter gradients */
+    /* Parameter gradients */
     fArr2D gWq;     /* [D][D] */
     fArr2D gWk;     /* [D][D] */
     fArr2D gWv;     /* [D][D] */
     fArr2D gWo;     /* [D][D] */
 
-    /* KV cache for single-token generation (mha_forward_step) */
-    fArr2D Kh_cache;     /* [H*T][Dh] rotated keys ring buffer */
-    fArr2D Vh_cache;     /* [H*T][Dh] values ring buffer       */
-
+    void* state; /* Implementation specific (NULL if not used) */
 } MHA;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Creates a Multi-Head Attention layer.
  *
@@ -126,6 +99,20 @@ MHA* mha_create(int heads, int steps, int lookahead);
  */
 void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout_rate);
 
+/* Sets a padding mask
+ *
+ * Parameters:
+ *   l        - Pointer to the MHA layer from mha_create().
+ *   pad_mask - An integer array of length [B*T];
+ *              entries are 1 for real tokens, 0 for padding.
+ *
+ * Notes:
+ *   - This function may be called only once, after mha_init and before
+ *     the first invocation of mha_forward.
+ *   - pad_mask content may be set before each invocation of mha_forward.
+ */
+void mha_set_pad_mask(MHA* l, const iVec pad_mask);
+
 /* Releases all memory owned by an MHA layer.
  *
  * Frees the projection weights, RoPE table, forward scratch buffers, and
@@ -149,478 +136,68 @@ void mha_free(MHA* l);
  *               buffers, and dimensions.
  *   X         : Input 2D array of shape [B*T][D], where:
  *               B = batch size, T = sequence length, D = model dimension.
- *   pad_mask  : Optional integer array of length [B*T];
- *               entries are 1 for real tokens, 0 for padding.
- *               If NULL, no padding mask is applied.
  *   Y         : Output 2D array of shape [B*T][D];
-                 if NULL, output projection is skipped.
+ *               if NULL, output projection is skipped.
  *   offset    : Position index of the first token in the sequence
  *   training  : Non-zero during training (applies attention dropout); 0
  *               during inference/generation (no dropout, deterministic).
  *   lyr       : Layer index.
- *
- * Causal / lookahead masking is fixed per layer and taken from
- * l->lookahead (set in mha_create): < 0 bidirectional, 0 strictly causal,
- * L causal with L frames of future context. Position i may attend to
- * position j only when j <= i + l->lookahead. Independent of pad_mask.
- *
- * Computation (per head h, per batch item b):
- *
- *   Step 1 - Linear projections (in Eq. 1, Sec. 3.2.2):
- *     Q = X @ Wq,  K = X @ Wk,  V = X @ Wv
- *
- *   Step 2 - Split into heads (Sec. 3.2.2):
- *     Qh = Q[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
- *     Kh = K[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
- *     Vh = V[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
- *
- *   Step 3 - Scaled dot-product attention (in Eq. 1, Sec. 3.2.1):
- *     Scores = Qh @ Kh.T / sqrt(Dh)
- *     Scores[i][j] = -1e9 for j > i + lookahead  (causal/lookahead mask)
- *     Att = softmax(Scores)           (row-wise)
- *     Oh  = Att @ Vh
- *
- *   Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
- *     Out = Concat(Oh_0, ..., Oh_{H-1})
- *     Y   = Out @ Wo if Y != NULL
  *
  * Notes: 
  *  1. Padding is not allowed at the beginning of a sequence;
  *     only trailing (right-aligned) padding is supported.
  *  2. Offset is used when training overlapping windows:
  *     each batch's start position advances by the window stride.
- *  3. Qh, Kh, Vh, and Att are stored per (b,h) pair for the whole
- *     batch, so that mha_backward can read back exactly what forward
- *     computed for each (b,h) without recomputing it.
  *
  * Reference:
  *   - Vaswani et al., "Attention Is All You Need", 2017
  */
-static inline void mha_forward(MHA* restrict l,
-                               const fArr2D restrict X/*[BT][D]*/,
-                               const iVec restrict pad_mask/*[BT]*/,
-                               fArr2D Y/*[BT][D]*/,
-                               int offset,
-                               int training,
-                               int lyr)
-{
-    (void) lyr;
-    const int B = l->B;
-    const int T = l->T;
-    const int D = l->D;
-    const int H = l->H;
-    const int Dh = l->Dh;
-    const int BT = l->BT;
-    const int lookahead = l->lookahead;
-
-    typedef float (*ArrDD)[D];
-    typedef float (*ArrBTD)[D];
-    typedef float (*ArrBHTDh)[Dh];
-    typedef float (*ArrTDh)[Dh];
-    typedef float (*ArrTT)[T];
-    typedef float (*ArrBHTT)[T];
-
-    ArrDD Wq = (ArrDD) l->Wq;
-    ArrDD Wk = (ArrDD) l->Wk;
-    ArrDD Wv = (ArrDD) l->Wv;
-    ArrDD Wo = (ArrDD) l->Wo;
-
-    ArrBTD Q = (ArrBTD) l->Q;
-    ArrBTD K = (ArrBTD) l->K;
-    ArrBTD V = (ArrBTD) l->V;
-
-    ArrBHTDh Qh = (ArrBHTDh) l->Qh;
-    ArrBHTDh Kh = (ArrBHTDh) l->Kh;
-    ArrBHTDh Vh = (ArrBHTDh) l->Vh;
-
-    ArrTT Scores = (ArrTT) l->Scores;
-    ArrBHTT Att = (ArrBHTT) l->Att;
-    ArrTDh Oh = (ArrTDh) l->Oh;
-
-    ArrBTD Out = (ArrBTD) l->Out;
-
-    float scale = 1.0 / sqrtf((float) Dh);
-
-    /* Step 1 - Linear projections (in Eq. 1, Sec. 3.2.2):
-     * Q = X @ Wq,  K = X @ Wk,  V = X @ Wv
-     */
-    matmul(Q,X,Wq,BT,D,D);
-    matmul(K,X,Wk,BT,D,D);
-    matmul(V,X,Wv,BT,D,D);
-    fltclr(Out,BT * D);
-
-    for (int b = 0; b < B; b++) {
-        for (int h = 0; h < H; h++) {
-
-            int base = (b * H + h) * T; /* Row offset into [BHT][...] buffers */
-
-            /* Step 2 - Split into heads (Sec. 3.2.2):
-             * Qh = Q[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
-             * Kh = K[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
-             * Vh = V[b*T:(b+1)*T, h*Dh:(h+1)*Dh]
-             */
-            for (int t = 0; t < T; t++) {
-                int r = b * T + t;
-                fltcpy(&Qh[base + t][0],&Q[r][h * Dh],Dh);
-                fltcpy(&Kh[base + t][0],&K[r][h * Dh],Dh);
-                fltcpy(&Vh[base + t][0],&V[r][h * Dh],Dh);
-            }
-
-            rope_apply(&Qh[base],l->theta,0,offset,T,Dh);
-            rope_apply(&Kh[base],l->theta,0,offset,T,Dh);
-
-            /* Step 3 - Scaled dot-product attention (in Eq. 1, Sec. 3.2.1):
-             * Scores = Qh @ Kh.T / sqrt(Dh)
-             * Scores[i][j] = -1e9 for j > i + lookahead  (causal/lookahead mask)
-             * Att = softmax(Scores)
-             * Oh  = Att @ Vh
-             */
-            matmulT(Scores,&Qh[base],&Kh[base],T,Dh,T);
-
-            for(int i = 0; i < T; i++)
-                for(int j = 0; j < T; j++)
-                    Scores[i][j] *= scale;
-
-            /* Causal / lookahead masking (Sec. 3.2.3, Fig. 2 generalised).
-             *   lookahead <  0 : skip - fully bidirectional attention
-             *   lookahead == 0 : strictly causal (mask every future frame)
-             *   lookahead == L : allow L future frames, mask beyond that
-             * Position i attends to j only where j <= i + lookahead
-             */
-            if (lookahead >= 0) {
-                for (int i = 0; i < T; i++)
-                    for (int j = i + lookahead + 1; j < T; j++)
-                        Scores[i][j] = -1e9f;
-            }
-
-            if (pad_mask != NULL) {
-                for (int i = 0; i < T; i++)
-                    if (!pad_mask[b * T + i])
-                        for (int j = 0; j < T; j++)
-                            Scores[j][i] = -1e9f;
-            }
-
-            /* Compute attention probabilities - Softmax - in Eq. 1 */
-            softmax(Scores,T,T);
-
-            /* Store this head's attention weights (pre-dropout) for backward */
-            fltcpy(&Att[base],Scores,T * T);
-
-            if (training && l->training && l->dropout[b * H + h]->rate > 0)
-                dropout_forward(l->dropout[b * H + h],Scores);
-
-            /* In Eq. 1: Attention @ V */
-            matmul(Oh,Scores,&Vh[base],T,T,Dh);
-
-            /* Step 4 - Concatenate heads and project (Eq. 2, Sec. 3.2.2):
-             * Out = Concat(Oh_0, ..., Oh_{H-1})
-             */
-            for (int t = 0;t < T; t++) {
-                int r= b * T + t;
-                fltcpy(&Out[r][h * Dh], &Oh[t][0], Dh);
-            }
-        }
-    }
-    /* Step 4 continued - output projection (Eq. 2, Sec. 3.2.2):
-     * Y = Out @ Wo
-     */
-    if (Y != NULL)
-        matmul(Y,Out,Wo,BT,D,D);
-}
+void mha_forward(MHA* restrict l,
+                 const fArr2D restrict X/*[BT][D]*/,
+                 fArr2D Y/*[BT][D]*/,
+                 int offset,
+                 int training,
+                 int lyr);
 
 /* mha_forward_step - single-token cached forward (B=1, inference only).
  *
- * Processes one token at absolute position 'offset': projects Q/K/V, RoPE-
- * rotates Q and K, appends the rotated K and V to per-head ring buffers
- * (slot = offset % T), and attends the query over the last min(offset+1, T)
- * cached keys, writing [1][D] to Y.
- *
- * Keys are cached already rotated, so attention over the ring is correct
- * without re-rotating (RoPE depends only on position differences). offset 0
- * starts a fresh sequence. Causal masking is implicit (cached keys are all at
- * positions <= offset).
+ * Processes one token at absolute position 'offset'.
  *
  * Parameters:
- *   l      - MHA layer
- *   x      - the new token's input row [1][D]
- *   Y      - output row [1][D]
- *   offset - absolute position of this token (0-based)
- *   lyr    - layer index (informational)
+ *   l         : MHA layer
+ *   x         : the new token's input row [1][D]
+ *   Y         : output row [1][D]
+ *   offset    : absolute position of this token (0-based)
+ *   lyr       : layer index (informational)
  */
-static inline void mha_forward_step(MHA* restrict l,
-                                    const fArr2D restrict x/*[1][D]*/,
-                                    fArr2D Y/*[1][D]*/,
-                                    int offset,
-                                    int lyr)
-{
-    (void) lyr;
-    const int T = l->T;
-    const int D = l->D;
-    const int H = l->H;
-    const int Dh = l->Dh;
+void mha_forward_step(MHA* restrict l,
+                      const fArr2D restrict x/*[1][D]*/,
+                      fArr2D Y/*[1][D]*/,
+                      int offset,
+                      int lyr);
 
-    typedef float (*ArrDD)[D];
-    typedef float (*Arr1D)[D];
-    typedef float (*ArrHTDh)[Dh];
-
-    ArrDD Wq = (ArrDD) l->Wq;
-    ArrDD Wk = (ArrDD) l->Wk;
-    ArrDD Wv = (ArrDD) l->Wv;
-    ArrDD Wo = (ArrDD) l->Wo;
-    Arr1D Q  = (Arr1D) l->Q;
-    Arr1D K  = (Arr1D) l->K;
-    Arr1D V  = (Arr1D) l->V;
-    Arr1D Out = (Arr1D) l->Out;
-
-    if (l->Kh_cache == NULL) {
-        l->Kh_cache = allocmem(H * T,Dh,float);
-        l->Vh_cache = allocmem(H * T,Dh,float);
-    }
-    ArrHTDh Kc = (ArrHTDh) l->Kh_cache;
-    ArrHTDh Vc = (ArrHTDh) l->Vh_cache;
-
-    /* Project the single new token */
-    matmul(Q,x,Wq,1,D,D);
-    matmul(K,x,Wk,1,D,D);
-    matmul(V,x,Wv,1,D,D);
-
-    int slot = offset % T; /* Ring position of this token */
-    int n = offset + 1;    /* Valid keys so far           */
-    if (n > T) n = T;      /* Buffer is full              */
-
-    float scale = 1.0 / sqrtf((float) Dh);
-
-    for (int h = 0; h < H; h++) {
-        int hbase = h * T;
-        float qh[Dh], kh[Dh];
-        fltcpy(qh,&Q[0][h*Dh],Dh);
-        fltcpy(kh,&K[0][h*Dh],Dh);
-
-        /* RoPE-rotate the new token's Q and K at absolute position offset. */
-        rope_apply((fArr2D) qh,l->theta,0,offset,1,Dh);
-        rope_apply((fArr2D) kh,l->theta,0,offset,1,Dh);
-
-        /* Store rotated K and raw V into the ring at this slot. */
-        fltcpy(&Kc[hbase+slot][0],kh,Dh);
-        fltcpy(&Vc[hbase+slot][0],&V[0][h*Dh],Dh);
-
-        /* Attention of the new token over the n valid cached keys */
-        float sc[T];
-        float maxs = -1e30f;
-        for (int j = 0; j < n; j++) {
-            const float* kj = &Kc[hbase+j][0];
-            float dot = 0.0;
-            for (int d = 0; d < Dh; d++)
-                dot += qh[d] * kj[d];
-            dot *= scale;
-            sc[j] = dot;
-            if (dot > maxs) maxs = dot;
-        }
-        float sum = 0.0;
-        for (int j = 0; j < n; j++) {
-            sc[j] = expf(sc[j] - maxs);
-            sum += sc[j];
-        }
-        float inv = 1.0 / sum;
-
-        float oh[Dh];
-        for (int d = 0; d < Dh; d++) oh[d] = 0.0f;
-        for (int j = 0; j < n; j++) {
-            float w = sc[j] * inv;
-            const float* vj = &Vc[hbase+j][0];
-            for (int d = 0; d < Dh; d++)
-                oh[d] += w * vj[d];
-        }
-        fltcpy(&Out[0][h*Dh],oh,Dh);
-    }
-
-    if (Y != NULL)
-        matmul(Y,Out,Wo,1,D,D);
-}
-
-/*
- * mha_backward - backward pass of Multi-Head Attention (MHA) layer.
+/* mha_backward - backward pass of Multi-Head Attention (MHA) layer.
  *
  * Computes gradients of the loss with respect to weights and inputs,
  * reversing each step of mha_forward in order.
  *
- * Reads back the per-(b,h) Qh, Kh, Vh, and Att stored by mha_forward
- * for the same (b,h) pair, rather than recomputing them, so the values
- * used here are guaranteed identical to what forward actually produced.
- *
- * Gradient steps (reverse of forward):
- *
- *   Step 4 backward - output projection (reverse of Y = Out @ Wo):
- *     gWo  = Out.T @ dY
- *     dOut = dY @ Wo.T
- *
- *   Step 3 backward - scaled dot-product attention, per (b,h):
- *     (a) reverse Oh = Att @ Vh:
- *           dVh  = Att.T @ dOh
- *           dAtt = dOh @ Vh.T
- *     (b) reverse Att = softmax(Scores):
- *           dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
- *           dScores /= sqrt(Dh)                  (reverse scaling)
- *     (c) reverse Scores = Qh @ Kh.T:
- *           dQh = dScores @ Kh
- *           dKh = dScores.T @ Qh
- *
- *   Step 2 backward - accumulate head gradients into full tensors:
- *     dQ[b*T+t][h*Dh+k] += dQh[t][k]
- *     dK[b*T+t][h*Dh+k] += dKh[t][k]
- *     dV[b*T+t][h*Dh+k] += dVh[t][k]
- *
- *   Step 1 backward - linear projections (reverse of Q=X@Wq, K=X@Wk, V=X@Wv):
- *     gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
- *     dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
+ * Parameters:
+ *   l         : MHA layer
+ *   dY        : gradient of loss w.r.t. MHA output [BT][D]
+ *   X         : original MHA input [BT][D]
+ *   dX        : gradient of loss w.r.t. MHA input [BT][D], or NULL
+ *   offset    : Position index of the first token in the sequence
+ *   lyr       : layer index (informational)
  */
-static inline void mha_backward(MHA* restrict l,
-                                fArr2D restrict dY /*[BT][D]*/,
-                                const fArr2D restrict X/*[BT][D]*/,
-                                fArr2D dX,
-                                int lyr)
-{
-    (void) lyr;
-    const int B = l->B;
-    const int T = l->T;
-    const int D = l->D;
-    const int H = l->H;
-    const int Dh = l->Dh;
-    const int BT = l->BT;
+void mha_backward(MHA* restrict l,
+                  fArr2D restrict dY /*[BT][D]*/,
+                  const fArr2D restrict X/*[BT][D]*/,
+                  fArr2D dX,
+                  int offset,
+                  int lyr);
 
-    typedef float (*ArrBTD)[D];
-    typedef float (*ArrBHTDh)[Dh];
-    typedef float (*ArrTDh)[Dh];
-    typedef float (*ArrTT)[T];
-    typedef float (*ArrBHTT)[T];
-    typedef float (*ArrDD)[D];
-
-    ArrBTD dOut = (ArrBTD) l->dOut;
-
-    ArrBTD dQ = (ArrBTD) l->dQ;
-    ArrBTD dK = (ArrBTD) l->dK;
-    ArrBTD dV = (ArrBTD) l->dV;
-
-    ArrTDh dQh = (ArrTDh) l->dQh;
-    ArrTDh dKh = (ArrTDh) l->dKh;
-    ArrTDh dVh = (ArrTDh) l->dVh;
-
-    ArrTDh dOh = (ArrTDh) l->dOh;
-    ArrTT dAtt = (ArrTT) l->dAtt;
-    ArrTT dScores = (ArrTT) l->dScores;
-
-    ArrDD gWq = (ArrDD) l->gWq;
-    ArrDD gWk = (ArrDD) l->gWk;
-    ArrDD gWv = (ArrDD) l->gWv;
-    ArrDD gWo = (ArrDD) l->gWo;
-
-    ArrDD Wq = (ArrDD) l->Wq;
-    ArrDD Wk = (ArrDD) l->Wk;
-    ArrDD Wv = (ArrDD) l->Wv;
-    ArrDD Wo = (ArrDD) l->Wo;
-
-    ArrBHTDh Qh = (ArrBHTDh) l->Qh;
-    ArrBHTDh Kh = (ArrBHTDh) l->Kh;
-    ArrBHTDh Vh = (ArrBHTDh) l->Vh;
-
-    ArrBHTT Att = (ArrBHTT) l->Att;
-
-    ArrBTD Out = (ArrBTD) l->Out;
-
-    /* Step 4 backward - output projection (reverse of Y = Out @ Wo):
-     * gWo  = Out.T @ dY
-     * dOut = dY @ Wo.T
-     */
-    if (dY != NULL) {
-        Tmatmul(gWo,Out,dY,D,BT,D);
-        matmulT(dOut,dY,Wo,BT,D,D);
-    }
-    else {
-        fltclr(gWo,D * D);
-        fltclr(dOut,BT * D);
-    }
-
-    fltclr(dQ,BT * D);
-    fltclr(dK,BT * D);
-    fltclr(dV,BT * D);
-
-    for (int b = 0; b < B; b++) {
-        for (int h = 0; h < H; h++) {
-
-            int base = (b * H + h) * T; /* row offset into [BHT][...] buffers */
-
-            /* split dOut */
-            for (int t = 0; t < T; t++) {
-                int r = b * T + t;
-                fltcpy(&dOh[t][0],&dOut[r][h * Dh],Dh);
-            }
-
-            /* Step 3a backward - reverse Oh = Att @ Vh:
-             * dVh  = Att.T @ dOh
-             * dAtt = dOh @ Vh.T
-             */
-            Tmatmul(dVh,&Att[base],dOh,T,T,Dh);
-            matmulT(dAtt,dOh,&Vh[base],T,Dh,T);
-
-            /* Step 3b backward - reverse Att = softmax(Scores):
-             * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
-             * dScores /= sqrt(Dh)                  (reverse scaling)
-             */
-            if (l->training && l->dropout[b * H + h]->rate > 0)
-                dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
-
-            d_softmax(dScores,dAtt,&Att[base],T,T);
-
-            float s = 1.0f / sqrtf((float)Dh);
-            for(int i = 0; i < T; i++)
-              for(int j = 0; j < T; j++)
-                dScores[i][j] *= s;
-
-            /* Step 3c backward - reverse Scores = Qh @ Kh.T:
-             * dQh = dScores @ Kh
-             * dKh = dScores.T @ Qh
-             * then apply inverse RoPE to dQh and dKh
-             */
-            matmul(dQh,dScores,&Kh[base],T,T,Dh);
-            Tmatmul(dKh,dScores,&Qh[base],T,T,Dh);
-
-            rope_apply(dQh,l->theta,1,0,T,Dh);
-            rope_apply(dKh,l->theta,1,0,T,Dh);
-
-            /* Step 2 backward - accumulate head gradients into full tensors:
-             * dQ[b*T+t][h*Dh+k] += dQh[t][k]
-             * dK[b*T+t][h*Dh+k] += dKh[t][k]
-             * dV[b*T+t][h*Dh+k] += dVh[t][k]
-             */
-            for (int a = h * Dh, t = 0; t < T; t++) {
-                int r=b*T+t;
-                for (int k = 0; k < Dh; k++)
-                    dQ[r][a + k] += dQh[t][k];
-                for (int k = 0; k < Dh; k++)
-                    dK[r][a + k] += dKh[t][k];
-                for (int k = 0; k < Dh; k++)
-                    dV[r][a + k] += dVh[t][k];
-            }            
-        }
-    }
-
-    /* Step 1 backward - reverse Q=X@Wq, K=X@Wk, V=X@Wv:
-     * gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
-     * dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
-     */
-    fltclr(gWq,D * D);
-    fltclr(gWk,D * D);
-    fltclr(gWv,D * D);
-
-    Tmatmul(gWq,X,dQ,D,BT,D);
-    Tmatmul(gWk,X,dK,D,BT,D);
-    Tmatmul(gWv,X,dV,D,BT,D);
-
-    if (dX != NULL) {
-        matmulT(dX,dQ,Wq,BT,D,D);
-        addMatmulT(dX,dK,Wk,BT,D,D);
-        addMatmulT(dX,dV,Wv,BT,D,D);
-    }
+#ifdef __cplusplus
 }
+#endif
 
 #endif

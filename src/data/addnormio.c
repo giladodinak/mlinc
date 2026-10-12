@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "arrayio.h"
 #include "addnorm.h"
 #include "addnormio.h"
@@ -30,14 +30,8 @@ ADDNORM* read_addnorm(FILE* fp)
         fprintf(stderr,"In read_addnorm: failed to read the header\n");
         return NULL;
     }
-    ADDNORM* l = allocmem(1,1,ADDNORM);
-    l->D = D;
-    l->B = B;
-    l->mean = allocmem(l->B,1,float);
-    l->sdev = allocmem(l->B,1,float);
-    l->xn = allocmem(l->B,l->D,float);
-    l->gamma = allocmem(l->D,1,float);
-    l->beta = allocmem(l->D,1,float);
+    ADDNORM* l = addnorm_create();
+    addnorm_init(l,D,B);
 
     int ok = read_array((fArr2D)l->gamma,1,l->D,fp,0);
     if (ok)

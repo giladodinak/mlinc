@@ -1,9 +1,9 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
-/* Dense (feed forward) neural network layer data structures and functions */
+/* Dense (feed forward) neural network layer*/
 #ifndef DENSE_H
 #define DENSE_H
-#include "array.h"
-#include "activation.h"
+
+#include "arraytypes.h"
 
 typedef struct dense_s {
   int D;           /* Input vector dimension                   */
@@ -20,6 +20,10 @@ typedef struct dense_s {
   fVec gb;         /* Bias gradients [S] (use_bias && training)*/
 } DENSE;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Creates a feed forward neural network.
  *
  * Parameters:
@@ -28,7 +32,7 @@ typedef struct dense_s {
  *   use_bias   - If set add bias
  *
  * Returns:
- *   Pointer to a dense neural network.
+ *   Pointer to a dense neural network
  *
  * Notes:
  *   - The neural network needs to be further intialized using dense_init()
@@ -75,30 +79,6 @@ void dense_free(DENSE* l);
  */
 void dense_reset(DENSE* l);
 
-
-static inline void add_bias(fArr2D h_, const fVec b_, int B, int S)
-{
-    typedef float (*ArrBS)[S];
-    ArrBS h = (ArrBS) h_;
-    const float* b = (const float*) b_;
-
-    for (int i = 0; i < B; i++)
-        for (int j = 0; j < S; j++)
-            h[i][j] += b[j];
-}
-
-static inline void bias_gradient(fVec gb_, const fArr2D dy_, int B, int S)
-{
-    typedef float (*ArrBS)[S];
-    const ArrBS dy = (ArrBS) dy_;
-    float* gb = (float*) gb_;
-
-    fltclr(gb,S);    
-    for (int j = 0; j < S; j++)
-        for (int i = 0; i < B; i++)
-            gb[j] += dy[i][j];
-}
-
 /* Performs dense layer training/prediction's forward pass.
  *
  * Parameters:
@@ -112,25 +92,8 @@ static inline void bias_gradient(fVec gb_, const fArr2D dy_, int B, int S)
  * Note that in a multi-layered neural network, after the first layer
  * X is the (activated) output of a previous layer.
  */
-static inline fArr2D dense_forward(DENSE* restrict l, 
-                                   const fArr2D restrict X/*[B][D]*/, int lyr)
-{
-    (void) lyr;
-    matmul(l->h,X,l->Wx,l->B,l->D,l->S); /* h = X @ Wx */
-    if (l->use_bias)
-        add_bias(l->h,l->b,l->B,l->S);
-    switch (l->activation) {
-        case 's' : sigmoid(l->h,l->B,l->S); break;
-        case 'r' : relu(l->h,l->B,l->S); break;
-        case 'g' : 
-            if (l->training)
-                fltcpy(l->z,l->h,l->B * l->S);
-             gelu(l->h,l->B,l->S);
-        break;
-        case 'S' : softmax(l->h,l->B,l->S); break;
-    }
-    return l->h;
-}
+fArr2D dense_forward(DENSE* restrict l, 
+                     const fArr2D restrict X/*[B][D]*/, int lyr);
 
 /* Performs dense layer training's backward pass.
  *
@@ -150,37 +113,14 @@ static inline fArr2D dense_forward(DENSE* restrict l,
  * of dx (this layer's D) must equal the dimension of the previous layer's
  * dy (previous layer's S).
  */
-static inline void dense_backward(DENSE* restrict l, 
-                                  fArr2D restrict dy/*[B][S]*/, 
-                                  const fArr2D restrict X/*[B][D]*/,
-                                  fArr2D restrict dx/*[B][D]*/,
-                                  int lyr)
-{
-    (void) lyr;
+void dense_backward(DENSE* restrict l, 
+                    fArr2D restrict dy/*[B][S]*/, 
+                    const fArr2D restrict X/*[B][D]*/,
+                    fArr2D restrict dx/*[B][D]*/,
+                    int lyr);
 
-    switch (l->activation) {
-        case 's':
-            d_sigmoid(dy,l->h,l->B,l->S);
-            break;
-        case 'r':
-            d_relu(dy,l->h,l->B,l->S);
-            break;
-        case 'g':
-            d_gelu(dy,l->z,l->B,l->S);
-            break;
-        /* Softmax intentionally excluded:
-         * dy must already be (y_pred - y_true)
-         */
-    }
-
-    /* Gradient with respect to weights: gWx = X.T @ dy */
-    Tmatmul(l->gWx,X,dy,l->D,l->B,l->S);
-    if (l->use_bias)
-        bias_gradient(l->gb,dy,l->B,l->S);
-
-    if (dx != NULL) {
-        /* dx = (dy @ Wx.T) */
-        matmulT(dx,dy,l->Wx,l->B,l->S,l->D);
-    }
+#ifdef __cplusplus
 }
+#endif
+
 #endif

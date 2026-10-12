@@ -11,7 +11,7 @@
 #include <memory.h>  /* memset()  */
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "norm.h"
 #include "cossim.h"
 #include "random.h"

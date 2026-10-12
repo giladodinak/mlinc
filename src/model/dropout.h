@@ -7,8 +7,7 @@
  */
 #ifndef DROPOUT_H
 #define DROPOUT_H
-#include "random.h"
-#include "array.h"
+#include "arraytypes.h"
 
 typedef struct dropout_s {
     int B;              /* Number of rows (input vectors)            */
@@ -17,6 +16,10 @@ typedef struct dropout_s {
     fArr2D mask;        /* Masks (and scales) the input array [B][D] */
     void* rng_state;    /* Internal RNG buffer (NULL if not used)    */
 } DROPOUT;
+
+#ifdef __cplusplus
+extern "C" { /* nvcc is a c++ compiler */
+#endif
 
 /* Creates a dropout layer.
  *
@@ -37,10 +40,6 @@ DROPOUT* dropout_create(float rate);
  * Parameters:
  *   batch_size - Number of input vectors processed simultaneously
  *   input_dim  - Size of input vectors
- *
- * Notes:
- *   The output weights are initialized using a normal distribution
- *   scaled by 1/sqrt(D).
  */
 void dropout_init(DROPOUT* l, int input_dim, int batch_size);
 
@@ -73,43 +72,21 @@ void dropout_reset(DROPOUT* l);
  * Parameters:
  *   mx   : Pointer to the 2D array to be processed
  */
-static inline void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
-{
-   float rate = l->rate;
-    if (rate == 1.0) {
-        fltclr(mx_,l->B * l->D);
-        return;
-    }
-    typedef float (*ArrBD)[l->D];
-    ArrBD mx = (ArrBD) mx_;
-    ArrBD mk = (ArrBD) l->mask;
-    float scale = 1.0 / (1.0 - rate);
-    for (int i = 0; i < l->B; i++) {
-        for (int j = 0; j < l->D; j++) {
-            float value = urand(0.0,1.0) >= rate ? scale : 0;
-            mx[i][j] *= value;
-            mk[i][j] = value;
-        }
-    }
-}
+void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/);
 
 /* Applies a precomputed dropout mask to an input array, writing the
- * result to a separate output array without modifying the input.
+ * result to an output array, which can be the same array as the input.
  *
  * Parameters:
  *   in  : Pointer to the 2D input array to be masked
  *   out : Pointer to the 2D output array to receive the masked result
  */
-static inline void dropout_backward(DROPOUT* restrict l,
-                                    const fArr2D in_/*[B][D]*/,
-                                    fArr2D out_/*[B][D]*/)
-{
-    typedef float (*ArrBD)[l->D];
-    const ArrBD in = (const ArrBD) in_;
-    const ArrBD mk = (const ArrBD) l->mask;
-    ArrBD out = (ArrBD) out_;
-    for (int i = 0; i < l->B; i++)
-        for (int j = 0; j < l->D; j++)
-            out[i][j] = in[i][j] * mk[i][j];
+void dropout_backward(DROPOUT* restrict l,
+                      const fArr2D in_/*[B][D]*/,
+                      fArr2D out_/*[B][D]*/);
+
+#ifdef __cplusplus
 }
+#endif
+
 #endif
