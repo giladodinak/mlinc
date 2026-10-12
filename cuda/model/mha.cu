@@ -5,6 +5,33 @@
  * Roformer: Enhanced transformer with Rotary Position Embedding, 2023.
  * https://arxiv.org/pdf/2104.09864
  */
+
+/* mha.cu implements the same multi-head attention equations as the textbook
+ * mha.c, but reorganizes the computation to suit GPU execution. The CPU
+ * version copies each head's Q, K and V slices into separate per-head
+ * buffers, applies RoPE per head, and copies each head's output back into
+ * Out.
+ *
+ * The CUDA version copies nothing. Each head is a strided view of the
+ * [B*T][D] Q, K, V and Out arrays, and matrix multiplications with explicit
+ * leading dimensions read and write those views directly. RoPE and its
+ * inverse are each applied once to the whole Q and K (or dQ and dK) arrays.
+ *
+ * Score scaling, causal and padding masks, and softmax are fused into one
+ * kernel that keeps each row in registers, reading and writing it once.
+ * Masked elements are skipped and written as zero (or 1/T), which matches
+ * the CPU's -1e9 masking. (softmax exp(-1e9 - max) underflows to 0.)
+ *
+ * Backward softmax uses the identity sum_j Att*dAtt = dOh . Oh (from
+ * FlashAttention), computed for all rows in one kernel, so the softmax
+ * derivative becomes a single elementwise pass with no per-row reduction.
+ *
+ * Buffers that matrix multiplications fully overwrite are not cleared, and
+ * CUDA Graphs capture the per-(batch, head) sequence of operations to reduce
+ * launch overhead. The attention equations themselves are unchanged; the
+ * changes are storage layout, fusion, and batching.
+ */
+ 
 #include <stdio.h>
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
