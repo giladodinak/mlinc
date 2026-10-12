@@ -25,6 +25,7 @@ typedef struct {
     fArr2D Scores;   /* [T][T]    */
     fArr2D dAtt;     /* [T][T]    */
     fArr2D dScores;  /* [T][T]    */
+    fVec dAttRowDot; /* [BHT]     */
     fArr2D Kh_cache; /* [H*T][Dh] */
     fArr2D Vh_cache; /* [H*T][Dh] */
     GRAPH* graph;
@@ -151,6 +152,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
         s->dAtt = (fArr2D) cuallocmem(l->T,l->T,float);
         s->dScores = (fArr2D) cuallocmem(l->T,l->T,float);
+        s->dAttRowDot = (fVec) cuallocmem(1,l->BHT,float);
 
         l->gWq = (fArr2D) cuallocmem(l->D,l->D,float);
         l->gWk = (fArr2D) cuallocmem(l->D,l->D,float);
@@ -222,6 +224,7 @@ void mha_free(MHA* l)
 
     cufreemem(s->dAtt);
     cufreemem(s->dScores);
+    cufreemem(s->dAttRowDot);
 
     cufreemem(l->gWq);
     cufreemem(l->gWk);
@@ -235,54 +238,139 @@ void mha_free(MHA* l)
     freemem(l);
 }
 
+/* Warp- and block-level reductions.  blockDim.x must be a multiple of 32
+ * (at most 1024).  Every thread of the block receives the result.  The
+ * shared buffer must hold 32 floats; it is safe to reuse after return.
+ */
+static __device__ __forceinline__ float warp_reduce_max(float v)
+{
+    for (int o = 16; o > 0; o >>= 1)
+        v = fmaxf(v,__shfl_xor_sync(0xffffffffu,v,o));
+    return v;
+}
+
+static __device__ __forceinline__ float block_reduce_max(float v, float* sh)
+{
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int nwarps = blockDim.x >> 5;
+    v = warp_reduce_max(v);
+    if (lane == 0) sh[warp] = v;
+    __syncthreads();
+    v = (lane < nwarps) ? sh[lane] : -INFINITY;
+    v = warp_reduce_max(v);
+    __syncthreads();
+    return v;
+}
+
+static __device__ __forceinline__ float warp_reduce_sum(float v)
+{
+    for (int o = 16; o > 0; o >>= 1)
+        v += __shfl_xor_sync(0xffffffffu,v,o);
+    return v;
+}
+
+static __device__ __forceinline__ float block_reduce_sum(float v, float* sh)
+{
+    const int lane = threadIdx.x & 31;
+    const int warp = threadIdx.x >> 5;
+    const int nwarps = blockDim.x >> 5;
+    v = warp_reduce_sum(v);
+    if (lane == 0) sh[warp] = v;
+    __syncthreads();
+    v = (lane < nwarps) ? sh[lane] : 0.0f;
+    v = warp_reduce_sum(v);
+    __syncthreads();
+    return v;
+}
+
 /* Fused score scaling, causal/padding masks, and row-wise softmax.
- * One CUDA block processes one attention row. The scores are normalized
- * in-place, without an intermediate global-memory scale/mask pass.
+ *
+ * One CUDA block processes one attention row; each thread holds NV row
+ * elements in registers (element j = threadIdx.x + k*blockDim.x, so loads
+ * and stores are coalesced).  The row is read from global memory once and
+ * written once.  Masked elements are not loaded and are written as 0.
+ *
+ * If every key of the row is masked (only possible when the whole sequence
+ * is padding), the row is set to the uniform distribution 1/T, matching the
+ * previous -1e9 masking behavior.
+ *
  * Uses only device-resident inputs, so the launch is CUDA Graph capturable.
  */
+#define NUM_THREADS 1024
+#define EPT 8 /* Elements Per Thread */
+#define MAX_CONTEXT (EPT * NUM_THREADS)
+
 static __global__ void scale_mask_softmax_kernel(float* Scores,
                                                  const int* pad_mask,
                                                  int b, int T,
                                                  int lookahead, float scale)
 {
-    const int i = blockIdx.x;
-    const int tid = threadIdx.x;
-    __shared__ float reduce[256];
+    __shared__ float sh[32];
+    const int row = blockIdx.x;
+    float* p = Scores + (size_t) row * T;
+    const int* pm = (pad_mask != NULL) ? pad_mask + (size_t) b * T : NULL;
 
+    int limit = T;
+    if (lookahead >= 0 && row + lookahead + 1 < T)
+        limit = row + lookahead + 1;
+
+    float v[EPT];
     float vmax = -INFINITY;
-    for (int j = tid; j < T; j += blockDim.x) {
-        float v = Scores[i * T + j] * scale;
-        if ((lookahead >= 0 && j > i + lookahead) ||
-            (pad_mask != NULL && !pad_mask[b * T + j]))
-            v = -1e9f;
-        Scores[i * T + j] = v;
-        vmax = fmaxf(vmax,v);
+#pragma unroll
+    for (int k = 0; k < EPT; k++) {
+        const int j = threadIdx.x + k * blockDim.x;
+        float x = -INFINITY;
+        if (j < limit && (pm == NULL || pm[j]))
+            x = p[j] * scale;
+        v[k] = x;
+        vmax = fmaxf(vmax,x);
     }
-    reduce[tid] = vmax;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride)
-            reduce[tid] = fmaxf(reduce[tid],reduce[tid + stride]);
-        __syncthreads();
+    vmax = block_reduce_max(vmax,sh);
+
+    if (vmax == -INFINITY) {              /* Fully masked row */
+        const float u = 1.0f / (float) T;
+#pragma unroll
+        for (int k = 0; k < EPT; k++) {
+            const int j = threadIdx.x + k * blockDim.x;
+            if (j < T) p[j] = u;
+        }
+        return;
     }
-    const float maxval = reduce[0];
 
     float sum = 0.0f;
-    for (int j = tid; j < T; j += blockDim.x) {
-        float e = expf(Scores[i * T + j] - maxval);
-        Scores[i * T + j] = e;
+#pragma unroll
+    for (int k = 0; k < EPT; k++) {
+        const float e = (v[k] == -INFINITY) ? 0.0f : expf(v[k] - vmax);
+        v[k] = e;
         sum += e;
     }
-    reduce[tid] = sum;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride)
-            reduce[tid] += reduce[tid + stride];
-        __syncthreads();
+    sum = block_reduce_sum(sum,sh);
+    const float invsum = 1.0f / sum;
+
+#pragma unroll
+    for (int k = 0; k < EPT; k++) {
+        const int j = threadIdx.x + k * blockDim.x;
+        if (j < T) p[j] = v[k] * invsum;
     }
-    const float invsum = 1.0f / reduce[0];
-    for (int j = tid; j < T; j += blockDim.x)
-        Scores[i * T + j] *= invsum;
+}
+
+/* Launches scale_mask_softmax_kernel over the T rows of one [T][T]
+ * attention matrix.  blockDim.x = ceil(T/EPT) rounded up to a multiple of 32.
+ */
+static void scale_mask_softmax(float* Scores, const int* pad_mask,
+                               int b, int T, int lookahead, float scale)
+{
+    if (T > MAX_CONTEXT) {
+        fflush(stdout);
+        fprintf(stderr,"scale_mask_softmax: T %d exceeds %d\n",T,MAX_CONTEXT);
+        exit(-1);
+    }
+    int threads = (T + EPT - 1) / EPT;
+    threads = (threads + 31) / 32 * 32;
+    const int blocks = T;
+    scale_mask_softmax_kernel<<<blocks,threads,0,cuda_stream()>>>(
+        Scores,pad_mask,b,T,lookahead,scale);
 }
 
 /* mha_forward - forward pass of Multi-Head Attention (MHA) layer
@@ -337,6 +425,8 @@ static __global__ void scale_mask_softmax_kernel(float* Scores,
  *     strided view Q[b,t,h,:], K[b,t,h,:], V[b,t,h,:], where D=H*Dh.
  *     Splitting into heads is therefore a logical view, not a data copy.
  *     Att is stored per (b,h) for backward.
+ *  3. Out is not cleared: every head's Att @ Vh GEMM (beta=0) overwrites
+ *     its full [T][Dh] slice.
  *
  * Reference:
  *   - Vaswani et al., "Attention Is All You Need", 2017
@@ -384,7 +474,6 @@ void mha_forward(MHA* restrict l,
     matmul(Q,X,Wq,BT,D,D);
     matmul(K,X,Wk,BT,D,D);
     matmul(V,X,Wv,BT,D,D);
-    cufltclr(Out,BT * D);
 
     rope_batch_apply_ld(Q,l->theta,0,offset,B,H,T,Dh,D);
     rope_batch_apply_ld(K,l->theta,0,offset,B,H,T,Dh,D);
@@ -424,10 +513,7 @@ void mha_forward(MHA* restrict l,
                 matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
 
                 const int* pad_mask = (const int*) l->pad_mask;
-                const int threads = 256; /* Tunable: multiple of 32, maximum 1024  */
-                const int blocks = T;    /* One block per row for row-wise softmax */
-                scale_mask_softmax_kernel<<<blocks,threads,0,cuda_stream()>>>(
-                    (float*) Ah,pad_mask,b,T,lookahead,scale);
+                scale_mask_softmax((float*) Ah,pad_mask,b,T,lookahead,scale);
 
                 if (training && l->training)
                     if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
@@ -565,37 +651,119 @@ void mha_forward_step(MHA* restrict l,
         matmul(Y,Out,Wo,1,D,D);
 }
 
-/* Fused backward softmax derivative and attention score scaling.
- * One CUDA block processes one attention row, computing the softmax
- * gradient and applying the scale factor in a single pass.
- * Eliminates a separate global-memory scaling pass and kernel launch.
+/* Kernel for attn_rowdot().  One warp per (b,t,h) row, h varying fastest,
+ * so consecutive warps read consecutive Dh-slices of dOut and Out.
+ * blockDim.x must be a multiple of 32.
  */
-static __global__ void d_softmax_scaled_kernel(float* dScores,
-                                                const float* dAtt,
-                                                const float* Att,
-                                                int T, float scale)
+static __global__ void attn_rowdot_kernel(float* __restrict__ RowDot,
+                                          const float* __restrict__ dOut,
+                                          const float* __restrict__ Out,
+                                          int B, int T, int H, int Dh)
 {
-    int i = blockIdx.x;
-    int tid = threadIdx.x;
-    int base = i * T;
-    __shared__ float reduce[256];
-
+    const int warp = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    const int lane = threadIdx.x % 32;
+    if (warp >= B * T * H) return;  /* Past last row */
+    const int h = warp % H;
+    const int bt = warp / H;        /* Token row in [B*T][D]: b*T + t */
+    const float* a = dOut + (size_t) bt * H * Dh + h * Dh;
+    const float* o = Out  + (size_t) bt * H * Dh + h * Dh;
     float sum = 0.0f;
-    for (int j = tid; j < T; j += blockDim.x)
-        sum += dAtt[base + j] * Att[base + j];
-    reduce[tid] = sum;
-    __syncthreads();
-
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (tid < stride)
-            reduce[tid] += reduce[tid + stride];
-        __syncthreads();
+    for (int k = lane; k < Dh; k += 32)
+        sum += a[k] * o[k];
+    sum = warp_reduce_sum(sum);
+    if (lane == 0) {
+        const int b = bt / T;
+        const int t = bt % T;
+        RowDot[(b * H + h) * T + t] = sum;
     }
+}
 
-    float dot = reduce[0];
-    for (int j = tid; j < T; j += blockDim.x) {
-        int p = base + j;
-        dScores[p] = scale * Att[p] * (dAtt[p] - dot);
+/* attn_rowdot - softmax-backward row sums for all B*H*T attention rows.
+ *
+ * Computes, for every batch item b, head h and token t:
+ *
+ *   RowDot[(b*H + h)*T + t] = dO[t] . O[t]
+ *
+ * where O[t] = Out[b*T+t][h*Dh:(h+1)*Dh] is head h's attention output for
+ * token t, dO[t] is the same slice of dOut, and "." is the dot product
+ * over Dh elements.
+ *
+ * Softmax backward needs, per attention row t, the sum
+ *   sum_j P[t][j] * dP[t][j]
+ * which would otherwise require reading two T-length rows.  It equals
+ * dO[t] . O[t], with or without attention dropout:
+ *
+ *   P[t][j]   = softmax output (pre-dropout Att)
+ *   M[t][j]   = dropout mask, including the 1/(1-p) scale (M = 1 if no dropout)
+ *   P'[t][j]  = P[t][j] * M[t][j]          (post-dropout attention)
+ *   O[t]      = sum_j P'[t][j] * V[j]
+ *   dP'[t][j] = dO[t] . V[j]
+ *   dP[t][j]  = dP'[t][j] * M[t][j]        (dropout backward)
+ *
+ *   sum_j P[t][j] * dP[t][j]
+ *     = sum_j P'[t][j] * dP'[t][j]
+ *     = sum_j P'[t][j] * (dO[t] . V[j])
+ *     = dO[t] . (sum_j P'[t][j] * V[j])
+ *     = dO[t] . O[t]
+ *
+ * so dScores[t][j] = scale * P[t][j] * (dP[t][j] - RowDot[t]).
+ *
+ * Out must hold the post-dropout attention output from mha_forward.
+ *
+ * References:
+ *   - Dao et al., "FlashAttention: Fast and Memory-Efficient Exact Attention
+ *     with IO-Awareness", 2022. https://arxiv.org/abs/2205.14135
+ *     (introduces D_i = rowsum(dO * O) in the backward pass)
+ *   - Dao, "FlashAttention-2: Faster Attention with Better Parallelism and
+ *     Work Partitioning", 2023. https://arxiv.org/abs/2307.08691
+ *     (computes D_i in a separate pass before the backward loop, as here)
+ */
+static void attn_rowdot(float* RowDot, const float* dOut, const float* Out,
+                        int B, int T, int H, int Dh)
+{
+    const int threads = 256;
+    const long long nthreads = (long long) B * T * H * 32;
+    const int blocks = (int) ((nthreads + threads - 1) / threads);
+    attn_rowdot_kernel<<<blocks,threads,0,cuda_stream()>>>(
+        RowDot,dOut,Out,B,T,H,Dh);
+}
+
+
+/* Backward of the fused scale/mask/softmax, elementwise:
+ *
+ *     dScores[t][j] = scale * Att[t][j] * (dAtt[t][j] - dAttRowDot)
+ *
+ * dAttRowDot comes from attn_rowdot_kernel, so no row reduction is needed.
+ * One CUDA block processes one row.  Masked elements (Att == 0) are not
+ * loaded and are written as 0.  For a fully padded sequence (pad_mask of
+ * its first token is 0) the forward pass produced uniform rows, so no
+ * elements are skipped for that sequence.
+ */
+static __global__ void d_softmax_scaled_kernel(float* __restrict__ dScores,
+                                               const float* __restrict__ dAtt,
+                                               const float* __restrict__ Att,
+                                               const float* __restrict__ Drow,
+                                               const int* __restrict__ pad_mask,
+                                               int b, int T,
+                                               int lookahead, float scale)
+{
+    const int row = blockIdx.x;
+    const size_t base = (size_t) row * T;
+
+    const int* pm = (pad_mask != NULL) ? pad_mask + (size_t) b * T : NULL;
+    const bool all_padding = (pm != NULL && pm[0] == 0);
+    if (all_padding) pm = NULL;
+
+    int limit = T;
+    if (!all_padding && lookahead >= 0 && row + lookahead + 1 < T)
+        limit = row + lookahead + 1;
+
+    const float d = Drow[row];
+    for (int j = threadIdx.x; j < T; j += blockDim.x) {
+        float g = 0.0f;
+        if (j < limit && (pm == NULL || pm[j]))
+            g = scale * Att[base + j] * (dAtt[base + j] - d);
+        dScores[base + j] = g;
     }
 }
 
@@ -626,8 +794,8 @@ static __global__ void d_softmax_scaled_kernel(float* dScores,
  *           dVh  = Att.T @ dOh
  *           dAtt = dOh @ Vh.T
  *     (b) reverse Att = softmax(Scores):
- *           dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
- *           dScores /= sqrt(Dh)                 (reverse scaling)
+ *           dScores = Att * (dAtt - rowdot(dOh,Oh))   (Jacobian, Sec. 3.2.1)
+ *           dScores /= sqrt(Dh)                       (reverse scaling)
  *     (c) reverse Scores = Qh @ Kh.T:
  *           dQh = dScores @ Kh
  *           dKh = dScores.T @ Qh
@@ -638,6 +806,9 @@ static __global__ void d_softmax_scaled_kernel(float* dScores,
  *   Step 1 backward - linear projections (reverse of Q=X@Wq, K=X@Wk, V=X@Wv):
  *     gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
  *     dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
+ *
+ * dQ, dK, dV, gWq, gWk and gWv are not cleared: the GEMMs that produce
+ * them use beta=0 and overwrite their full outputs.
  */
 void mha_backward(MHA* restrict l,
                   fArr2D restrict dY/*[BT][D]*/,
@@ -655,6 +826,7 @@ void mha_backward(MHA* restrict l,
     const int H = l->H;
     const int Dh = l->Dh;
     const int BT = l->BT;
+    const int lookahead = l->lookahead;
     MHA_STATE* s = (MHA_STATE*) l->state;
 
     typedef float (*ArrBTD)[D];
@@ -674,6 +846,7 @@ void mha_backward(MHA* restrict l,
 
     ArrTT dAtt = (ArrTT) s->dAtt;
     ArrTT dScores = (ArrTT) s->dScores;
+    float* dAttRowDot = (float*) s->dAttRowDot;
 
     ArrDD gWq = (ArrDD) l->gWq;
     ArrDD gWk = (ArrDD) l->gWk;
@@ -706,9 +879,8 @@ void mha_backward(MHA* restrict l,
         cufltclr(dOut,BT * D);
     }
 
-    cufltclr(dQ,BT * D);
-    cufltclr(dK,BT * D);
-    cufltclr(dV,BT * D);
+    /* Softmax-backward row sums for all B*H*T row */
+    attn_rowdot(dAttRowDot,(const float*) dOut,(const float*) Out,B,T,H,Dh);
 
     GRAPH* graph = s->graph;
 
@@ -756,16 +928,19 @@ void mha_backward(MHA* restrict l,
                 matmulT_ld(dAtt,dOh,Vh,T,Dh,T,D,D,T);
 
                 /* Step 3b backward - reverse Att = softmax(Scores):
-                 * dScores = J_softmax(Att).T @ dAtt   (Jacobian, Sec. 3.2.1)
-                 * dScores /= sqrt(Dh)                  (reverse scaling)
+                 * dScores = Att * (dAtt - dAttRowDot) (Jacobian, Sec. 3.2.1)
+                 * dScores /= sqrt(Dh)                 (reverse scaling)
                  */
                 if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
                     dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
 
-                const int threads = 256; /* Tunable: multiple of 32, maximum 1024  */
-                const int blocks = T;    /* One block per row for row-wise softmax */
+                const int* pad_mask = (const int*) l->pad_mask;
+                const int threads = 256; /* Tunable: multiple of 32, maximum 1024 */
+                const int blocks = T;    /* One block per row                     */
                 d_softmax_scaled_kernel<<<blocks,threads,0,cuda_stream()>>>(
-                      (float*)dScores,(float*)dAtt,(float*)&Att[base],T,scale);
+                      (float*)dScores,(const float*)dAtt,
+                      (const float*)&Att[base],dAttRowDot + base,
+                      pad_mask,b,T,lookahead,scale);
 
                 /* Step 3c backward - reverse Scores = Qh @ Kh.T:
                  * dQh = dScores @ Kh
@@ -792,10 +967,6 @@ void mha_backward(MHA* restrict l,
      * gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
      * dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
      */
-    cufltclr(gWq,D * D);
-    cufltclr(gWk,D * D);
-    cufltclr(gWv,D * D);
-
     Tmatmul(gWq,X,dQ,D,BT,D);
     Tmatmul(gWk,X,dK,D,BT,D);
     Tmatmul(gWv,X,dV,D,BT,D);
