@@ -37,7 +37,12 @@
 #define CUGEMV cublasDgemv
 #define CUGER  cublasDger
 #else
+#ifdef USE_TF32
+#define CUGEMM(handle,transa,transb,m,n,k,alpha,A,lda,B,ldb,beta,C,ldc) \
+  cublasGemmEx(handle,transa,transb,m,n,k,alpha,A,CUDA_R_32F,lda,B,CUDA_R_32F,ldb,beta,C,CUDA_R_32F,ldc,CUBLAS_COMPUTE_32F_FAST_TF32,CUBLAS_GEMM_DEFAULT)
+#else
 #define CUGEMM cublasSgemm
+#endif
 #define CUGEMV cublasSgemv
 #define CUGER  cublasSger
 #endif

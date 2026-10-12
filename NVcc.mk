@@ -34,7 +34,7 @@ LIB_DIRS += -L$(CUDA_HOME)/lib64
 LIBS += -lcublas -lcudart 
 LIBS += -lstdc++  # array.h uses Thread Local Storage
 
-NVFLAGS = -arch=$(CUDA_ARCH) -DUSE_CUDA -Drestrict=__restrict__ 
+NVFLAGS = -arch=$(CUDA_ARCH) -DUSE_CUDA -DUSE_TF32 -Drestrict=__restrict__ 
 NVFLAGS += $(CUINC_DIRS) $(INC_DIRS) -I$(CUDA_HOME)/include
 
 ifeq ($(DEBUG),)    # DEBUG is blank - not debug 
