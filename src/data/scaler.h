@@ -3,7 +3,7 @@
 
 #ifndef SCALER_H
 #define SCALER_H
-#include "array.h"
+#include "arraytypes.h"
 
 typedef struct scaler_s {
     int batch;          /* 1 if batch normalization                        */

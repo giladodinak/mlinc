@@ -2,7 +2,8 @@
 /* Negative-sampling layer data structure and functions */
 #ifndef NEGSAMPLE_H
 #define NEGSAMPLE_H
-#include "array.h"
+#include "float.h"
+#include "arraytypes.h"
 
 /* This layer replaces a dense(K,"Softmax") + cross-entropy output when the
  * vocabulary K is too large for a full softmax. Its forward pass is the
@@ -26,7 +27,12 @@ typedef struct negsample_s {
   int ntouched;  /* Number of valid entries in touched[]                  */
   int* seen;     /* Per-row batch stamp [K], for first-touch detection    */
   int stamp;     /* Current batch stamp                                   */
+  void* devstat; /* Additional device state (NULL if not used)            */
 } NEGSAMPLE;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Creates a negative-sampling layer.
  *
@@ -56,8 +62,9 @@ NEGSAMPLE* negsample_create(int vocab_size, int num_negatives);
  */
 void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training);
 
-/* Provides the unigram negative-sampling table (referenced, not owned). */
-void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size);
+/* Provides the unigram negative-sampling table (referenced, not owned) */
+void negsample_set_dist(NEGSAMPLE* l,
+                        const int* dist_table, int dist_table_size);
 
 /* Sets a new batch size.
  *
@@ -99,7 +106,7 @@ static inline fArr2D negsample_forward(NEGSAMPLE* restrict l,
                                        int lyr)
 {
     (void) lyr;
-    fltcpy(l->h,X,l->B * l->E);
+    nnfltcpy(l->h,X,l->B * l->E);
     return l->h;
 }
 
@@ -120,17 +127,17 @@ static inline void negsample_backward(NEGSAMPLE* restrict l,
                                       int lyr)
 {
     (void) lyr;
-    if (dx != NULL)
-        fltcpy(dx,dy,l->B * l->E);
+    if (dx == NULL) return;
+    nnfltcpy(dx,dy,l->B * l->E);
 }
 
 /* Computes the negative-sampling loss and its gradients for a batch.
  *
  * For each of the first 'cnt' rows, scores the target word plus n_neg
  * sampled negatives, accumulating the gradient into h (dh) and into the
- * output weights (gWo). Only the Wo rows actually scored are zeroed (on
- * first touch this batch) and recorded in l->touched / l->ntouched, so a
- * subsequent sparse update touches only those rows.
+ * output weights (gWo). Only the Wo rows actually scored are recorded in
+ * and cleared before gradient accumulation, so a subsequent sparse update
+ * touches only those rows.
  *
  * Parameters:
  *   l       - Pointer to the layer
@@ -176,5 +183,9 @@ void negsample_logits(NEGSAMPLE* restrict l,
                       const fArr2D restrict h/*[cnt][E]*/,
                       fArr2D restrict logits/*[cnt][K]*/,
                       int cnt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

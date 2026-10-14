@@ -18,13 +18,13 @@
 static inline void rope_init(float* theta, int Dh)
 {
     for (int i = 0; i < Dh / 2; i++)
-        theta[i] = powf(10000.0, -2.0 * i / (float) Dh);
+        theta[i] = powf(10000.0,-2.0 * i / (float) Dh);
 }
 
 /* Applies RoPE in-place to a single head slice of Q or K.
  *
- * Each token at position offset+t is rotated by angle
- * (pos_offset+t) * theta[i] for each consecutive pair of
+ * Each token at position offset + t is rotated by angle
+ * (offset + t) * theta[i] for each consecutive pair of
  * dimensions (2i, 2i+1).
  *
  * Parameters:
@@ -34,7 +34,6 @@ static inline void rope_init(float* theta, int Dh)
  *   offset  : Position of the first token in x
  *   T       : Sequence length (number of rows)
  *   Dh      : Head dimension (number of columns, must be even)
- *
  */
 static inline void rope_apply(fArr2D x_/*[T][Dh]*/,
                               const float* theta,

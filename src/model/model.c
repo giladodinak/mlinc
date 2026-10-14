@@ -69,15 +69,9 @@ MODEL* model_create(int num_layers,
 /* Frees the memory allocated by model_create() and all added layers */
 void model_free(MODEL* m)
 {
-    for (int i = 0; i < m->num_layers; i++) {
+    for (int i = 0; i < m->num_layers; i++)
         layer_free(&m->layer[i]);
-        if (m->layer[i].opt_state) {
-            for (int j = 0; j < m->layer[i].num_opt_state; j++)
-                freemem(m->layer[i].opt_state[j]);
-            freemem(m->layer[i].opt_state);
-        }
-    }
-    freemem(m->ctc);
+    ctc_free(m->ctc);
     freemem(m->mean);
     freemem(m->sdev);
     freemem(m->layer);
@@ -315,8 +309,8 @@ void model_fit(MODEL* m,
     
     int MTr = 0;           /* Total number of training samples        */
     if (lenTr != NULL) {
-    for (int i = 0; i < numTr; i++)
-        MTr += lenTr[i];
+        for (int i = 0; i < numTr; i++)
+            MTr += lenTr[i];
     }
     else
         MTr = numTr;
@@ -329,27 +323,36 @@ void model_fit(MODEL* m,
     else
         MVd = numVd; 
 
-    typedef float (*VecDx);
-    VecDx mean = (VecDx) m->mean;
-    VecDx sdev = (VecDx) m->sdev;
-    if (m->normalize)
+    typedef float (*VecD);
+    VecD mean = (VecD) m->mean;
+    VecD sdev = (VecD) m->sdev;
+    VecD nn_mean = NULL;
+    VecD nn_sdev = NULL;
+    
+    if (m->normalize) {
         calculate_mean_sdev(xTr,MTr,D,mean,sdev,0);
+        nn_mean = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_mean,mean,D);
+        nn_sdev = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_sdev,sdev,D);
+    }
 
     BATCH* bTr = batch_create(xTr,D,yTr,Nt,B,lenTr,numTr,shuffle);
     BATCH* bVd = NULL;
     if (MVd > 0) /* Notice validation data not shuffled */
         bVd = batch_create(xVd,D,yVd,Nt,B,lenVd,numVd,0);
         
-    fArr2D dy[L];  /* Gradients with respect to the inputs          */
-    for (int i = 0; i < L; i++)
-        dy[i] = allocmem(layer_batch_size(&m->layer[i]),
-                         layer_output_dim(&m->layer[i]),float);
+    fArr2D dy[L];  /* Gradients with respect to the inputs */
+    for (int i = 0; i < L; i++) {
+        dy[i] = nnallocmem(layer_batch_size(&m->layer[i]),
+                           layer_output_dim(&m->layer[i]),float);
+    }
     
     /* Allocate memory for one batch */
     typedef float (*ArrBD)[D];
     typedef float (*ArrBN)[Nt];
-    ArrBD x = (ArrBD) allocmem(B,D,float);    /* Array of samples      */
-    ArrBN yt = (ArrBN) allocmem(B,Nt,float);  /* Array of true outputs */
+    ArrBD x = (ArrBD) nnallocmem(B,D,float);    /* Array of samples      */
+    ArrBN yt = (ArrBN) nnallocmem(B,Nt,float);  /* Array of true outputs */
 
     /* Track training loss, accuracy and model improvement across epochs */
     float loss = 0;
@@ -384,7 +387,7 @@ void model_fit(MODEL* m,
             if (cnt == 0)
                 break;
             if (m->normalize)
-                normalize(x,B,D,mean,sdev,0);
+                normalize(x,B,D,nn_mean,nn_sdev,0);
             model_batch_forward(m,x,1,yp);
             sample_cnt += cnt;
 
@@ -457,7 +460,7 @@ void model_fit(MODEL* m,
                 if (cnt == 0)
                     break;
                 if (m->normalize)
-                    normalize(x,B,D,mean,sdev,0); 
+                    normalize(x,B,D,nn_mean,nn_sdev,0); 
                 model_batch_forward(m,x,0,yp);
                 v_sample_cnt += cnt;
 
@@ -514,24 +517,19 @@ void model_fit(MODEL* m,
             printf("\n");
     }
     for (int i = 0; i < L; i++) {
-        freemem(dy[i]);
+        nnfreemem(dy[i]);
     }
-    freemem(x);
-    freemem(yt);
+    nnfreemem(nn_mean);
+    nnfreemem(nn_sdev);
+    nnfreemem(x);
+    nnfreemem(yt);
     batch_free(bTr);
     if (bVd != NULL)
         batch_free(bVd);
     if (final) {
         m->final = 1;
-        for (int i = 0; i < m->num_layers; i++) {
-            if (m->layer[i].opt_state) {
-                for (int j = 0; j < m->layer[i].num_opt_state; j++)
-                    freemem(m->layer[i].opt_state[j]);
-                free(m->layer[i].opt_state);
-                m->layer[i].num_opt_state = 0;
-                m->layer[i].opt_state = NULL;
-            }
-        }
+        for (int i = 0; i < m->num_layers; i++)
+            layer_free_opt_state(&m->layer[i]);
     }
     if (verbose)
         printf("\n");
@@ -559,12 +557,25 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     ArrMD x = (ArrMD) x_;
     ArrMNo y = (ArrMNo) y_;
     
-    typedef float (*VecDx);
-    VecDx mean = (VecDx) m->mean;
-    VecDx sdev = (VecDx) m->sdev;
+    typedef float (*VecD);
+    VecD mean = (VecD) m->mean;
+    VecD sdev = (VecD) m->sdev;
+    VecD nn_mean = NULL;
+    VecD nn_sdev = NULL;
+
+    if (m->normalize) {
+        nn_mean = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_mean,mean,D);
+        nn_sdev = (VecD) nnallocmem(D,1,float);
+        nnfltcpy(nn_sdev,sdev,D);
+    }
+
     /* Allocate memory for one batch */
     typedef float (*ArrBD)[D];
-    ArrBD xb = (ArrBD) allocmem(B,D,float);    /* Array of samples      */
+    ArrBD xb = (ArrBD) nnallocmem(B,D,float); /* Array of samples */
+    /* Temp output buffer */
+    typedef float (*ArrBNo)[No];
+    ArrBNo yb = (m->loss_func == 'N') ? (ArrBNo) nnallocmem(B,No,float) : NULL;
 
     BATCH* b = batch_create(x,D,NULL,0,B,NULL,len,0);
     reset_state(m);
@@ -574,19 +585,23 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
         if (cnt == 0)
             break;
         if (m->normalize)
-            normalize(xb,B,D,mean,sdev,0); 
+            normalize(xb,B,D,nn_mean,nn_sdev,0); 
         model_batch_forward(m,xb,0,yp);
         if (m->loss_func == 'N') {
-            /* Full-vocabulary pass, then normalize to a distribution. */
+            /* Full-vocabulary pass, then normalize to a distribution */
             negsample_logits(m->layer[L - 1].negsample,yp[L - 1],
-                             (fArr2D) y,cnt);
-            softmax((fArr2D) y,cnt,No);
+                             (fArr2D) yb,cnt);
+            softmax((fArr2D) yb,cnt,No);
+            nnfltcpy((fArr2D) y,yb,cnt * No);
         }
         else
-            fltcpy((fArr2D) y,yp[L - 1],cnt * No);
+            nnfltcpy((fArr2D) y,yp[L - 1],cnt * No);
         y += cnt;
     }
-    freemem(xb);
+    nnfreemem(nn_mean);
+    nnfreemem(nn_sdev);
+    nnfreemem(xb);
+    nnfreemem(yb);
     batch_free(b);
 }
 

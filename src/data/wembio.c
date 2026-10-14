@@ -10,7 +10,7 @@
 #include <string.h>
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "hash.h"
 #include "wembio.h"
 

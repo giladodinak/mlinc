@@ -15,7 +15,11 @@
 #define FMTF "%f"
 #endif
 
-#include <memory.h> /* memcpy() memmove() memset() */
+#include <memory.h>
+
+#ifdef USE_CUDA
+#include "../cuda/cuflt.h"
+#endif
 
 /* Sets an array of floats to zero.
  * 
@@ -29,7 +33,7 @@
  */
 static inline void fltclr(void* restrict v_, int n)
 {
-    float* restrict v = (float* restrict) v_;
+    float* restrict v = (float*) v_;
     for (int i = 0; i < n; i++) v[i] = 0.0;
 }
 
@@ -48,20 +52,12 @@ static inline void fltcpy(void* restrict d, const void* restrict s, int n)
     memcpy(d,s,n * sizeof(float));
 }
 
-/* Moves an array of floats; like fltcpy but overlapping move is okay.
- *
- * Moves n floats from the source array pointed to by s to the destination
- * array pointed to by d. Unlike fltcpy, overlapping of source and destination
- * arrays is allowed.
- *
- * Parameters:
- *   d : Pointer to the destination array.
- *   s : Pointer to the source array.
- *   n : Number of elements to move.
- */
-static inline void fltmove(void* d, const void* s, int n)
-{
-    memmove(d,s,n * sizeof(float));
-}
+#ifdef USE_CUDA
+#define nnfltclr cufltclr
+#define nnfltcpy cufltcpy
+#else
+#define nnfltclr fltclr
+#define nnfltcpy fltcpy
+#endif
 
 #endif

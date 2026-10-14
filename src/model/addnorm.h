@@ -3,6 +3,7 @@
 #ifndef ADDNORM_H
 #define ADDNORM_H
 #include "float.h"
+#include "arraytypes.h"
 #include "array.h"
 
 typedef struct lnorm_s {

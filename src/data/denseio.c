@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "arrayio.h"
 #include "dense.h"
 #include "denseio.h"
@@ -29,43 +29,32 @@ DENSE* read_dense(FILE* fp)
         fprintf(stderr,"In read_dense: failed to read the header\n");
         return NULL;
     }
-    if (c != 'n' && c != 'r' && c != 'g' && c != 's' && c != 'S') {
-        fprintf(stderr,"In read_dense: invalid activation code\n");
-        return NULL;
+    char* activation;
+    switch (c) {
+        case 'n': activation = "none"; break;
+        case 'r': activation = "relu"; break;
+        case 'g': activation = "gelu"; break;
+        case 's': activation = "sigmoid"; break;
+        case 'S': activation = "softmax"; break;
+        default:
+            fprintf(stderr,"In read_dense: invalid activation code\n");
+            return NULL;
     }
     use_bias = (use_bias) ? 1 : 0;
     training = (training) ? 1 : 0;
+    DENSE* d = dense_create(S,activation,use_bias);
+    dense_init(d,D,B,training);
 
-    DENSE* d = allocmem(1,1,DENSE);
-    d->S = S;
-    d->D = D;
-    d->B = B;
-    d->activation = c;
-    d->use_bias = use_bias;
-    d->training = training;
-
-    d->h = allocmem(d->B,d->S,float);
-    if (training && c == 'g')
-        d->z = allocmem(d->B,d->S,float);
-
-    d->Wx = allocmem(d->D,d->S,float);
     if (!read_array(d->Wx,d->D,d->S,fp,0)) {
         fprintf(stderr,"In read_dense: failed to read weights\n");
         goto err;
     }
 
     if (d->use_bias) {
-        d->b = allocmem(1,d->S,float);
         if (!read_array((fArr2D) d->b,1,d->S,fp,0)) {
             fprintf(stderr,"In read_dense: failed to read bias\n");
             goto err;
         }
-    }
-
-    if (d->training) {
-        d->gWx = allocmem(d->D,d->S,float);
-        if (d->use_bias)
-            d->gb = allocmem(1,d->S,float);
     }
 
     return d;

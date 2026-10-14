@@ -9,19 +9,29 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Initializes the random number generator */
 extern int32_t lrng_seed;
 void init_lrng(int seed);
 int get_lrng_seed(void);
 
+#ifdef __cplusplus
+}
+#endif
+
+
 /* lrng returns a pseudo-random real number uniformly distributed 
  * between 0.0 and 1.0, exclusive on both ends.
  * Lehmer random number generator - Steve Park & Dave Geyer
+ * https://www.cs.wm.edu/~vjtorc/software/park/rngs.c
  */
 static inline float lrng(void)
 {
-    const int32_t modulus = 2147483647; /* 0x7FFFFFFF   */
-    const int32_t multiplier = 48271;   /* Prime number */
+    const int32_t modulus = 2147483647; /* 0x7FFFFFFF Prime number */
+    const int32_t multiplier = 48271;   /* Another prime number    */
     const int32_t q = modulus / multiplier;
     const int32_t r = modulus % multiplier;
     int32_t t = multiplier * (lrng_seed % q) - r * (lrng_seed / q);

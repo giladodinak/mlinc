@@ -2,11 +2,11 @@
 /* Data preparation for model training  */
 #ifndef BATCH_H
 #define BATCH_H
-#include "array.h"
+#include "arraytypes.h"
 
 typedef struct batch_s {
     fArr2D x;       /* Array of input vectors                       */
-    fArr2D y;       /* Array of output vectors (optional            */
+    fArr2D y;       /* Array of output vectors (optional)           */
     int  D;         /* Dimension of x vectors (may include bias)    */
     int  N;         /* Dimension of y vectors                       */
     int  B;         /* Number of vectors returned by batch_next()   */
@@ -17,6 +17,8 @@ typedef struct batch_s {
     int* shufVec;   /* Offsets of shuffled training vectors         */
     int  curSeq;    /* Next vector from this sequence               */
     int  curVec;    /* Next vector in the sequence                  */
+    fArr2D xbuf;    /* batch_copy staging output array              */
+    fArr2D ybuf;    /* batch_copy staging output array (optional)   */
 } BATCH;
 
 /* Constructs an iterator that returns batches of input vectors, 

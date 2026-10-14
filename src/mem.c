@@ -11,8 +11,8 @@
 static const char bZero[sizeof(float)] = {0}; /* All bytes are zero        */
 static const float fZero = 0.0; /* Compiler's representation of float zero */
 
-void* allocmem_int(size_t M, size_t N, int S, char* typ, 
-                                       const char* func, char* file, int line)
+void* allocmem_int(size_t M, size_t N, int S, const char* typ, 
+                   const char* func, const char* file, int line)
 {
     void* p = calloc(M * N,S);
     if (p == NULL) {
@@ -33,4 +33,3 @@ void* allocmem_int(size_t M, size_t N, int S, char* typ,
     } 
     return p;
 }
-

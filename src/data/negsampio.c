@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "arrayio.h"
 #include "negsample.h"
 #include "negsampio.h"
@@ -35,25 +35,8 @@ NEGSAMPLE* read_negsample(FILE* fp)
         fprintf(stderr,"In read_negsample: failed to read the header\n");
         return NULL;
     }
-    NEGSAMPLE* l = allocmem(1,1,NEGSAMPLE);
-    l->K = K;
-    l->E = E;
-    l->B = B;
-    l->n_neg = n_neg;
-    l->training = training ? 1 : 0;
-    l->Wo = allocmem(l->K,l->E,float);
-    l->h = allocmem(l->B,l->E,float);
-    if (l->training) {
-        l->gWo = allocmem(l->K,l->E,float);
-        l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
-        l->ntouched = 0;
-        l->seen = allocmem(l->K,1,int);
-        for (int i = 0; i < l->K; i++)
-            l->seen[i] = -1;
-    }
-    l->stamp = 0;
-    l->dist = NULL;
-    l->dist_size = 0;
+    NEGSAMPLE* l = negsample_create(K,n_neg);
+    negsample_init(l,E,B,training);
 
     int ok = read_array(l->Wo,l->K,l->E,fp,0);
     if (ok)

@@ -30,6 +30,7 @@ EMBEDDING* embedding_create(int embedding_dim, int context_len, int padinx)
     l->padinx = padinx;
     l->h = NULL;
     l->Wx = NULL;
+    l->devstat = NULL;
     return l;
 }
 
@@ -83,3 +84,81 @@ void embedding_reset(EMBEDDING* l)
 {
     (void) l; /* Do nothing */
 }
+
+static inline void prep_row(fArr2D gWx_, int N, int inx, int* rows, int* cnt)
+{
+    for (int r = 0; r < *cnt; r++)
+        if (rows[r] == inx)
+            return;
+    typedef float (*ArrMN)[N];
+    ArrMN gWx = (ArrMN) gWx_;
+    fltclr(gWx[inx],N);
+    rows[(*cnt)++] = inx;
+}
+
+fArr2D embedding_forward(EMBEDDING* restrict l,
+                         fArr2D restrict X_, int lyr)
+{
+    (void) lyr;
+    typedef float (*ArrBM)[l->M];
+    typedef float (*ArrBE)[l->E];
+    typedef float (*ArrDE)[l->E];
+    ArrBM X = (ArrBM) X_;
+    ArrBE h = (ArrBE) l->h;
+    ArrDE Wx = (ArrDE) l->Wx;
+
+    fltclr(h,l->B * l->E);
+    for (int i = 0; i < l->B; i++)
+        for (int j = 0; j < l->M; j++)
+            for (int k = 0; k < l->E; k++)
+                h[i][k] += Wx[(int)X[i][j]][k];
+    return l->h;
+}
+
+void embedding_backward(EMBEDDING* restrict l,
+                        const fArr2D restrict dy_,
+                        const fArr2D restrict X_,
+                        fArr2D restrict gWx_,
+                        int* grows, int* grcnt, int lyr)
+{
+    (void) lyr;
+    typedef float (*ArrBM)[l->M];
+    typedef float (*ArrBE)[l->E];
+    typedef float (*ArrDE)[l->E];
+    ArrBE dy = (ArrBE) dy_;
+    ArrBM X = (ArrBM) X_;
+    ArrDE gWx = (ArrDE) gWx_;
+
+    if (grows != NULL && grcnt != NULL)
+        *grcnt = 0;
+    else
+        fltclr(gWx,l->D * l->E);
+
+    for (int i = 0; i < l->B; i++) {
+        for (int j = 0; j < l->M; j++) {
+            int xij = (int)X[i][j];
+            if (xij != l->padinx) {
+                if (grows != NULL && grcnt != NULL)
+                    prep_row(gWx_,l->E,xij,grows,grcnt);
+                for (int k = 0; k < l->E; k++)
+                    gWx[xij][k] += dy[i][k];
+            }
+        }
+    }
+}
+
+void embedding_update(EMBEDDING* restrict l,
+                      const fArr2D restrict gWx_,
+                      const int* grows, int grcnt, float learning_rate)
+{
+    typedef float (*ArrDE)[l->E];
+    ArrDE Wx = (ArrDE)l->Wx;
+    ArrDE gWx = (ArrDE)gWx_;
+
+    for (int r = 0; r < grcnt; r++) {
+        int i = grows[r];
+        for (int j = 0; j < l->E; j++)
+            Wx[i][j] -= learning_rate * gWx[i][j];
+    }
+}
+

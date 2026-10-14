@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "arrayio.h"
 #include "rope.h"
 #include "mha.h"
@@ -20,9 +20,9 @@
  *   Pointer to the read MHA layer if successful, NULL otherwise
  *
  * Notes:
- *   - Only the projection weights (Wq, Wk, Wv, Wo) are persisted; all
- *     other buffers are scratch and are (re)allocated here. The RoPE
- *     frequency table (theta) is derived and rebuilt via rope_init().
+ *   - Only the layer configuration and projection weights (Wq, Wk, Wv, Wo)
+ *     are persisted; implementation-specific buffers are (re)allocated here.
+ *     The RoPE frequency table (theta) is derived and rebuilt via rope_init().
  *   - Backward/gradient buffers are allocated only when the stored
  *     training flag is non-zero.
  */
@@ -43,69 +43,14 @@ MHA* read_mha(FILE* fp)
         return NULL;
     }
 
-    MHA* l = allocmem(1,1,MHA);
-    l->H = H;
-    l->T = T;
-    l->D = D;
-    l->B = B;
-    l->Dh = D / H;
-    l->BT = B * T;
-    l->BHT = B * H * T;
-    l->lookahead = lookahead;
-    l->training = (training) ? 1 : 0;
+    MHA* l = mha_create(H,T,lookahead);
 
     /* Persistent projection weights */
-    l->Wq = allocmem(l->D,l->D,float);
-    l->Wk = allocmem(l->D,l->D,float);
-    l->Wv = allocmem(l->D,l->D,float);
-    l->Wo = allocmem(l->D,l->D,float);
 
     /* Forward scratch buffers */
-    l->Q = allocmem(l->BT,l->D,float);
-    l->K = allocmem(l->BT,l->D,float);
-    l->V = allocmem(l->BT,l->D,float);
-
-    l->theta = allocmem(1,l->Dh / 2,float);
-
-    l->Qh = allocmem(l->BHT,l->Dh,float);
-    l->Kh = allocmem(l->BHT,l->Dh,float);
-    l->Vh = allocmem(l->BHT,l->Dh,float);
-
-    l->Att = allocmem(l->BHT,l->T,float);
-    l->dropout = allocmem(l->B * l->H,1,DROPOUT*);
-    for (int i = 0; i < l->B * l->H; i++) {
-        l->dropout[i] = dropout_create(dropout_rate);
-        dropout_init(l->dropout[i],l->T,l->T);
-    }
-
-    l->Scores = allocmem(l->T,l->T,float);
-    l->Oh = allocmem(l->T,l->Dh,float);
-
-    l->Out = allocmem(l->BT,l->D,float);
-
-    rope_init(l->theta,l->Dh);
 
     /* Backward / gradient buffers (only when training) */
-    if (l->training) {
-        l->dOut = allocmem(l->BT,l->D,float);
-
-        l->dQ = allocmem(l->BT,l->D,float);
-        l->dK = allocmem(l->BT,l->D,float);
-        l->dV = allocmem(l->BT,l->D,float);
-
-        l->dQh = allocmem(l->T,l->Dh,float);
-        l->dKh = allocmem(l->T,l->Dh,float);
-        l->dVh = allocmem(l->T,l->Dh,float);
-
-        l->dOh = allocmem(l->T,l->Dh,float);
-        l->dAtt = allocmem(l->T,l->T,float);
-        l->dScores = allocmem(l->T,l->T,float);
-
-        l->gWq = allocmem(l->D,l->D,float);
-        l->gWk = allocmem(l->D,l->D,float);
-        l->gWv = allocmem(l->D,l->D,float);
-        l->gWo = allocmem(l->D,l->D,float);
-    }
+    mha_init(l,D,B,training,dropout_rate);
 
     fArr2D Wx[4] = {l->Wq,l->Wk,l->Wv,l->Wo};
     char* sWx[4] = {"Wq","Wk","Wv","Wo"};
@@ -138,7 +83,7 @@ err: /* error exit */
 int write_mha(const MHA* l, int final, FILE* fp)
 {
     int training = final ? 0 : l->training;
-    float dropout_rate = final ? 0.0f : l->dropout[0]->rate;
+    float dropout_rate = final ? 0.0f : l->dropout_rate;
     int cnt = fprintf(fp,"MHA H %d T %d D %d B %d lookahead %d"
                          " training %d dropout %.9g\n",
                       l->H,l->T,l->D,l->B,l->lookahead,

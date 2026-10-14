@@ -117,7 +117,9 @@ void negsample_init(NEGSAMPLE* l, int input_dim, int batch_size, int training)
 }
 
 /* Provides the unigram negative-sampling table (referenced, not owned). */
-void negsample_set_dist(NEGSAMPLE* l, const int* dist_table, int dist_table_size)
+void negsample_set_dist(NEGSAMPLE* l, 
+                        const int* dist_table,
+                        int dist_table_size)
 {
     l->dist = dist_table;
     l->dist_size = dist_table_size;
@@ -198,7 +200,7 @@ void negsample_reset(NEGSAMPLE* l)
  */
 float negsample_loss(NEGSAMPLE* restrict l,
                      const fArr2D restrict h_/*[B][E]*/,
-                     const fArr2D restrict labels_/*[B][1]*/,
+                     const fArr2D restrict labels/*[B][1]*/,
                      fArr2D restrict dh_/*[B][E]*/,
                      int cnt, int* correct)
 {
@@ -213,7 +215,6 @@ float negsample_loss(NEGSAMPLE* restrict l,
     ArrBE dh = (ArrBE) dh_;
     ArrKE Wo = (ArrKE) l->Wo;
     ArrKE gWo = (ArrKE) l->gWo;
-    const float* labels = (const float*) labels_;
 
     if (l->dist == NULL) {
         fflush(stdout);
@@ -229,7 +230,7 @@ float negsample_loss(NEGSAMPLE* restrict l,
     int negbuf[n_neg];
     float loss = 0.0;
     for (int i = 0; i < cnt; i++) {
-        int target = (int) labels[i];
+        int target = (int) ((const float *)labels)[i];
         if (target <= 0 || target >= K) /* Index 0 reserved (PAD); skip */
             continue;
 

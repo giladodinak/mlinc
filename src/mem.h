@@ -1,12 +1,20 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
-/* Memory data structures and functions */
+/* Memory allocation functions          */
 
 #ifndef MEM_H
 #define MEM_H
 #include <stdlib.h>  /* declares free() */
 
-void* allocmem_int(size_t M, size_t N, int S, char* typ, 
-                                       const char* func, char* file, int line);
+#ifdef USE_CUDA
+#include "../cuda/cumem.h"
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void* allocmem_int(size_t M, size_t N, int S, const char* typ, 
+                   const char* func, const char* file, int line);
 
 /* Allocates contiguous memory for an array of MxN elements of type T,
  * and initializes all elements to zero.
@@ -43,5 +51,23 @@ void* allocmem_int(size_t M, size_t N, int S, char* typ,
  *  does nothing.
  */
 inline static void freemem(void *p) { if (p != NULL) free(p); }
+
+#ifdef __cplusplus
+}
+#endif
+
+/* nnallocmem and nnfreemem are used whenever CPU code allocates memory
+ * that is device memory when using GPU, and CPU memory otherwise
+ */
+#ifdef USE_CUDA
+#define nnallocmem(M,N,T) cuallocmem(M,N,T)
+#define nnfreemem(p)      cufreemem(p)
+#define nnmemcpy(dst,src,cnt) cudaMemcpy(dst,src,cnt,cudaMemcpyDefault)
+
+#else
+#define nnallocmem(M,N,T) allocmem(M,N,T)
+#define nnfreemem(p)      freemem(p)
+#define nnmemcpy(dst,src,cnt) memcpy(dst,src,cnt)
+#endif
 
 #endif

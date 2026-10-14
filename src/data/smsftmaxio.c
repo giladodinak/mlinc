@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include "mem.h"
 #include "float.h"
-#include "array.h"
+#include "arraytypes.h"
 #include "arrayio.h"
 #include "smsftmax.h"
 #include "smsftmaxio.h"
@@ -35,22 +35,9 @@ SMSFTMAX* read_smsftmax(FILE* fp)
         fprintf(stderr,"In read_smsftmax: failed to read the header\n");
         return NULL;
     }
-    SMSFTMAX* l = allocmem(1,1,SMSFTMAX);
-    l->K = K;
-    l->E = E;
-    l->B = B;
-    l->n_neg = n_neg;
-    l->Wo = allocmem(l->K,l->E,float);
-    l->h = allocmem(l->B,l->E,float);
-    l->touched = allocmem(l->B * (l->n_neg + 1),1,int);
-    l->ntouched = 0;
-    l->seen = allocmem(l->K,1,int);
-    for (int i = 0; i < l->K; i++)
-        l->seen[i] = -1;
-    l->stamp = 0;
-    l->dist = NULL;
-    l->dist_size = 0;
-    l->logq = allocmem(l->K,1,float);   /* filled by smsftmax_set_dist() */
+    SMSFTMAX* l = smsftmax_create(K,n_neg);
+    smsftmax_init(l,E,B);
+    /* filled by smsftmax_set_dist() */
 
     int ok = read_array(l->Wo,l->K,l->E,fp,0);
     if (ok)

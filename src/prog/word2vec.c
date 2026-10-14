@@ -94,25 +94,6 @@ static void text2cxt(int* sw, int swc, int start, int B,
     }
 }
 
-/* Update layer's weights for selected rows.
- *
- * Applies weight -= lr * gradient only to the rows listed in rows[nrows].
- * Used with negative sampling and the embedding backward pass, where eachi
- * step touches few rows of a large weight matrix.
- */
-static void update(fArr2D Wx_, fArr2D gWx_,
-                   const int* rows, int nrows, int N, float lr)
-{
-    typedef float (*ArrDN)[N];
-    ArrDN Wx = (ArrDN) Wx_;
-    ArrDN gWx = (ArrDN) gWx_;
-    for (int r = 0; r < nrows; r++) {
-        int i = rows[r];
-        for (int j = 0; j < N; j++)
-            Wx[i][j] -= lr * gWx[i][j];
-    }
-}
-
 /* Returns the embedding vector of a word
  * embd - embedding layer
  * wrdinx - the index of the word
@@ -256,9 +237,9 @@ int main(int argc, char** argv)
 
     /* Allocate memory for gradients */
     fArr2D dy;  /* Gradients with respect to the input  */
-    dy = allocmem(embedding->B,embedding->E,float);
+    dy = nnallocmem(embedding->B,embedding->E,float);
     fArr2D gWx[2]; /* Gradients: [0] input embeddings, [1] output weights */
-    gWx[0] = allocmem(embedding->D,embedding->E,float);
+    gWx[0] = nnallocmem(embedding->D,embedding->E,float);
     gWx[1] = allocmem(vocab_size,embedding_dim,float);
 
     /* Rows of Wx (input embeddings) touched per batch: at most B context words */
@@ -324,7 +305,13 @@ int main(int argc, char** argv)
 
                 /* Forward pass */
                 fArr2D yp = embedding_forward(embedding,contexts,0);
-                loss += negsample_loss(output,yp,labels,dy,batch_size,NULL);
+
+                /* Notice wcnt == batch_size except for the last batch.
+                 * The last batch's remaining rows are all zero-padded
+                 * and do not contribute to the loss or gradients, so
+                 * they can be skipped.
+                 */
+                loss += negsample_loss(output,yp,labels,dy,wcnt,NULL);
 
                 /* backward pass */
                 int ntouched_in = 0;
@@ -334,8 +321,8 @@ int main(int argc, char** argv)
                 /* Update weights. Both matrices are updated only on the rows
                  * their sparse gradients actually touched this batch.
                  */
-                update(embedding->Wx,gWx[0],touched_in,ntouched_in,
-                                                   embedding->E,learning_rate);
+                embedding_update(embedding,gWx[0],touched_in,ntouched_in,
+                                 learning_rate);
                 negsample_update(output,learning_rate,0.0);
 
                 word_cnt += wcnt;
@@ -358,17 +345,20 @@ int main(int argc, char** argv)
 
     printf("\n");
     printf("Saving word embeddings to %s\n",embedding_file);
+    fArr2D Wx = allocmem(vocab_size,embedding_dim,float);
+    nnfltcpy(Wx,embedding->Wx,vocab_size * embedding_dim);
     if (!store_word_embeddings(embedding_file,vocab_size,embedding_dim,
                                initial_learning_rate,learning_rate_decay,
-                               num_epochs,vocab->hmap,embedding->Wx))
+                               num_epochs,vocab->hmap,Wx))
         fprintf(stderr,"Failed to save word embeddings to '%s'\n",
                 embedding_file);
+    freemem(Wx);
     printf("\n");
     vocab_free(vocab);
     embedding_free(embedding);
     negsample_free(output);
-    freemem(dy);
-    freemem(gWx[0]);
+    nnfreemem(dy);
+    nnfreemem(gWx[0]);
     freemem(gWx[1]);
     freemem(touched_in);
     freemem(file_words);

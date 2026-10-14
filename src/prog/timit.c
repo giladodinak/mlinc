@@ -110,7 +110,6 @@ int timit_lstm_dense_classification(
     printf("\nTrains a multi layer LSTM followed by Dense layer to predict the\n");
     printf("classes of samples from the TIMIT dataset\n\n");
     printf("Run 'timit -h' to list program options\n\n");
-    printf("Training with default parameters may take a few hours\n\n");
     const int Dr = FEAT_CNT;            /* Input vectors dimension          */
     const int D = EXPENDED_FEAT_CNT;    /* Expended input vectors dimension */
     const int N = REDUCED_PHONEME_CNT;  /* Output vector dimension          */

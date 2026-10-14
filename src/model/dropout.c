@@ -5,6 +5,7 @@
 #include <math.h>
 #include "float.h"
 #include "mem.h"
+#include "arraytypes.h"
 #include "array.h"
 #include "random.h"
 #include "dropout.h"
@@ -83,4 +84,49 @@ void dropout_free(DROPOUT* l)
 void dropout_reset(DROPOUT* l)
 {
     (void) l; /* do nothing */
+}
+
+/* Applies dropout to a 2D array in-place (training only).
+ *
+ * Parameters:
+ *   mx   : Pointer to the 2D array to be processed
+ */
+void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
+{
+   float rate = l->rate;
+    if (rate == 1.0) {
+        fltclr(mx_,l->B * l->D);
+        return;
+    }
+    typedef float (*ArrBD)[l->D];
+    ArrBD mx = (ArrBD) mx_;
+    ArrBD mk = (ArrBD) l->mask;
+    float scale = 1.0 / (1.0 - rate);
+    for (int i = 0; i < l->B; i++) {
+        for (int j = 0; j < l->D; j++) {
+            float value = urand(0.0,1.0) >= rate ? scale : 0;
+            mx[i][j] *= value;
+            mk[i][j] = value;
+        }
+    }
+}
+
+/* Applies a precomputed dropout mask to an input array, writing the
+ * result to an output array, which can be the same array as the input.
+ *
+ * Parameters:
+ *   in  : Pointer to the 2D input array to be masked
+ *   out : Pointer to the 2D output array to receive the masked result
+ */
+void dropout_backward(DROPOUT* restrict l,
+                                    const fArr2D in_/*[B][D]*/,
+                                    fArr2D out_/*[B][D]*/)
+{
+    typedef float (*ArrBD)[l->D];
+    const ArrBD in = (const ArrBD) in_;
+    const ArrBD mk = (const ArrBD) l->mask;
+    ArrBD out = (ArrBD) out_;
+    for (int i = 0; i < l->B; i++)
+        for (int j = 0; j < l->D; j++)
+            out[i][j] = in[i][j] * mk[i][j];
 }

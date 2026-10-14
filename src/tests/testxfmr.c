@@ -1,4 +1,4 @@
-/* Copyright (c) 2026 Gilad Odinak */
+
 /* Tests for the decoder-only transformer layer */
 #include <stdio.h>
 #include <stdlib.h>
@@ -6,26 +6,43 @@
 #include <math.h>
 #include <time.h>
 #include "mem.h"
+#include "float.h"
+#include "etime.h"
 #include "random.h"
 #include "array.h"
 #include "loss.h"
+#include "linear.h"
 #include "transformer.h"
 #include "dense.h"
 
 int failures = 0;
 
+/* Runs transformer forward using host input/output arrays */
+static void transformer_forward_host(TRANSFORMER* l,
+                                     const fArr2D X,
+                                     fArr2D Y,int BT,int D)
+{
+    /* GPU memory when forward executes on GPU, CPU memory otherwise */
+    fArr2D Xnn = nnallocmem(BT,D,float);
+    fArr2D Ynn = nnallocmem(BT,D,float);
+    nnfltcpy(Xnn,X,BT * D);
+    transformer_forward(l,Xnn,1,Ynn,0);
+    nnfltcpy(Y,Ynn,BT * D);
+    nnfreemem(Xnn);
+    nnfreemem(Ynn);
+}
+
 /* Loss is L = sum(dY * Y) */
 static float transformer_loss(TRANSFORMER* l,
                               float* X_flat,
                               const float* dY_flat,
+                              fArr2D Xnn,fArr2D Ynn,
                               int BT,int D)
 {
-    typedef float (*ArrBTD)[D];
-    ArrBTD X = (ArrBTD) X_flat;
-
     float Y[BT][D];
-    fltclr(Y,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y,0);
+    nnfltcpy(Xnn,X_flat,BT * D);
+    transformer_forward(l,Xnn,1,Ynn,0);
+    nnfltcpy(Y,Ynn,BT * D);
 
     float L = 0;
     for (int i = 0; i < BT; i++)
@@ -34,34 +51,54 @@ static float transformer_loss(TRANSFORMER* l,
     return L;
 }
 
-/* Compute numerical gradient for a single weight element */
-static inline float numerical_grad(float* w,TRANSFORMER* l,
-                                   float* X,
-                                   const float* dY,
-                                   int BT,int D)
+/* Compute numerical gradient for a single host input element */
+static inline float numerical_grad_input(float* w,TRANSFORMER* l,
+                                         float* X,
+                                         const float* dY,
+                                         fArr2D Xnn,fArr2D Ynn,
+                                         int BT,int D)
 {
-    const int EPS = 1e-3; 
+    const float EPS = 1e-3f;
     float old = *w;
     *w = old + EPS;
-    float Lp = transformer_loss(l,X,dY,BT,D);
+    float Lp = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
     *w = old - EPS;
-    float Ln = transformer_loss(l,X,dY,BT,D);
+    float Ln = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
     *w = old;
     return (Lp - Ln) / (2 * EPS);
 }
 
 /* Check all elements of a weight matrix against their analytical gradients */
 static int check_weight(fArr2D W,fArr2D gW,int rows,int cols,
-                         const char* name,TRANSFORMER* l,float* X,
-                         const float* dY,int BT,int D,float TOL)
+                        const char* name,TRANSFORMER* l,float* X,
+                        const float* dY,fArr2D Xnn,fArr2D Ynn,
+                        int BT,int D,float TOL)
 {
-    float* w  = (float*) W;
-    float* gw = (float*) gW;
-    for (int k = 0; k < rows * cols; k++) {
-        float num = numerical_grad(&w[k],l,X,dY,BT,D);
-        if (fabsf(num - gw[k]) > TOL) {
+    const float EPS = 1e-3f;
+    const int n = rows * cols;
+    float w[n];
+    float gw[n];
+
+    /* Keep host copies for finite-difference perturbations/comparisons. */
+    nnfltcpy(w,W,n);
+    nnfltcpy(gw,gW,n);
+
+    for (int k = 0; k < n; k++) {
+        float old = w[k];
+        w[k] = old + EPS;
+        nnfltcpy(W,w,n);
+        float Lp = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
+        w[k] = old - EPS;
+        nnfltcpy(W,w,n);
+        float Ln = transformer_loss(l,X,dY,Xnn,Ynn,BT,D);
+        w[k] = old;
+        nnfltcpy(W,w,n);
+
+        float num = (Lp - Ln) / (2 * EPS);
+        float grad = gw[k];
+        if (fabsf(num - grad) > TOL) {
             printf("FAIL %s[%d][%d]: expected=%g calculated=%g\n",
-                   name,k / cols,k % cols,num,gw[k]);
+                   name,k / cols,k % cols,num,grad);
             failures++;
             return 1;
         }
@@ -85,14 +122,14 @@ void test_transformer_zero_forward(TRANSFORMER* l)
     fltclr(X,BT * D);
     fltclr(Y,BT * D);
 
-    fltclr(l->mha->Wq,D * D);
-    fltclr(l->mha->Wk,D * D);
-    fltclr(l->mha->Wv,D * D);
-    fltclr(l->mha->Wo,D * D);
-    fltclr(l->ffn1->Wx,D * l->Dff);
-    fltclr(l->ffn2->Wx,l->Dff * D);
+    nnfltclr(l->mha->Wq,D * D);
+    nnfltclr(l->mha->Wk,D * D);
+    nnfltclr(l->mha->Wv,D * D);
+    nnfltclr(l->mha->Wo,D * D);
+    nnfltclr(l->ffn1->Wx,D * l->Dff);
+    nnfltclr(l->ffn2->Wx,l->Dff * D);
 
-    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y,0);
+    transformer_forward_host(l,(fArr2D) X,(fArr2D) Y,BT,D);
 
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
@@ -120,7 +157,7 @@ void test_transformer_finite_diff(TRANSFORMER* l)
 {
     printf("Test: transformer finite-difference gradients\n");
 
-    const int TOL = 0.05;
+    const float TOL = 0.01;
     const int BT  = l->BT;
     const int D   = l->D;
     const int Dff = l->Dff;
@@ -135,15 +172,24 @@ void test_transformer_finite_diff(TRANSFORMER* l)
 
     for (int i = 0; i < BT; i++) {
         for (int j = 0; j < D; j++) {
-            X[i][j]  = urand(-1.0f,1.0f);
-            dY[i][j] = urand(-1.0f,1.0f);
-            dX[i][j] = 0.0f;
+            X[i][j]  = urand(-1,1);
+            dY[i][j] = urand(-1,1);
+            dX[i][j] = 0;
         }
     }
 
-    fltclr(Y,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y,0);
-    transformer_backward(l,(fArr2D) dY,(fArr2D) X,(fArr2D) dX,0);
+    fArr2D Xnn  = nnallocmem(BT,D,float);
+    fArr2D Ynn  = nnallocmem(BT,D,float);
+    fArr2D dXnn = nnallocmem(BT,D,float);
+    fArr2D dYnn = nnallocmem(BT,D,float);
+    nnfltcpy(Xnn,X,BT * D);
+    nnfltcpy(dYnn,dY,BT * D);
+    transformer_forward(l,Xnn,1,Ynn,0);
+    transformer_backward(l,dYnn,Xnn,dXnn,0);
+    nnfltcpy(Y,Ynn,BT * D);
+    nnfltcpy(dX,dXnn,BT * D);
+    nnfreemem(dXnn);
+    nnfreemem(dYnn);
 
     /* Shadow instance for numerical gradient evaluation.
      * Shares weights with l via pointer — perturbations to l's weights
@@ -154,16 +200,16 @@ void test_transformer_finite_diff(TRANSFORMER* l)
     transformer_init(ls,B,0,0.0);
 
     /* Point ls weights to l's weights so perturbations are shared */
-    freemem(ls->mha->Wq);      ls->mha->Wq      = l->mha->Wq;
-    freemem(ls->mha->Wk);      ls->mha->Wk      = l->mha->Wk;
-    freemem(ls->mha->Wv);      ls->mha->Wv      = l->mha->Wv;
-    freemem(ls->mha->Wo);      ls->mha->Wo      = l->mha->Wo;
-    freemem(ls->ffn1->Wx);     ls->ffn1->Wx     = l->ffn1->Wx;
-    freemem(ls->ffn2->Wx);     ls->ffn2->Wx     = l->ffn2->Wx;
-    freemem(ls->norm1->gamma); ls->norm1->gamma = l->norm1->gamma;
-    freemem(ls->norm1->beta);  ls->norm1->beta  = l->norm1->beta;
-    freemem(ls->norm2->gamma); ls->norm2->gamma = l->norm2->gamma;
-    freemem(ls->norm2->beta);  ls->norm2->beta  = l->norm2->beta;
+    nnfreemem(ls->mha->Wq);      ls->mha->Wq      = l->mha->Wq;
+    nnfreemem(ls->mha->Wk);      ls->mha->Wk      = l->mha->Wk;
+    nnfreemem(ls->mha->Wv);      ls->mha->Wv      = l->mha->Wv;
+    nnfreemem(ls->mha->Wo);      ls->mha->Wo      = l->mha->Wo;
+    nnfreemem(ls->ffn1->Wx);     ls->ffn1->Wx     = l->ffn1->Wx;
+    nnfreemem(ls->ffn2->Wx);     ls->ffn2->Wx     = l->ffn2->Wx;
+    nnfreemem(ls->norm1->gamma); ls->norm1->gamma = l->norm1->gamma;
+    nnfreemem(ls->norm1->beta);  ls->norm1->beta  = l->norm1->beta;
+    nnfreemem(ls->norm2->gamma); ls->norm2->gamma = l->norm2->gamma;
+    nnfreemem(ls->norm2->beta);  ls->norm2->beta  = l->norm2->beta;
 
     float* x_flat  = (float*) X;
     float* dy_flat = (float*) dY;
@@ -173,7 +219,7 @@ void test_transformer_finite_diff(TRANSFORMER* l)
 
     /* Check dX */
     for (int k = 0; k < BT * D; k++) {
-        float num = numerical_grad(&x_flat[k],ls,x_flat,dy_flat,BT,D);
+        float num = numerical_grad_input(&x_flat[k],ls,x_flat,dy_flat,Xnn,Ynn,BT,D);
         if (fabsf(num - dx_flat[k]) > TOL) {
             printf("FAIL dX[%d][%d]: expected=%g calculated=%g\n",
                    k / D,k % D,num,dx_flat[k]);
@@ -184,17 +230,17 @@ void test_transformer_finite_diff(TRANSFORMER* l)
     }
 
     /* Check weight gradients */
-    failed = failed || check_weight(l->mha->Wq, l->mha->gWq,D,D, "gWq",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->mha->Wk, l->mha->gWk,D,D, "gWk",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->mha->Wv, l->mha->gWv,D,D, "gWv",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->mha->Wo, l->mha->gWo,D,D, "gWo",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->ffn1->Wx,l->ffn1->gWx, D, Dff,"gWx1",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight(l->ffn2->Wx,l->ffn2->gWx, Dff,D, "gWx2",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wq, l->mha->gWq,D,D, "gWq",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wk, l->mha->gWk,D,D, "gWk",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wv, l->mha->gWv,D,D, "gWv",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight(l->mha->Wo, l->mha->gWo,D,D, "gWo",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight(l->ffn1->Wx,l->ffn1->gWx, D, Dff,"gWx1",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight(l->ffn2->Wx,l->ffn2->gWx, Dff,D, "gWx2",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
 
-    failed = failed || check_weight((fArr2D) l->norm1->gamma,(fArr2D) l->dg1,1,D,"dg1",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight((fArr2D) l->norm1->beta, (fArr2D) l->db1,1,D,"db1",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight((fArr2D) l->norm2->gamma,(fArr2D) l->dg2,1,D,"dg2",ls,x_flat,dy_flat,BT,D,TOL);
-    failed = failed || check_weight((fArr2D) l->norm2->beta, (fArr2D) l->db2,1,D,"db2",ls,x_flat,dy_flat,BT,D,TOL);
+    failed = failed || check_weight((fArr2D) l->norm1->gamma,(fArr2D) l->dg1,1,D,"dg1",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight((fArr2D) l->norm1->beta, (fArr2D) l->db1,1,D,"db1",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight((fArr2D) l->norm2->gamma,(fArr2D) l->dg2,1,D,"dg2",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
+    failed = failed || check_weight((fArr2D) l->norm2->beta, (fArr2D) l->db2,1,D,"db2",ls,x_flat,dy_flat,Xnn,Ynn,BT,D,TOL);
 
     /* Null out shared pointers before freeing ls to avoid double-free */
     ls->mha->Wq = ls->mha->Wk = ls->mha->Wv = ls->mha->Wo = NULL;
@@ -202,6 +248,8 @@ void test_transformer_finite_diff(TRANSFORMER* l)
     ls->norm1->gamma = ls->norm1->beta = NULL;
     ls->norm2->gamma = ls->norm2->beta = NULL;
     transformer_free(ls);
+    nnfreemem(Xnn);
+    nnfreemem(Ynn);
 
     printf("PASS\n");
 }
@@ -226,7 +274,7 @@ void test_transformer_causal_mask(TRANSFORMER* l)
             X[i][j] = urand(-1.0f,1.0f);
 
     fltclr(Y1,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y1,0);
+    transformer_forward_host(l,(fArr2D) X,(fArr2D) Y1,BT,D);
 
     /* Perturb the last token of the first batch item */
     int last = T - 1;
@@ -234,7 +282,7 @@ void test_transformer_causal_mask(TRANSFORMER* l)
         X[last][j] += 1.0f;
 
     fltclr(Y2,BT * D);
-    transformer_forward(l,(fArr2D) X,NULL,1,(fArr2D) Y2,0);
+    transformer_forward_host(l,(fArr2D) X,(fArr2D) Y2,BT,D);
 
     /* Output at position 0 (past) must be unchanged */
     for (int j = 0; j < D; j++) {
@@ -270,6 +318,7 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
     const int BT = l_train->BT;
     const int D  = l_train->D;
 
+    /* CPU memory (see below) */
     float X[BT][D];
     float Y1[BT][D];
     float Y2[BT][D];
@@ -278,11 +327,19 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
         for (int j = 0; j < D; j++)
             X[i][j] = urand(-1.0f,1.0f);
 
+    /* Either CPU or GPU memory */
+    fArr2D Xnn  = nnallocmem(BT,D,float);
+    fArr2D Y1nn = nnallocmem(BT,D,float);
+    fArr2D Y2nn = nnallocmem(BT,D,float);
+    nnfltcpy(Xnn,X,BT * D);
+
     /* Training: two passes should differ */
-    fltclr(Y1,BT * D);
-    transformer_forward(l_train,(fArr2D) X,NULL,1,(fArr2D) Y1,0);
-    fltclr(Y2,BT * D);
-    transformer_forward(l_train,(fArr2D) X,NULL,1,(fArr2D) Y2,0);
+    nnfltclr(Y1nn,BT * D);
+    transformer_forward(l_train,Xnn,1,Y1nn,0);
+    nnfltcpy(Y1,Y1nn,BT * D);
+    nnfltclr(Y2nn,BT * D);
+    transformer_forward(l_train,Xnn,1,Y2nn,0);
+    nnfltcpy(Y2,Y2nn,BT * D);
 
     float diff = 0;
     for (int i = 0; i < BT; i++)
@@ -291,14 +348,16 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
     if (diff < 1e-6f) {
         printf("FAIL dropout: training passes produced identical outputs\n");
         failures++;
-        return;
+        goto Exit;
     }
 
     /* Inference: two passes must be identical */
-    fltclr(Y1,BT * D);
-    transformer_forward(l_infer,(fArr2D) X,NULL,1,(fArr2D) Y1,0);
-    fltclr(Y2,BT * D);
-    transformer_forward(l_infer,(fArr2D) X,NULL,1,(fArr2D) Y2,0);
+    nnfltclr(Y1nn,BT * D);
+    transformer_forward(l_infer,Xnn,1,Y1nn,0);
+    nnfltcpy(Y1,Y1nn,BT * D);
+    nnfltclr(Y2nn,BT * D);
+    transformer_forward(l_infer,Xnn,1,Y2nn,0);
+    nnfltcpy(Y2,Y2nn,BT * D);
 
     diff = 0;
     for (int i = 0; i < BT; i++)
@@ -307,10 +366,14 @@ void test_transformer_dropout(TRANSFORMER* l_train,TRANSFORMER* l_infer)
     if (diff > 0.0f) {
         printf("FAIL dropout: inference passes produced different outputs\n");
         failures++;
-        return;
+        goto Exit;
     }
 
     printf("PASS\n");
+Exit:
+    nnfreemem(Xnn);
+    nnfreemem(Y1nn);
+    nnfreemem(Y2nn);
 }
 
 void smoke_test(void)
@@ -351,52 +414,35 @@ void smoke_test(void)
     transformer_init(l_infer,batch_size,0,0.0);
 
     /* Copy weights from train to infer so they're comparable */
-    memcpy(l_infer->mha->Wq,  l_train->mha->Wq,  model_dim * model_dim * sizeof(float));
-    memcpy(l_infer->mha->Wk,  l_train->mha->Wk,  model_dim * model_dim * sizeof(float));
-    memcpy(l_infer->mha->Wv,  l_train->mha->Wv,  model_dim * model_dim * sizeof(float));
-    memcpy(l_infer->mha->Wo,  l_train->mha->Wo,  model_dim * model_dim * sizeof(float));
-    memcpy(l_infer->ffn1->Wx, l_train->ffn1->Wx, model_dim * ffn_dim   * sizeof(float));
-    memcpy(l_infer->ffn2->Wx, l_train->ffn2->Wx, ffn_dim   * model_dim * sizeof(float));
-    memcpy(l_infer->norm1->gamma,l_train->norm1->gamma,model_dim * sizeof(float));
-    memcpy(l_infer->norm1->beta, l_train->norm1->beta, model_dim * sizeof(float));
-    memcpy(l_infer->norm2->gamma,l_train->norm2->gamma,model_dim * sizeof(float));
-    memcpy(l_infer->norm2->beta, l_train->norm2->beta, model_dim * sizeof(float));
+    nnfltcpy(l_infer->mha->Wq,l_train->mha->Wq,model_dim * model_dim);
+    nnfltcpy(l_infer->mha->Wk,l_train->mha->Wk,model_dim * model_dim);
+    nnfltcpy(l_infer->mha->Wv,l_train->mha->Wv,model_dim * model_dim);
+    nnfltcpy(l_infer->mha->Wo,l_train->mha->Wo,model_dim * model_dim);
+    nnfltcpy(l_infer->ffn1->Wx,l_train->ffn1->Wx,model_dim * ffn_dim);
+    nnfltcpy(l_infer->ffn2->Wx,l_train->ffn2->Wx,ffn_dim * model_dim);
+    nnfltcpy(l_infer->norm1->gamma,l_train->norm1->gamma,model_dim);
+    nnfltcpy(l_infer->norm1->beta,l_train->norm1->beta,model_dim);
+    nnfltcpy(l_infer->norm2->gamma,l_train->norm2->gamma,model_dim);
+    nnfltcpy(l_infer->norm2->beta,l_train->norm2->beta,model_dim);
 
     test_transformer_dropout(l_train,l_infer);
     transformer_free(l_train);
     transformer_free(l_infer);
 }
 
-/* Linear weight update: W -= lr * gW */
-static void update_vector_weights(fVec V,const fVec gV,int n,float lr)
-{
-    float* v = (float *) V;
-    float* g = (float *) gV;
-    for (int i = 0; i < n; i++)
-        v[i] -= lr * g[i];
-}
-
-static void update_array_weights(fArr2D W,const fArr2D gW,int m,int n,float lr)
-{
-    float* w = (float *) W;
-    float* g = (float *) gW;
-    for (int i = 0; i < m * n; i++)
-        w[i] -= lr * g[i];
-}
-
 /* Update all weights in one transformer layer */
 static void transformer_update(TRANSFORMER* l,int D,int DFF,float lr)
 {
-    update_array_weights(l->mha->Wq,l->mha->gWq,D,D,lr);
-    update_array_weights(l->mha->Wk,l->mha->gWk,D,D,lr);
-    update_array_weights(l->mha->Wv,l->mha->gWv,D,D,lr);
-    update_array_weights(l->mha->Wo,l->mha->gWo,D,D,lr);
-    update_array_weights(l->ffn1->Wx,l->ffn1->gWx,D,DFF,lr);
-    update_array_weights(l->ffn2->Wx,l->ffn2->gWx,DFF,D,lr);
-    update_vector_weights(l->norm1->gamma,l->dg1,D,lr);
-    update_vector_weights(l->norm1->beta,l->db1,D,lr);
-    update_vector_weights(l->norm2->gamma,l->dg2,D,lr);
-    update_vector_weights(l->norm2->beta,l->db2,D,lr);
+    linear_update(l->mha->Wq,l->mha->gWq,D,D,lr,0);
+    linear_update(l->mha->Wk,l->mha->gWk,D,D,lr,0);
+    linear_update(l->mha->Wv,l->mha->gWv,D,D,lr,0);
+    linear_update(l->mha->Wo,l->mha->gWo,D,D,lr,0);
+    linear_update(l->ffn1->Wx,l->ffn1->gWx,D,DFF,lr,0);
+    linear_update(l->ffn2->Wx,l->ffn2->gWx,DFF,D,lr,0);
+    linear_update((fArr2D) l->norm1->gamma,(fArr2D) l->dg1,1,D,lr,0);
+    linear_update((fArr2D) l->norm1->beta, (fArr2D) l->db1,1,D,lr,0);
+    linear_update((fArr2D) l->norm2->gamma,(fArr2D) l->dg2,1,D,lr,0);
+    linear_update((fArr2D) l->norm2->beta, (fArr2D) l->db2,1,D,lr,0);
 }
 
 
@@ -413,18 +459,20 @@ static void transformer_update(TRANSFORMER* l,int D,int DFF,float lr)
 void training_test(void)
 {
     printf("Test: training multi layer transformer\n");
-
     const int K = 32;     /* vocabulary size = cycle length    */
-    const int T = 32;     /* sequence length (one full cycle)  */
-    const int D = 64;     /* model dimension                   */
-    const int DFF = 256;  /* FFN hidden dimension              */
-    const int H = 4;      /* attention heads                   */
+    const int T = 1024;   /* sequence length (one full cycle)  */
+    const int D = 256;    /* model dimension                   */
+    const int DFF = 1024; /* FFN hidden dimension              */
+    const int H = 8;      /* attention heads                   */
     const int NLYR = 3;   /* number of transformer layers      */
     const int B = 4;      /* batch size                        */
     const int BT = (B*T); /* flattened batch*seq dimension     */
 
-    const int EPOCHS = 1000;
-    const float LR = 3e-3f;
+    const int EPOCHS = 40;
+    const float LR = 0.15;
+
+    typedef float (*ArrBTD)[D];
+    typedef float (*ArrBTK)[K];
 
     /* Fixed random token embeddings [K][D] */
     float E[K][D];
@@ -434,8 +482,8 @@ void training_test(void)
 
     /* Build B sequences,each of length T. The first half of the batch
      * cycles forward (+1),the second half backward (-1). The successor
-     * of a token depends on the sequence direction,which is only
-     * inferable from context,so attention is required to solve the task.
+     * of a token depends on the sequence direction, which is only
+     * inferable from context, so attention is required to solve the task.
      * Input token at position t in batch b: (b + dir*t) % K
      * Target token (next token): (b + dir*(t + 1)) % K
      */
@@ -450,13 +498,13 @@ void training_test(void)
     }
 
     /* Input embeddings X[BT][D] */
-    float X[BT][D];
+    ArrBTD X = (ArrBTD) allocmem(BT,D,float);
     for (int b = 0; b < B; b++)
         for (int t = 0; t < T; t++)
             fltcpy(X[b*T+t],E[tok_in[b][t]],D);
 
     /* One-hot targets yt[BT][K] for cross-entropy loss */
-    float yt[BT][K];
+    ArrBTK yt = (ArrBTK) allocmem(BT,K,float);
     fltclr(yt,BT * K);
     for (int b = 0; b < B; b++)
         for (int t = 0; t < T; t++)
@@ -475,30 +523,41 @@ void training_test(void)
     DENSE* out = dense_create(K,"Softmax",0);
     dense_init(out,D,BT,1);
 
-    /* Intermediate activations */
-    float act[NLYR+1][BT][D]; /* act[0] = X,act[i] = output of layer i */
-    float dy_out[BT][K];
-    float dact[NLYR+1][BT][D];
+    /* Intermediate activations and gradients */
+    fArr2D act[NLYR+1]; /* act[0] = X,act[i] = output of layer i */
+    fArr2D dact[NLYR+1];
+    for (int i = 0; i <= NLYR; i++) {
+        act[i] = nnallocmem(BT,D,float);
+        dact[i] = nnallocmem(BT,D,float);
+    }
+    fArr2D dy_out = nnallocmem(BT,K,float);
+    nnfltcpy(act[0],X,BT * D);
 
-    fltcpy(act[0],X,BT * D);
-
+    ArrBTK yph = (ArrBTK) allocmem(BT,K,float);
+    ArrBTK dyh = (ArrBTK) allocmem(BT,K,float);
+    ArrBTK probs = (ArrBTK) allocmem(BT,K,float);
+ 
+    double start_time = current_time();
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
 
         /* Forward pass */
 
         for (int i = 0; i < NLYR; i++)
-            transformer_forward(layers[i],act[i],NULL,1,act[i + 1],0);
+            transformer_forward(layers[i],act[i],1,act[i + 1],0);
 
         fArr2D yp = dense_forward(out,act[NLYR],0);
 
-        float loss = cross_entropy_loss(yp,yt,BT,K);
-        printf("epoch %5d  loss %8.4f\r",epoch + 1,loss / BT);
+        nnfltcpy(yph,yp,BT * K);
+        float loss = cross_entropy_loss((fArr2D)yph,(fArr2D)yt,BT,K);
+        int sec = (int) elapsed_time(start_time);
+        printf("epoch %5d  loss %8.4f %3d seconds\r",epoch + 1,loss / BT,sec);
         fflush(stdout);
 
         /* Backward pass */
 
         /* Gradient of softmax + cross-entropy: dy = (yp - yt) / BT */
-        dLdy_cross_entropy_loss(yp,yt,dy_out,BT,K);
+        dLdy_cross_entropy_loss((fArr2D)yph,(fArr2D)yt,(fArr2D)dyh,BT,K);
+        nnfltcpy(dy_out,dyh,BT * K);
 
         /* Projection gradients via dense layer (softmax backward is skipped;
          * dy_out is already yp - yt):
@@ -516,7 +575,7 @@ void training_test(void)
                                  0);
 
         /* Weight updates */
-        update_array_weights(out->Wx,out->gWx,D,K,LR); /* dense update */
+        linear_update(out->Wx,out->gWx,D,K,LR,0); /* dense update */
         for (int i = 0; i < NLYR; i++)
             transformer_update(layers[i],D,DFF,LR);
     }
@@ -524,17 +583,16 @@ void training_test(void)
     printf("\n");
 
     /* Evaluate: forward pass with final weights */
-    transformer_forward(layers[0],X,NULL,1,act[1],0);
+    transformer_forward(layers[0],act[0],1,act[1],0);
     for (int i = 1; i < NLYR; i++)
-        transformer_forward(layers[i],act[i],NULL,1,act[i + 1],0);
+        transformer_forward(layers[i],act[i],1,act[i + 1],0);
     fArr2D yp = dense_forward(out,act[NLYR],0);
 
-    float probs[BT][K];
-    fltcpy(probs,yp,BT * K);
+    nnfltcpy(probs,yp,BT * K);
 
     int correct = 0;
     int counted = 0;
-    /* Skip t == 0: with no context the direction is unknowable there */
+    /* Skip t == 0: with no context the direction is unknowable */
     for (int b = 0; b < B; b++)
     for (int t = 1; t < T; t++) {
         int bt = b * T + t;
@@ -551,6 +609,11 @@ void training_test(void)
     float acc = 100.0 * correct / counted;
     printf("Accuracy: %d / %d (%.1f%%)            \n",correct,counted,acc);
 
+    for (int i = 0; i <= NLYR; i++) {
+        nnfreemem(act[i]);
+        nnfreemem(dact[i]);
+    }
+    nnfreemem(dy_out);
     for (int i = 0; i < NLYR; i++)
         transformer_free(layers[i]);
     dense_free(out);
@@ -558,14 +621,15 @@ void training_test(void)
     if (acc < 99) {
         printf("FAIL: predicted tokens differ from expected tokens\n");
         failures++;
-        return;
     }
-
-    printf("PASS\n");
+    else
+        printf("PASS\n");
+    freemem(X);
+    freemem(yt);
+    freemem(yph);
+    freemem(dyh);
+    freemem(probs);
 }
-
-
-
 
 int main(void)
 {

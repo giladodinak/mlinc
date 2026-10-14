@@ -17,27 +17,27 @@
  */
 ADDNORM* addnorm_create()
 {
-    return allocmem(1, 1, ADDNORM);
+    return allocmem(1,1,ADDNORM);
 }
 
 /* Initializes a normalization layer.
  *
  * Parameters:
- *   input_dim  - D, dimension of each input vector
- *   batch_size - B, number of input vectors
+ *   input_dim  - D,dimension of each input vector
+ *   batch_size - B,number of input vectors
  *
  * Note:
- *   Initialises gamma=1, beta=0 (identity transform).
+ *   Initialises gamma=1,beta=0 (identity transform).
  */
 void addnorm_init(ADDNORM* l, int input_dim, int batch_size)
 {
     l->B    = batch_size;
     l->D    = input_dim;
-    l->mean  = allocmem(batch_size, 1, float);
-    l->sdev  = allocmem(batch_size, 1, float);
-    l->xn  = allocmem(batch_size, input_dim, float);
-    l->gamma = allocmem(input_dim,  1, float);
-    l->beta  = allocmem(input_dim,  1, float);
+    l->mean  = allocmem(batch_size,1,float);
+    l->sdev  = allocmem(batch_size,1,float);
+    l->xn  = allocmem(batch_size,input_dim,float);
+    l->gamma = allocmem(input_dim, 1,float);
+    l->beta  = allocmem(input_dim, 1,float);
     for (int j = 0; j < input_dim; j++)
         l->gamma[j] = 1;
 }

@@ -2,7 +2,7 @@
 /* Language-model token embedding layer data structures and functions */
 #ifndef LMEMB_H
 #define LMEMB_H
-#include "array.h"
+#include "arraytypes.h"
 
 typedef struct lmemb_s {
   int V;       /* Vocabulary size                                 */
@@ -23,7 +23,12 @@ typedef struct lmemb_s {
   int* touched;/* Distinct Wx rows touched this batch [B*T]       */
   int ntouched;/* Number of valid entries in touched[]            */
   const int* ids; /* Current batch token indices [B*T] (borrowed) */
+  void* devstat;  /* Additional implementation state (NULL if not used) */
 } LMEMB;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Creates a language-model token embedding layer.
  *
@@ -84,30 +89,6 @@ void lmemb_free(LMEMB* l);
  */
 void lmemb_reset(LMEMB* l);
 
-/* Marks a Wx gradient row for accumulation this batch.
- *
- * On the first touch of 'row' in the current batch (detected via the per-row
- * stamp), the row is zeroed (when this layer owns gWx) and appended to
- * l->touched. Subsequent touches in the same batch are no-ops, so gradients
- * accumulate correctly. O(1) per touch, unlike a linear scan.
- *
- * When tied, the shared gWx has already been zeroed and populated by the
- * output layer's backward, so this layer must not re-zero the row; it only
- * records it. Hence the row is zeroed only when the layer owns gWx.
- */
-static inline void lmemb_prep_row(LMEMB* restrict l, int row)
-{
-    if (l->seen[row] == l->stamp)
-        return;
-    l->seen[row] = l->stamp;
-    if (!l->tied) {
-        typedef float (*ArrVE)[l->E];
-        ArrVE gWx = (ArrVE) l->gWx;
-        fltclr(gWx[row],l->E);
-    }
-    l->touched[l->ntouched++] = row;
-}
-
 /* Performs the token embedding forward pass: a per-token gather.
  *
  * Parameters:
@@ -120,23 +101,8 @@ static inline void lmemb_prep_row(LMEMB* restrict l, int row)
  *
  * The ids pointer is retained for the matching backward pass.
  */
-static inline fArr2D lmemb_forward(LMEMB* restrict l,
-                                   const int* restrict ids/*[B*T]*/, int lyr)
-{
-    (void) lyr;
-    typedef float (*ArrBTE)[l->E];
-    typedef float (*ArrVE)[l->E];
-    ArrBTE h = (ArrBTE) l->h;
-    ArrVE Wx = (ArrVE) l->Wx;
-
-    l->ids = ids;
-    for (int i = 0; i < l->BT; i++) {
-        int id = ids[i];
-        for (int k = 0; k < l->E; k++)
-            h[i][k] = Wx[id][k];
-    }
-    return l->h;
-}
+fArr2D lmemb_forward(LMEMB* restrict l,
+                     const int* restrict ids/*[B*T]*/, int lyr);
 
 /* Performs the token embedding backward pass: a per-token scatter-add.
  *
@@ -154,26 +120,16 @@ static inline fArr2D lmemb_forward(LMEMB* restrict l,
  * when tied, the shared gWx is prepared by the output layer and this pass
  * only accumulates. A token index appearing at several positions accumulates.
  */
-static inline void lmemb_backward(LMEMB* restrict l,
-                              const fArr2D restrict dy_/*[B*T][E]*/, int lyr)
-{
-    (void) lyr;
-    typedef float (*ArrBTE)[l->E];
-    typedef float (*ArrVE)[l->E];
-    ArrBTE dy = (ArrBTE) dy_;
-    ArrVE gWx = (ArrVE) l->gWx;
-    const int* ids = l->ids;
+void lmemb_backward(LMEMB* restrict l,
+                    const fArr2D restrict dy/*[B*T][E]*/, int lyr);
 
-    l->stamp++;
-    l->ntouched = 0;
-    for (int i = 0; i < l->BT; i++) {
-        int id = ids[i];
-        if (id == l->padinx)
-            continue;
-        lmemb_prep_row(l,id);
-        for (int k = 0; k < l->E; k++)
-            gWx[id][k] += dy[i][k];
-    }
+/* Applies one sparse SGD step to rows touched by lmemb_backward().
+ * Weight decay is intentionally omitted for embeddings.
+ */
+void lmemb_update(LMEMB* restrict l, float learning_rate);
+
+#ifdef __cplusplus
 }
+#endif
 
 #endif

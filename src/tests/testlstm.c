@@ -2,11 +2,12 @@
 /* Simple test program for the LSTM layer implementation */
 #include <stdio.h>
 #include <math.h>
+#include "float.h"
 #include "mem.h"
 #include "random.h"
-#include "array.h"
-#include "loss.h"
+#include "arraytypes.h"
 #include "adamw.h"
+#include "loss.h"
 #include "lstm.h"
 
 /* Trains a Multi Layer LSTM to predict 
@@ -58,18 +59,26 @@ int test_lstm(const float range[3], const int layers[], int layers_cnt,
     fVec mb[L][4];
     fVec vb[L][4];
     for (int j = 0; j < L; j++) {
-        dy[j] = allocmem(l[j]->B,l[j]->S,float);
+        dy[j] = nnallocmem(l[j]->B,l[j]->S,float);
         for (int k = 0; k < 4; k++) {
-            mW[j][k] = allocmem(l[j]->D,l[j]->S,float); /* mWf mWi mWc mWo */
-            vW[j][k] = allocmem(l[j]->D,l[j]->S,float); /* vWf vWi vWc vWo */
-            mb[j][k] = allocmem(1,l[j]->S,float);
-            vb[j][k] = allocmem(1,l[j]->S,float);
+            mW[j][k] = nnallocmem(l[j]->D,l[j]->S,float); /* mWf mWi mWc mWo */
+            vW[j][k] = nnallocmem(l[j]->D,l[j]->S,float); /* vWf vWi vWc vWo */
+            mb[j][k] = nnallocmem(1,l[j]->S,float);       /* mbf mbi mbc mbo */
+            vb[j][k] = nnallocmem(1,l[j]->S,float);       /* vbf vbi vbc vbo */
         }
         for (int k = 4; k < 8; k++) {
-            mW[j][k] = allocmem(l[j]->S,l[j]->S,float); /* mUf mUi mUc mUo */
-            vW[j][k] = allocmem(l[j]->S,l[j]->S,float); /* vUf vUi vUc vUo */
+            mW[j][k] = nnallocmem(l[j]->S,l[j]->S,float); /* mUf mUi mUc mUo */
+            vW[j][k] = nnallocmem(l[j]->S,l[j]->S,float); /* vUf vUi vUc vUo */
         }
     }
+
+    fArr2D Xnn; /* Either X or copy of X in GPU memory */
+#ifdef USE_CUDA
+    Xnn = nnallocmem(M,D,float); /* GPU memory */
+    cufltcpy(Xnn,X,M * D);
+#else
+    Xnn = (fArr2D) X; /* CPU memory */
+#endif
 
     float losses[epochs];
     
@@ -78,20 +87,28 @@ int test_lstm(const float range[3], const int layers[], int layers_cnt,
     int update_step = 0; /* adamw update step */ 
     for (int i = 0; i < epochs; i++) {
         fArr2D yp[L]; /* pointers to layers' prediction arrays */
+
         /* Forward pass */
-        yp[0] = lstm_forward(l[0],X,0);
+        yp[0] = lstm_forward(l[0],Xnn,0);
         for (int j = 1; j < L; j++)
             yp[j] = lstm_forward(l[j],yp[j - 1],j);
-        fltcpy(y,yp[L - 1],M * N);
+        nnfltcpy(y,yp[L - 1],M * N); /* Save final forward pass result */
+
         float loss = mean_square_error(y,yt,M,N);
         losses[i] = loss;
-        printf("\rEpoch %5d loss %10.3f\r",i+1,loss<999999?loss:999999);
+        printf("\rEpoch %5d loss %10.4f\r",i+1,loss<999999?loss:999999);
         fflush(stdout);
+
         /* Backward pass */
-        dLdy_mean_square_error(y,yt,dy[L - 1],M,N);
+
+        float dyt[M][N];
+        dLdy_mean_square_error(y,yt,dyt,M,N);
+        nnfltcpy(dy[L - 1],dyt,M * N);
+
         for (int j = L - 1; j > 0; j--)
             lstm_backward(l[j],dy[j],yp[j - 1],dy[j - 1],j);
-        lstm_backward(l[0],dy[0],X,NULL,0);
+        lstm_backward(l[0],dy[0],Xnn,NULL,0);
+
         /* Update weights */
         update_step++;
         for (int j = 0; j < L; j++) {
@@ -103,6 +120,19 @@ int test_lstm(const float range[3], const int layers[], int layers_cnt,
                               l[j]->D,l[j]->S,lr,wd,update_step);
             adamw_update(l[j]->Wo,l[j]->gWo,mW[j][3],vW[j][3],
                               l[j]->D,l[j]->S,lr,wd,update_step);
+
+#define adamw_update_bias(b,g,m,v,M,N,lr,wd,us) \
+        adamw_update((fArr2D)b,(fArr2D)g,(fArr2D)m,(fArr2D)v,M,N,lr,wd,us)
+        
+            adamw_update_bias(l[j]->bf,l[j]->gbf,mb[j][0],vb[j][0],
+                                                  1,l[j]->S,lr,wd,update_step);
+            adamw_update_bias(l[j]->bi,l[j]->gbi,mb[j][1],vb[j][1],
+                                                  1,l[j]->S,lr,wd,update_step);
+            adamw_update_bias(l[j]->bc,l[j]->gbc,mb[j][2],vb[j][2],
+                                                  1,l[j]->S,lr,wd,update_step);
+            adamw_update_bias(l[j]->bo,l[j]->gbo,mb[j][3],vb[j][3],
+                                                  1,l[j]->S,lr,wd,update_step);
+
             adamw_update(l[j]->Uf,l[j]->gUf,mW[j][4],vW[j][4],
                               l[j]->S,l[j]->S,lr,wd,update_step);
             adamw_update(l[j]->Ui,l[j]->gUi,mW[j][5],vW[j][5],
@@ -126,16 +156,19 @@ int test_lstm(const float range[3], const int layers[], int layers_cnt,
     printf("\n");
     for (int j = 0; j < L; j++) {
         lstm_free(l[j]);
-        freemem(dy[j]);
+        nnfreemem(dy[j]);
         for (int k = 0; k < 8; k++) {
-            freemem(mW[j][k]);
-            freemem(vW[j][k]);
+            nnfreemem(mW[j][k]);
+            nnfreemem(vW[j][k]);
         }
         for (int k = 0; k < 4; k++) {
-            freemem(mb[j][k]);
-            freemem(vb[j][k]);
+            nnfreemem(mb[j][k]);
+            nnfreemem(vb[j][k]);
         }
     }
+#ifdef USE_CUDA
+    cufreemem(Xnn);
+#endif
 #ifdef HAS_PLOT
     {
         #include "../plot/plot.h"
@@ -157,7 +190,7 @@ int main()
     init_lrng(42);
     const int layers[3] = {32,16,32};
     const float range[3] = {-10.0,10.0,0.1};
-    test_lstm(range,layers,3,0.00001,0.001,20000);
+    test_lstm(range,layers,3,0.00002,0.002,10000);
     return 0;
 }
 

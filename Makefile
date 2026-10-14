@@ -1,20 +1,22 @@
 # Copyright (c) 2023 Gilad Odinak
 
-DEBUG =     # Set to yes to disable optimizations and add gdb support
-MEMCHK =    # Set to yes to add memory errors detection
-PROFILE =   # Set to yes to enable profiling support (disables inlining)
-USEDOUBLE = # Set to yes to use double precision math
-MARCH =     # Set to target architecture, if not same as this machine
-NOPLOT =    # Set to yes to disable plotting, and use of python matplotlib
-USEBLAS=    # Set to yes to use openblas/cblas for matrix multiplications
-USECLANG=   # Set to yes to use clang instead of gcc
-USEGCCENV=  # Set to use gcc headers and libraries with clang
+DEBUG=     # Set to yes to disable optimizations and add gdb support
+MEMCHK=    # Set to yes to add memory errors detection
+PROFILE=   # Set to yes to enable profiling support (disables inlining)
+USEDOUBLE= # Set to yes to use double precision math
+NOPLOT=    # Set to yes to disable plotting, and use of python matplotlib
+USEBLAS=   # Set to yes to use openblas/cblas for matrix multiplications
+USECUDA=   # Set to yes to use CUDA/cuBLAS implementations where available
+USECLANG=  # Set to yes to use clang instead of gcc
+USEGCCENV= # Set to use gcc headers and libraries with clang
+MARCH =    # Set to target architecture, if not same as this machine
+CARCH =    # Set to cuda target hardware architecture
 
 CC = gcc
 CPPC = g++
 LINK = g++
+AR = ar
 
-# Environ.mk and Plot.mk add more flags to CFLAGS LFLAGS LIBS
 CFLAGS = -Wall -Wextra
 
 LFLAGS =
@@ -44,12 +46,14 @@ LIB_DIRS =
 
 PROGRAMS = sph2wav feat2audio word2vec wordembd simlex bats \
            har timitfeat timit timittest charlm lmtrain lmgen
-TESTS = testmem cblastest testarray testrandom testhash testannoy \
+TESTS = testmem cblastest cudatest \
+        testrandom testarray testhash testannoy \
 		testhann testfilter testlpc testlsp \
 		testqr testsvd testpca \
 		testadamw testctc testnorm \
 		testdense testlstm testmodel \
-		testembed testlmemb testmha testxfmr testsmsftmax
+		testembed testlmemb testmha \
+		testxfmr testsmsftmax testioformat
 
 SRCS = $(shell find $(SRC_DIR) -name '*.c')
 HDRS = $(shell find $(SRC_DIR) -name '*.h')
@@ -57,32 +61,45 @@ AOBJS= $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 OBJS = $(filter-out $(BUILD_DIR)/prog/%.o,$(filter-out \
                                               $(BUILD_DIR)/tests/%.o,$(AOBJS)))
 
+LIB = $(BUILD_DIR)/libmlinc.a
+
+.DEFAULT_GOAL := all
+
 include Environ.mk # OS and processor depndencies
 
 ifneq ($(USECLANG),) # USECLANG is not blank - use clang instead of gcc
 include Clang.mk
 endif
 
+ifneq ($(USECUDA),)  # USECUDA is not blank - use CUDA/cuBLAS implementations
+include NVcc.mk
+endif
+
 ifeq ($(NOPLOT),)
 include Plot.mk   # plotting (matlibplot for C++) support, if available
 endif
 
-.PRECIOUS: $(OBJS) $(AOBJS) # Do not delete object files after link
+.PRECIOUS: $(OBJS) $(AOBJS) $(LIB) # Do not delete object files after link
 
 all: $(PROGRAMS) $(TESTS)
 
 $(PROGRAMS): %: $(BIN_DIR)/%
 $(TESTS): %: $(BIN_DIR)/%
 
-$(BIN_DIR)/%: $(BUILD_DIR)/prog/%.o $(OBJS)
+# Build the static library from all shared object files.
+$(LIB): $(OBJS)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $(OBJS)
+
+$(BIN_DIR)/%: $(BUILD_DIR)/prog/%.o $(LIB)
 	@mkdir -p $(BIN_DIR)
 	$(CC) $(LFLAGS) $(CFLAGS) -o $@ $(BUILD_DIR)/prog/$*.o \
-	      $(OBJS) $(LIB_DIRS) $(LIBS)
+	      -Wl,--start-group $(LIB) -Wl,--end-group $(LIB_DIRS) $(LIBS)
 
-$(BIN_DIR)/%: $(BUILD_DIR)/tests/%.o $(OBJS)
+$(BIN_DIR)/%: $(BUILD_DIR)/tests/%.o $(LIB)
 	@mkdir -p $(BIN_DIR)
 	$(LINK) $(LFLAGS) $(CFLAGS) -o $@ $(BUILD_DIR)/tests/$*.o \
-	      $(OBJS) $(LIB_DIRS) $(LIBS)
+	      -Wl,--start-group $(LIB) -Wl,--end-group $(LIB_DIRS) $(LIBS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(HDRS)
 	@mkdir -p $(dir $@)

@@ -1,8 +1,11 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 #include <stdio.h>
-#include "array.h"
-#include "arrayio.h"
+#include "float.h"
+#include "mem.h"
+#include "arraytypes.h"
+#include "arrayio.h" /* print_array() */
 #include "ctc.h"
+
 #define T 16 /* Number of time steps */
 #define C 8  /* Number of classes    */
 #define L 5  /* Target label length  */

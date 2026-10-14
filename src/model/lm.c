@@ -1,6 +1,13 @@
 /* Copyright (c) 2026 Gilad Odinak       */
 /* Decoder-only language model functions */
+#include <string.h>
+#ifdef USE_CUDA
+#include <cuda_runtime.h>
+#endif
 #include "mem.h"
+#include "float.h"
+#include "random.h"
+#include "arraytypes.h"
 #include "array.h"
 #include "hash.h"
 #include "vocab.h"
@@ -9,6 +16,11 @@
 #include "smsftmax.h"
 #include "layer.h"
 #include "lm.h"
+
+
+typedef struct lmstat_s {
+    iVec nn_pad_mask; /* Backend-resident copy of pad_mask [BT] */
+} LMSTAT;
 
 LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
               int batch, int layers, int ffn_dim, int n_neg,
@@ -22,12 +34,17 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     m->emb = lmemb_create(model_dim,seq_len,/*padinx=*/0);
     lmemb_init(m->emb,vocab,batch,/*training=*/1,/*tied=*/0);
 
+    /* pad mask (common to all layers) */
+    LMSTAT* s = allocmem(1,1,LMSTAT);
+    s->nn_pad_mask = (iVec) nnallocmem(m->BT,1,int);
+    m->devstat = s;
+
     /* Transformer stack, each wrapped in a LAYER */
     m->tr = allocmem(layers,1,LAYER);
     for (int i = 0; i < layers; i++) {
-        TRANSFORMER* t = transformer_create(heads,seq_len,model_dim,
-                                            ffn_dim,/*lookahead=*/0);
-        transformer_init(t,batch,/*training=*/1,dropout);
+        TRANSFORMER* t = transformer_create(heads,seq_len,model_dim,ffn_dim,0);
+        transformer_init(t,batch,1,dropout);
+        transformer_set_pad_mask(t,s->nn_pad_mask);
         m->tr[i].type = 't';
         m->tr[i].transformer = t;
         layer_alloc_opt_state(&m->tr[i],optimizer);
@@ -37,14 +54,14 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     m->head = smsftmax_create(vocab,n_neg);
     smsftmax_init(m->head,model_dim,m->BT);
     m->gHead = allocmem(1,1,fArr2D*);
-    m->gHead[0] = allocmem(vocab,model_dim,float);
+    m->gHead[0] = nnallocmem(vocab,model_dim,float);
 
     m->acts = allocmem(layers + 1,1,fArr2D*);
     for (int i = 0; i <= layers; i++)
-        m->acts[i] = allocmem(m->BT,model_dim,float);
-    m->dtop  = allocmem(m->BT,model_dim,float);
-    m->dcur  = allocmem(m->BT,model_dim,float);
-    m->dnext = allocmem(m->BT,model_dim,float);
+        m->acts[i] = nnallocmem(m->BT,model_dim,float);
+    m->dtop  = nnallocmem(m->BT,model_dim,float);
+    m->dcur  = nnallocmem(m->BT,model_dim,float);
+    m->dnext = nnallocmem(m->BT,model_dim,float);
 
     m->pad_mask = allocmem(m->BT,1,int);
     m->labels = allocmem(m->BT,1,float);
@@ -57,23 +74,26 @@ void lm_free(LM* m)
     lmemb_free(m->emb);
     for (int i = 0; i < m->N; i++) {
         transformer_free(m->tr[i].transformer);
-        for (int j = 0; j < m->tr[i].num_opt_state; j++)
-            freemem(m->tr[i].opt_state[j]);
-        freemem(m->tr[i].opt_state);
+        layer_free_opt_state(&m->tr[i]);
     }
     freemem(m->tr);
     smsftmax_free(m->head);
-    freemem(m->gHead[0]);
+    nnfreemem(m->gHead[0]);
     freemem(m->gHead);
     for (int i = 0; i <= m->N; i++)
-        freemem(m->acts[i]);
+        nnfreemem(m->acts[i]);
     freemem(m->acts);
-    freemem(m->dtop);
-    freemem(m->dcur);
-    freemem(m->dnext);
+    nnfreemem(m->dtop);
+    nnfreemem(m->dcur);
+    nnfreemem(m->dnext);
     freemem(m->pad_mask);
     freemem(m->labels);
     freemem(m->ids);
+    if (m->devstat != NULL) {
+        LMSTAT* s = (LMSTAT*) m->devstat;
+        nnfreemem(s->nn_pad_mask);
+        freemem(s);
+    }
     freemem(m);
 }
 
@@ -84,12 +104,13 @@ fArr2D lm_forward(LM* m, int training)
      * its own l->h; copy into acts[0] so the stack owns a stable buffer.
      */
     fArr2D h = lmemb_forward(m->emb,m->ids,0);
-    fltcpy(m->acts[0],h,m->BT * m->E);
+    nnfltcpy(m->acts[0],h,m->BT * m->E);
 
+    LMSTAT* s = (LMSTAT*) m->devstat;
+    nnmemcpy(s->nn_pad_mask,m->pad_mask,m->BT * sizeof(int));
     for (int i = 0; i < m->N; i++)
         transformer_forward(m->tr[i].transformer,
-                            m->acts[i],m->pad_mask,
-                            training,m->acts[i+1],i);
+                            m->acts[i],training,m->acts[i + 1],i);
     return m->acts[m->N];
 }
 
@@ -99,7 +120,7 @@ void lm_backward(LM* m)
     /* Walk transformers in reverse. dcur holds grad w.r.t. layer i+1's
      * output; dnext receives grad w.r.t. layer i's input.
      */
-    fltcpy(m->dcur,m->dtop,m->BT * m->E);
+    nnfltcpy(m->dcur,m->dtop,m->BT * m->E);
     for (int i = m->N - 1; i >= 0; i--) {
         transformer_backward(m->tr[i].transformer,
                              m->dcur,m->acts[i],m->dnext,i);
@@ -120,19 +141,8 @@ void lm_update(LM* m, char optimizer, float lr, float wd, int update_cnt)
     /* Head: sparse SGD over touched rows (its own scheme). */
     smsftmax_update(m->head,m->gHead[0],lr,wd);
 
-    /* Embedding: sparse row update over rows touched this batch. Weight
-     * decay omitted for embeddings (standard practice).
-     */
-    {
-        typedef float (*ArrVE)[m->E];
-        ArrVE Wx  = (ArrVE) m->emb->Wx;
-        ArrVE gWx = (ArrVE) m->emb->gWx;
-        for (int r = 0; r < m->emb->ntouched; r++) {
-            int row = m->emb->touched[r];
-            for (int j = 0; j < m->E; j++)
-                Wx[row][j] -= lr * gWx[row][j];
-        }
-    }
+    /* Embedding: sparse row update. Weight decay omitted. */
+    lmemb_update(m->emb,lr);
 }
 
 /* Enables or disables single-token cached decoding.
@@ -173,9 +183,8 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
     /* Embed just the single token: copy its row from the embedding table.
      * lmemb_forward would embeds all BT positions; here only one exists.
      */
-    typedef float (*ArrVE)[E];
-    ArrVE Wx = (ArrVE) m->emb->Wx;
-    fltcpy(m->acts[0],&Wx[token_id][0],E);
+    float* Wx = (float*) m->emb->Wx;
+    nnfltcpy(m->acts[0],Wx + token_id * E,E);
 
     for (int i = 0; i < m->N; i++)
         transformer_forward_step(m->tr[i].transformer,
@@ -183,7 +192,46 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
     return m->acts[m->N];
 }
 
+/* Returns the k-th largest value (1-based) of a[0..n-1] in expected O(n).
+ * Iterative form of Hoare's FIND algorithm using Hoare partitioning.
+ * Reorders a[].
+ *
+ * C.A.R. Hoare, Algorithm 65: FIND, CACM 4(7), 1961.
+ * https://courses.cs.vt.edu/~cs3114/Summer17/Notes/Supplemental/p321-hoare.pdf
+ */
+static float kth_largest(float* a, int n, int k)
+{
+    const int t = k - 1;
+    int lo = 0;
+    int hi = n - 1;
+    while (lo < hi) {
+        float pivot = a[lo + (hi - lo) / 2];
+        int i = lo;
+        int j = hi;
+        while (i <= j) {
+            while (a[i] > pivot) i++;
+            while (a[j] < pivot) j--;
+            if (i <= j) {
+                float x = a[i]; a[i] = a[j]; a[j] = x; /* Swap */
+                i++; j--;
+            }
+        }
+        if (t <= j)
+            hi = j;
+        else
+        if (t >= i)
+            lo = i;
+        else
+            break; /* a[j+1..i-1] == pivot */
+    }
+    return a[t];
+}
+
 /* Generates tokens continuing from a prompt.
+ *
+ * Autoregressive generation: each new token is sampled conditional on
+ * the prompt and all tokens generated so far. The prompt and generated
+ * tokens remain available as left context through the MHA KV cache.
  *
  * Parameters:
  *   m           - Language model
@@ -218,15 +266,15 @@ fArr2D lm_forward_step(LM* m, int token_id, int offset)
  *     arbitrary additive offset of raw logits.
  *     https://arxiv.org/pdf/2607.09791
  */
-int lm_generate(LM* m, HASHMAP* hmap, 
+int lm_generate(LM* m, HASHMAP* hmap,
                 const int* seed, int seedlen,
                 int steps, char *buffer, int buflen,
-                float temperature, int top_k, 
+                float temperature, int top_k,
                 float rep_penalty, int rep_win_len)
 {
     int T = m->T, K = m->V;
 
-    if (seed == NULL || seedlen <= 0 || seedlen > T) 
+    if (seed == NULL || seedlen <= 0 || seedlen > T)
         return -1;
     if (buffer == NULL || buflen <= 0)
         return -1;
@@ -236,12 +284,16 @@ int lm_generate(LM* m, HASHMAP* hmap,
     int s = 0;
 
     float* logits = allocmem(1,K,float);
+    float* tmp = allocmem(1,K,float); /* Top-k selection */
 
     /* Ring of recently generated tokens for the repetition penalty */
     int* recent = (rep_win_len > 0) ? allocmem(rep_win_len,1,int) : NULL;
     int nrecent = 0;
 
-    /* Output buffer starts with the seed tokens. */
+    /* Output buffer starts with the seed tokens: these are the
+     * conditioning context x_1..x_m, echoed back so the printed
+     * text reads prompt + continuation.
+     */
     for (int i = 0; i < seedlen && buflen > 1; i++) {
         bufext = snprintf(buffer + bufpos,buflen - bufpos,
                           "%s ",hashmap_inx2str(hmap,seed[i]));
@@ -253,11 +305,14 @@ int lm_generate(LM* m, HASHMAP* hmap,
     /* Switch to single-row processing and use the MHA KV cache */
     lm_use_cache(m,1);
 
-    /* Prefill: feed the prompt one token at a time (offset 0..seedlen-1),
-     * filling the KV cache. Keep the last token's head-input activation to
-     * produce the first generated token.
+    /* Prefill: this is where the prompt enters the computation. Feeding
+     * the tokens one at a time (offsets 0..seedlen-1) writes each one's
+     * key/value vectors into the KV cache, so later attention can attend
+     * to the whole prompt. The head-input activation H kept from the LAST
+     * prompt token is h_m = f(x_1..x_m): the attention-weighted summary
+     * that defines the first generated token's distribution P(. | x_1..x_m).
      */
-    fArr2D H = NULL;
+    fArr2D H = NULL; /* Holds the current hidden activation */
     for (int i = 0; i < seedlen; i++)
         H = lm_forward_step(m,seed[i],i);
 
@@ -265,6 +320,10 @@ int lm_generate(LM* m, HASHMAP* hmap,
 
     for (s = 0; s < steps; s++) {
 
+        /* Project the current hidden state onto the vocabulary: z = W_o h_t.
+         * h_t already encodes the prompt (and tokens generated so far) via
+         * attention, so these logits ARE the prompt's effect on the next token
+         */
         smsftmax_logits(m->head,(fArr2D) H,(fArr2D) logits,1);
 
         /* log-softmax: log p_i = z_i - logsumexp(z)
@@ -283,8 +342,11 @@ int lm_generate(LM* m, HASHMAP* hmap,
         for (int k = 1; k < K; k++)
             logits[k] -= logsum;
 
-        /* Repetition penalty applied once per unique recent token
-         * (Ref. #2 Sec. 4.1, Ref. #4).
+        /* Repetition penalty applied once per unique recent token.
+         * Scaling a normalized log-prob (which is <= 0) by rep_penalty > 1 
+         * makes it more negative, i.e. lowers the probability of tokens
+         * already emitted in the window.
+         * Ref. #2 Sec. 4.1, Ref. #4.
          */
         if (rep_penalty > 1) {
             for (int i = 0; i < nrecent; i++) {
@@ -292,6 +354,9 @@ int lm_generate(LM* m, HASHMAP* hmap,
                 if (t <= 0 || t >= K)
                     continue;
 
+                /* Skip tokens already penalized earlier in the window,
+                 * so a repeated token is down-weighted once, not compounded.
+                 */
                 int seen = 0;
                 for (int j = 0; j < i; j++)
                     if (recent[j] == t) {
@@ -307,78 +372,75 @@ int lm_generate(LM* m, HASHMAP* hmap,
         int nxt;
 
         if (temperature > 0) {
-            /* Temperature scaling of log-probability scores.
+            /* Temperature scaling of log-probability scores: z_i / T.
+             * T<1 sharpens the distribution (more prompt-driven, closer to
+             * greedy), T>1 flattens it toward uniform.
              * Ref. #1 Eq. (1), Ref. #2 Sec. 4.1.
              */
             for (int k = 1; k < K; k++)
                 logits[k] /= temperature;
 
-            /* Top-k sampling: restrict sampling to the top_k highest
-             * scoring tokens.
+            /* Top-k sampling: keep only the top_k highest-scoring tokens by
+             * finding the k-th largest score (thresh) and masking everything
+             * below it to -inf, so all probability mass falls on those k.
              * Ref. #2 Sec. 4.1, Ref. #3 Sec. 5.4.
              */
             if (top_k > 0 && top_k < K - 1) {
                 float neginf = -1e30;
-                float tmp[K];
-                for (int k = 1; k < K; k++)
-                    tmp[k] = logits[k];
+                memcpy(tmp,logits + 1,(K - 1) * sizeof(float));
 
-                float thresh = neginf;
-                for (int r = 0; r < top_k; r++) {
-                    float mv = neginf;
-                    int mi = -1;
-
-                    for (int k = 1; k < K; k++)
-                        if (tmp[k] > mv) {
-                            mv = tmp[k];
-                            mi = k;
-                        }
-
-                    if (mi < 0) break;
-                    thresh = mv;
-                    tmp[mi] = neginf;
-                }
+                /* Select the top_k-th largest score as the cutoff */
+                float thresh = kth_largest(tmp,K - 1,top_k);
 
                 for (int k = 1; k < K; k++)
                     if (logits[k] < thresh)
                         logits[k] = neginf;
             }
 
-            /* Convert scores to probabilities and sample.
+            /* Convert scores to probability distribution over the
+             * (surviving) vocabulary: p_i = softmax(z/T)_i.
              * Ref. #1 Eq. (1), Ref. #2 Sec. 4.1, Ref. #3 Sec. 5.4.
              */
-            typedef float (*Arr1K1)[K - 1];
-            softmax((Arr1K1) (logits + 1),1,K - 1);
+            softmax1(logits + 1,K - 1);
 
+            /* Inverse-transform sampling: draw r ~ U(0,1) and walk the CDF;
+             * choose the first token whose cumulative probability reaches r.
+             * nxt tracks the last token with nonzero probability, so it
+             * also serves as a fallback if rounding leaves the CDF below r.
+             */
             float r = urand(0,1);
-            float c = 0;
+            float cdf = 0;
             nxt = 0;
-            for (int k = 1; k < K && nxt == 0; k++)
-                if (logits[k] > 0) 
-                    nxt = k;
-           
+
             for (int k = 1; k < K; k++) {
-                c += logits[k];
-                if (r <= c) {
-                    nxt = k;
+                if (logits[k] <= 0)
+                    continue;
+                nxt = k;
+                cdf += logits[k];
+                if (r <= cdf)
                     break;
-                }
             }
         }
-        else { /* Greedy decoding (Ref. #2 Sec. 4.1) */
+        else {
+           /* Greedy decoding: argmax_i p_i, i.e. always the most likely
+            * next token (Ref. #2 Sec. 4.1)
+            */
             nxt = 1;
             for (int k = 2; k < K; k++)
                 if (logits[k] > logits[nxt])
                     nxt = k;
         }
 
+        /* Emit the chosen token's surface string into the output buffer. */
         bufext = snprintf(buffer + bufpos,buflen - bufpos,
                           "%s ",hashmap_inx2str(hmap,nxt));
         if (bufext < 0 || bufext >= buflen - bufpos)
             break;
         bufpos += bufext;
 
-        /* Record the emitted token in the repetition window */
+        /* Record the emitted token in the repetition window so the
+         * repetition penalty can down-weight it on later steps.
+         */
         if (rep_win_len > 0 && rep_penalty > 1) {
             if (nrecent < rep_win_len)
                 recent[nrecent++] = nxt;
@@ -389,6 +451,10 @@ int lm_generate(LM* m, HASHMAP* hmap,
             }
         }
 
+        /* Extend the conditioning set: feed the chosen token back at the next
+         * position, advancing the KV cache so H = h_{t+1} conditions on
+         * x_1..x_m, y_1..y_s for the following step.
+         */
         H = lm_forward_step(m,nxt,pos);
         pos++;
     }
@@ -396,6 +462,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
         buffer[bufpos - 1] = '\0';
     lm_use_cache(m,0); /* Restore batch row counts */
     freemem(logits);
+    freemem(tmp);
     freemem(recent);
     return s; /* Actual number of words generated (excluding seed) */
 }
