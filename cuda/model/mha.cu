@@ -18,7 +18,8 @@
  * inverse are each applied once to the whole Q and K (or dQ and dK) arrays.
  *
  * Score scaling, causal and padding masks, and softmax are fused into one
- * kernel that keeps each row in registers, reading and writing it once.
+ * kernel, reading and writing it once.
+ *
  * Masked elements are skipped and written as zero (or 1/T), which matches
  * the CPU's -1e9 masking. (softmax exp(-1e9 - max) underflows to 0.)
  *
@@ -313,10 +314,12 @@ static __device__ __forceinline__ float block_reduce_sum(float v, float* sh)
 
 /* Fused score scaling, causal/padding masks, and row-wise softmax.
  *
- * One CUDA block processes one attention row; each thread holds NV row
- * elements in registers (element j = threadIdx.x + k*blockDim.x, so loads
- * and stores are coalesced).  The row is read from global memory once and
- * written once.  Masked elements are not loaded and are written as 0.
+ * One CUDA block processes one attention row; each thread processes EPT row
+ * elements, normally kept in registers by the compiler
+ * (element j = threadIdx.x + k*blockDim.x, so loads and stores are coalesced).
+ *
+ * The row is read from global memory once and written once.  Masked elements
+ * are not loaded and are written as 0.
  *
  * If every key of the row is masked (only possible when the whole sequence
  * is padding), the row is set to the uniform distribution 1/T, matching the

@@ -2,6 +2,12 @@
 
 This directory contains CUDA replacements for selected files in the `src` tree.
 
+GPU support is added by replacing CPU loops and memory operations with CUDA
+kernels, device memory handling, cuBLAS routines, asynchronous execution,
+and CUDA Graphs. The GPU implementation aims to remain structurally similar
+to the corresponding CPU code for clarity and comparison, rather than providing
+highly optimized CUDA-specific implementations.
+
 ## 1. `cuda` tree and `src` tree precedence
 
 The CUDA tree mirrors the normal source tree.
@@ -19,9 +25,6 @@ If both files exist, the CUDA version supersedes the CPU version:
 src/model/dense.c   -> not compiled
 cuda/model/dense.cu -> compiled to dense.o
 ```
-
-In other words, when both `file.c` in `src` and `file.cu` in `cuda` would
-produce the same `file.o`, the CUDA object is used.
 
 Files in the two trees are compiled differently:
 
@@ -56,11 +59,10 @@ uses:
 cuda/model/file.h
 ```
 
-The CUDA header supersedes the `src` header 
-**only for files compiled from the CUDA tree**.
+The CUDA header supersedes the `src` header **only for files compiled from
+the CUDA tree**.
 
-If no CUDA version of a header exists, a CUDA source file can still include
-the normal header from `src`.
+If no CUDA version of a header exists, the normal header from `src` is used.
 
 For example:
 
@@ -104,7 +106,7 @@ __host__ __device__ float sigmoid1(float x)
 }
 ```
 
-can be called from either CPU code or GPU code.
+can be called from either CPU or GPU code.
 
 A CUDA kernel is declared with `__global__`:
 
@@ -115,13 +117,15 @@ __global__ void sigmoid_kernel(float *a, int n)
 }
 ```
 
-and is launched from CPU code using CUDA's `<<< >>>` syntax.
+and launched from CPU code using CUDA's `<<< >>>` syntax.
 
-## 3. `blockIdx.x`, `blockDim.x`, and `threadIdx.x`
+## 3. CUDA thread indexing
 
-CUDA launches many threads at once. Threads are grouped into blocks, and blocks form a grid.
+CUDA launches many threads at once. Threads are grouped into blocks, and
+blocks form a grid.
 
-Three built-in values are commonly used to determine which element a thread should process:
+Three built-in values are commonly used to determine which element a thread
+should process:
 
 ```c
 blockIdx.x
@@ -129,9 +133,7 @@ blockDim.x
 threadIdx.x
 ```
 
-### `threadIdx.x`
-
-`threadIdx.x` is the thread's index **within its block**.
+`threadIdx.x` is the thread index within its block.
 
 If a block contains 256 threads:
 
@@ -139,17 +141,13 @@ If a block contains 256 threads:
 threadIdx.x = 0 ... 255
 ```
 
-### `blockIdx.x`
-
-`blockIdx.x` is the block's index **within the grid**.
+`blockIdx.x` is the block index within the grid.
 
 If 100 blocks are launched:
 
 ```text
 blockIdx.x = 0 ... 99
 ```
-
-### `blockDim.x`
 
 `blockDim.x` is the number of threads in each block.
 
@@ -165,15 +163,11 @@ every thread sees:
 blockDim.x == 256
 ```
 
-### Global thread index
-
-These are commonly combined as:
+These values are commonly combined into a global thread index:
 
 ```c
 int i = blockIdx.x * blockDim.x + threadIdx.x;
 ```
-
-This gives each thread a unique linear index across the entire grid.
 
 For example:
 
@@ -187,9 +181,10 @@ __global__ void relu_kernel(float *a, int n)
 }
 ```
 
-The first block handles indices starting at 0, the second block starts at `blockDim.x`, and so on.
+The first block handles indices starting at 0, the second block starts at
+`blockDim.x`, and so on.
 
-## 4. `extern __shared__`
+## 4. Dynamic shared memory
 
 CUDA shared memory is fast memory shared by all threads in one block.
 
@@ -199,8 +194,7 @@ Dynamic shared memory is declared inside a kernel as:
 extern __shared__ float tmp[];
 ```
 
-The array size is not specified in the declaration. Its size is supplied
-when the kernel is launched.
+Its size is supplied when the kernel is launched.
 
 For example:
 
@@ -219,15 +213,10 @@ can be launched with:
 softmax_kernel<<<BLKCNT,THDCNT,THDCNT * sizeof(float)>>>(a,K);
 ```
 
-The third launch argument:
+The third launch argument specifies the number of shared-memory bytes
+allocated for each block.
 
-```c
-THDCNT * sizeof(float)
-```
-
-allocates that many bytes of shared memory **for each block**.
-
-Therefore, if:
+If:
 
 ```text
 THDCNT = 256
@@ -240,7 +229,7 @@ each block receives:
 256 * 4 = 1024 bytes
 ```
 
-and inside the kernel:
+and:
 
 ```c
 tmp[0] ... tmp[255]
@@ -248,9 +237,8 @@ tmp[0] ... tmp[255]
 
 are available to all threads in that block.
 
-Each block receives its own independent shared-memory array.
-
-Threads in the same block commonly coordinate access to shared memory with:
+Each block receives an independent shared-memory array. Threads in the same
+block commonly coordinate access to shared memory with:
 
 ```c
 __syncthreads();
@@ -267,14 +255,14 @@ kernel<<<grid_size,block_size>>>(arguments);
 For example:
 
 ```c
-sigmoid_kernel<<<BLKCNT,THCNT>>>(a,n);
+sigmoid_kernel<<<BLKCNT,THDCNT>>>(a,n);
 ```
 
 means:
 
 ```text
-BLKCNT blocks per grid
-THCNT threads per block
+BLKCNT  blocks per grid
+THDCNT  threads per block
 ```
 
 The full launch form is:
@@ -283,7 +271,7 @@ The full launch form is:
 kernel<<<grid_size,block_size,shared_memory_bytes,stream>>>(arguments);
 ```
 
-The four fields are:
+The fields are:
 
 ```text
 1. grid_size            number of blocks
@@ -297,23 +285,15 @@ The third and fourth arguments are optional.
 For example:
 
 ```c
-softmax_kernel<<<BLKCNT,THDCNT,MEMSIZE)>>>(a,K);
+softmax_kernel<<<BLKCNT,THDCNT,MEMSIZE>>>(a,K);
 ```
 
-launches:
-
-```text
-BKCNT   - number of blocks
-THDCNT  - threads per block
-MEMSIZE - number of bytes of shared memory per block
-```
-
-with the default CUDA stream.
+launches the kernel with `BLKCNT` blocks, `THDCNT` threads per block, and
+`MEMSIZE` bytes of dynamic shared memory per block.
 
 A common one-dimensional launch calculation is:
 
 ```c
-
 int blkcnt = (n + thdcnt - 1) / thdcnt;
 kernel<<<blkcnt,thdcnt>>>(a,n);
 ```
