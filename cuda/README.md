@@ -308,3 +308,6 @@ if (i < n) {
     ...
 }
 ```
+
+Reference:
+[CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-programming-guide/index.html)
