@@ -744,10 +744,6 @@ void mha_backward(MHA* restrict l,
      * gWq = X.T @ dQ,  gWk = X.T @ dK,  gWv = X.T @ dV
      * dX  = dQ @ Wq.T + dK @ Wk.T + dV @ Wv.T if dX != NULL
      */
-    fltclr(gWq,D * D);
-    fltclr(gWk,D * D);
-    fltclr(gWv,D * D);
-
     Tmatmul(gWq,X,dQ,D,BT,D);
     Tmatmul(gWk,X,dK,D,BT,D);
     Tmatmul(gWv,X,dV,D,BT,D);
