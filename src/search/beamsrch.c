@@ -1,6 +1,8 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 /* Beam search decoder             */
 #include <math.h>
+#include <string.h>
+#include <stdlib.h>
 #include "mem.h"
 #include "float.h"
 #include "array.h"
@@ -32,9 +34,6 @@ static inline int can_seq_cmp(const void* a, const void* b)
  *   scores        - A 1D array [B] to store the scores of the 
  *                   resulting sequences.
  *
- * Note:
- *   This function allocates heap memoryif (B * C) * ( T + 1) > 65536 bytes.
- *
  * Description:
  *   This function implements beam search decoding. It iteratively builds
  *   up sequences by selecting the most likely symbols at each time step,
@@ -65,9 +64,9 @@ void beam_search(fArr2D probabilities_,
     fVecB scores = (fVecB) scores_;
 
     /* Use heap for really large sequences, stack otherwise */
-    int useheap = (B * C) * ( T + 1) > 65536;
-    float ns[(useheap) ? 1 : (B * C)][(useheap) ? 1 : (T + 1)];
-    iArrBT1 new_seqs = (iArrBT1) ((useheap) ? allocmem(B * C,T + 1,float) : ns);
+    int useheap = (B * C) * ( T + 1) * sizeof(int) > 65536;
+    int ns[(useheap) ? 1 : (B * C)][(useheap) ? 1 : (T + 1)];
+    iArrBT1 new_seqs = (iArrBT1) ((useheap) ? allocmem(B * C,T + 1,int) : ns);
 
     struct can_seq_s can_seqs[B * C];
 
@@ -84,8 +83,8 @@ void beam_search(fArr2D probabilities_,
                 int* new_seq = new_seqs[num_can];
                 memcpy(new_seq,sequences[i],t * sizeof(int));
                 new_seq[t] = c;
-                float new_score = scores[i] - log(probabilities[t][c]);
-
+                float p = fmaxf(probabilities[t][c],1e-30);
+                float new_score = scores[i] - logf(p);
                 can_seqs[num_can].seq = new_seq;
                 can_seqs[num_can].score = new_score;
                 num_can++;
@@ -94,11 +93,11 @@ void beam_search(fArr2D probabilities_,
 
         qsort(can_seqs,num_can,sizeof(struct can_seq_s),can_seq_cmp);
 
-        for (int i = 0; i < beam_width; i++) {
+        num_sequences = (num_can < beam_width) ? num_can : beam_width;
+        for (int i = 0; i < num_sequences; i++) {
             memcpy(sequences[i],can_seqs[i].seq,(t + 1) * sizeof(int));
             scores[i] = can_seqs[i].score;
         }
-        num_sequences = beam_width;
     }
     if (useheap)
         freemem(new_seqs);
