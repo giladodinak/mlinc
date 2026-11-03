@@ -65,10 +65,10 @@ int alignseq(const int* p, int plen,
     /* D is the traceback direction matrix */
     typedef int (*cArrPT)[tlen + 1];
     int D_[useheap ? 1 : plen + 1][useheap ? 1 : tlen + 1];
-    cArrPT D = (cArrPT) (useheap ? allocmem(plen + 1,tlen + 1,char) : D_);
+    cArrPT D = (cArrPT) (useheap ? allocmem(plen + 1,tlen + 1,int) : D_);
 
     /* Initialize the traceback matrix */
-    memset(D,0,(plen + 1) * (tlen + 1) * sizeof(char));
+    memset(D,0,(plen + 1) * (tlen + 1) * sizeof(int));
     for (int i = 1; i <= plen; i++) /* Left edge, can only go up    */
         D[i][0] = 'U';
     for (int j = 0; j <= tlen; j++) /* Upper edge, can only go left */
@@ -78,9 +78,9 @@ int alignseq(const int* p, int plen,
     for (int i = 0; i < plen; i++) {
         for (int j = 0; j < tlen; j++) {
             /* Calculate scores of different alignment steps */
-            int match = F[i][j] + ((p[i] == t[j]) ? 1 : -1); /* (mis)match */
-            int pgap = F[i][j + 1] - 1; /* Insert gap in p */
-            int tgap = F[i + 1][j] - 1; /* Insert gap in t */
+            int match = F[i][j] + ((p[i] != t[j]) ? -1 : 0); /* (mis)match */
+            int pgap = F[i][j + 1] - 1; /* Insert gap in t */
+            int tgap = F[i + 1][j] - 1; /* Insert gap in p */
             if (match >= pgap && match >= tgap) {
                 F[i + 1][j + 1] = match;
                 D[i + 1][j + 1] = 'D';
@@ -100,13 +100,13 @@ int alignseq(const int* p, int plen,
     /* Backward pass, trace best path and calculate edit distance */
     int dist = 0;
     int rinx = 0;
-    for (int i = plen, j = tlen; i > 0 && j > 0;) {
-        if (rinx >= rlen) { /* output buffers too small */
+    for (int i = plen, j = tlen; i > 0 || j > 0;) {
+        if (rinx >= rlen) { /* Output buffers too small */
             dist = -1;
             break;
         }
         int s = D[i][j];
-        if (s == 'D') {
+        if (s == 'D') { /* i > 0 && j > 0; see fwd pass */
             rp[rinx] = p[i - 1]; 
             rt[rinx] = t[j - 1]; 
             if (rp[rinx] != rt[rinx])
@@ -114,13 +114,13 @@ int alignseq(const int* p, int plen,
             rinx++; i--; j--;
         }
         else
-        if (s == 'U') {
+        if (s == 'U') { /* i > 0; see initialization  */
             rp[rinx] = p[i - 1]; 
             rt[rinx] = blank; 
             dist++; /* Gap in t (extra token in p)    */
             rinx++; i--;
         }
-        else { /* (s == 'L') */
+        else { /* s == 'L', j > 0; see initialization */
             rp[rinx] = blank; 
             rt[rinx] = t[j - 1]; 
             dist++; /* Gap in p (missing token in p)  */
