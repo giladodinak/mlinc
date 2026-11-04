@@ -143,7 +143,7 @@ int main(int argc, char **argv)
         int rv = hannWindowInit(&hannWin,winSize);
         if (rv == -1) {
             fprintf(stderr,"Failed to initialize hann window for '%s' - skipping\n",fn);
-            closeSphereFile(sfp);    
+            closeSphereFile(sfp);
             continue;
         }
         float rdBuf[winSize];
@@ -155,7 +155,7 @@ int main(int argc, char **argv)
         int rv1 = initFilter(&filter1,1,"h",sample_rate,2000);
         if (rv3 == -1 ||rv2 == -1 || rv1 == -1) {
             fprintf(stderr,"Failed to initialize filter(s) for '%s' - skipping\n",fn);
-            closeSphereFile(sfp);    
+            closeSphereFile(sfp);
             continue;
         }
         
@@ -174,7 +174,7 @@ int main(int argc, char **argv)
         phncnt = readPhonemeFile(pfp,PHSIZE,phonemes);
         if (phncnt < 1) {
             fprintf(stderr,"Failed to read phonemes from '%s' - skipping\n",fn);
-            closeSphereFile(sfp);    
+            closeSphereFile(sfp);
             closePhonemeFile(pfp);
             continue;
         }
@@ -182,13 +182,14 @@ int main(int argc, char **argv)
 
         if (phncnt < 3) {
             fprintf(stderr,"Not enough phonemes in '%s' - skipping\n",fn);
+            closeSphereFile(sfp);
             continue;
         }
 
         /* Extract features from audio */
         frmcnt = 0;
         size_t fsize = winSize / 2;
-        for (;;) {
+        while (frmcnt < FRAMEARRSIZE) {
             float fltBuf[fsize];
             
             size_t fcnt = readSphereAudio(sfp,fltBuf,fsize);
@@ -281,7 +282,7 @@ int main(int argc, char **argv)
             double one_frame_features[1][FRAMEFEATCNT];
 
             if (nfrm > MAXSEGMENT) {
-                int midway = (seg_end_frame - seg_start_frame) / 2;
+                int midway = (seg_start_frame + seg_end_frame) / 2;
                 seg_start_frame = midway - MAXSEGMENT / 2;
                 seg_end_frame = midway + MAXSEGMENT / 2;
                 nfrm = seg_end_frame - seg_start_frame;
@@ -311,9 +312,7 @@ int main(int argc, char **argv)
 
             for(int i = seg_start_frame; i < seg_end_frame; i++) {
                 fprintf(fp1,"%12.4le,",ff[i][0]); /* zcr */
-                /* normalize sigma */
-                frame_features[i][1] = -log(ff[i][1] + 1e-7) / 30;
-                fprintf(fp1,"%12.4le,",ff[i][1]);
+                fprintf(fp1,"%12.4le,",-log(ff[i][1] + 1e-7) / 30); /* normalized sigma */
                 for (int j = 2; j < fsize; j++)
                     fprintf(fp1,"%7.4lf,",ff[i][j]);
                 assert(i - seg_start_frame < nfrm);
@@ -328,14 +327,14 @@ int main(int argc, char **argv)
 
     fclose(fp);
     printf("Processed %d files\n",fileno);
-    
+
     double sum[FRAMEFEATCNT] = {0.0};
     for (int i = 0; i < frmcnt; i++)
         for (int j = 0; j < FRAMEFEATCNT; j++)
             sum[j] += frame_features[i][j];
 
     double mean[FRAMEFEATCNT];
-    for (int j = 0; j < FRAMEFEATCNT; j++) 
+    for (int j = 0; j < FRAMEFEATCNT; j++)
         mean[j] = sum[j] / frmcnt;
 
     double var[FRAMEFEATCNT] = {0.0};
