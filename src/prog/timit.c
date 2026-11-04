@@ -58,15 +58,40 @@ int count_phoneme(int*  yc, int len)
 
 
 /* Removes consecutive duplicate labels and blanks from the labels array.
+ * A label is a duplicate if it equals the label of the previous frame,
+ * so labels separated by a blank are kept (CTC collapsing rule).
  * Modifies the array labels in place and returns the new length.
  */
-int dedup_labels(iVec restrict labels, int len, int blank_inx)
+int dedup_labels(iVec restrict labels, int len, int blank_inx, int ctc_mode)
+{
+    int j, k, prev;
+    for (j = 0, k = 0, prev = -1; j < len; j++) {
+        int cur = labels[j];
+        if (cur != blank_inx) {
+            if (ctc_mode) {
+                if (cur != prev)
+                    labels[k++] = cur;
+            }
+            else {
+                if (k == 0 || labels[k - 1] != cur)
+                    labels[k++] = cur;
+            }
+        }
+        prev = cur;
+    }
+    return k;
+}
+
+/* Extracts one label per phoneme using the EOP markers, removing silence.
+ * Preserves consecutive identical phonemes.
+ * Modifies the array labels in place and returns the new length.
+ */
+int reference_labels(iVec restrict labels, int len, int blank_inx)
 {
     int j, k;
     for (j = 0, k = 0; j < len; j++)
-        if (labels[j] != blank_inx)
-            if (k == 0 || labels[k - 1] != labels[j])
-                labels[k++] = labels[j];
+        if (labels[j] >= EOP && labels[j] - EOP != blank_inx)
+            labels[k++] = labels[j] - EOP;
     return k;
 }
 
@@ -245,6 +270,9 @@ int timit_lstm_dense_classification(
     for (int i = 0; i < STe; i++)
         cnt += sTe[i];
     MTe = cnt;
+    /* Keep a copy of test labels with EOP markers, for reference phonemes */
+    VecM yTecEOP = allocmem(MTe,1,int);
+    memcpy(yTecEOP,yTec,MTe * sizeof(int));
     /* Each sequence contains multiple phonemes, find how many in total */
     int PTe = count_phoneme(yTec,MTe);
 
@@ -324,22 +352,26 @@ int timit_lstm_dense_classification(
         /* Convert labels to phonemes: 
          * merge repeated labels, remove silence/blanks 
          */
-        int ytc_len = dedup_labels(ytc,sTe[i],SIL);
-        int ypc_len = dedup_labels(ypc,sTe[i],SIL);
+        memcpy(ytc,yTecEOP + off,sTe[i] * sizeof(int));
+        int ytc_len = reference_labels(ytc,sTe[i],SIL);
+        int ypc_len = dedup_labels(ypc,sTe[i],SIL,ctc_mode);
 
         /* Calulate edit distance of phonemes */
         dist2 += edit_dist(ypc,ypc_len,ytc,ytc_len);
         len2 += (ytc_len > ypc_len) ? ytc_len : ypc_len;
   
-        /* Performs beam search to find the most probable sequences of lables */
-        int beamwidth = 3;
-        int timesteps = sTe[i];
-        int sequences[beamwidth][timesteps + 1];
-        float scores[beamwidth];
-
-        beam_search(yp,timesteps,nc,beamwidth,sequences,scores);
-        ypc_len = dedup_labels(sequences[0],timesteps,SIL);
-        memcpy(ypc,sequences[0],ypc_len * sizeof(int));
+        if (ctc_mode) {
+            /* Performs beam search to find the most probable sequences of lables */
+            int beamwidth = 10;
+            int timesteps = sTe[i];
+            int sequences[beamwidth][timesteps + 1];
+            float scores[beamwidth];
+            /* Sequences are already collapsed and SIL terminated */
+            ctc_beam_search(yp,timesteps,nc,beamwidth,sequences,scores);
+            for (ypc_len = 0; sequences[0][ypc_len] != SIL; ypc_len++)
+                ;
+            memcpy(ypc,sequences[0],ypc_len * sizeof(int));
+        }
 
         /* Align beam searched phonemes with true phonems;
          * calulate edit distance 
@@ -351,11 +383,12 @@ int timit_lstm_dense_classification(
         len3 += (ytc_len > ypc_len) ? ytc_len : ypc_len;
 
         /* Update the confusion matrix */
-        for (int i = 0; i < rlen; i++)
-            if (ytc2[i] != SIL || ypc2[i] != SIL)
-                cm[ytc2[i]][ypc2[i]]++;
+        for (int k = 0; k < rlen; k++) {
+            if (ytc2[k] != SIL || ypc2[k] != SIL)
+                cm[ytc2[k]][ypc2[k]]++;
             else
                 break;
+        }
     }
     printf("\r%3d sequences out of %d %3d%%\n",i,STe,off * 100 / MTe);
     printf("%s Testing completed \n",date_time(datetimebuf));
@@ -364,7 +397,8 @@ int timit_lstm_dense_classification(
                                                 1.0 - ((float) dist1) / len1);
     printf("Average similarity (phoneme edit distance) %5.3f\n",
                                                 1.0 - ((float) dist2) / len2);
-    printf("Average similarity (with beam search) %5.3f\n",
+    printf("Average similarity (%s) %5.3f\n",
+                       ctc_mode ? "with beam search" : "phoneme alignment",
                                                 1.0 - ((float) dist3) / len3);
 
     char cmfn[512];
@@ -411,6 +445,7 @@ int timit_lstm_dense_classification(
     freemem(yVdt);
     freemem(xTe);
     freemem(sTe);
+    freemem(yTecEOP);
     freemem(yTec);
     freemem(yTet);
     model_free(m);
