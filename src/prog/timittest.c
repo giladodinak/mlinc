@@ -1,10 +1,12 @@
 /* Copyright (c) 2023-2024 Gilad Odinak */
 #include <stdio.h>
+#include <string.h>
 #include "mem.h"
 #include "float.h"
 #include "array.h"
 #include "model.h"
 #include "modelio.h"
+#include "onehot.h"
 #include "featfile.h"
 #include "beamsrch.h"
 #include "alignseq.h"
@@ -33,6 +35,20 @@ int dedup_labels(iVec restrict labels, int len, int blank_inx)
         if (labels[j] != blank_inx)
             if (k == 0 || labels[k - 1] != labels[j])
                 labels[k++] = labels[j];
+    return k;
+}
+
+
+/* Extracts one label per phoneme using the EOP markers, removing silence.
+ * Preserves consecutive identical phonemes.
+ * Modifies the array labels in place and returns the new length.
+ */
+int reference_labels(iVec restrict labels, int len, int blank_inx)
+{
+    int j, k;
+    for (j = 0, k = 0; j < len; j++)
+        if (labels[j] >= EOP && labels[j] - EOP != blank_inx)
+            labels[k++] = labels[j] - EOP;
     return k;
 }
 
@@ -72,6 +88,9 @@ int main(int argc, char **argv)
         return 0;
     }
     MTe = cnt; /* Actual number of samples */
+    int ytc[MTe];       /* True labels             */
+    memcpy(ytc,yTec,MTe * sizeof(int));
+    int ytc_len = reference_labels(ytc,MTe,SIL);
     /* Each sequence contains multiple phonemes, find how many in total */
     int PTe = count_phoneme(yTec,MTe);
 
@@ -79,37 +98,39 @@ int main(int argc, char **argv)
 
     float yp[MTe][N];   /* Predicted probabilities */
     int ypc[MTe];       /* Predicted labels        */
-    int ytc[MTe];       /* True labels             */
-
-    /* Convert true labels to phonemes: merge repeated labels, remove silence */
-    memcpy(ytc,yTec,MTe * sizeof(int));
-    int ytc_len = dedup_labels(ytc,MTe,SIL);
 
     /* Predict lables from features */    
     model_predict(m,xTe,yp,MTe);
 
-    /* Performs beam search to find the most probable sequences of lables */
-    int beamwidth = 3;
-    int timesteps = MTe;
-    int sequences[beamwidth][timesteps + 1];
-    float scores[beamwidth];
-
-    int nc = REDUCED_PHONEME_CNT;
-    beam_search(yp,timesteps,nc,beamwidth,sequences,scores);
-    int ypc_len = dedup_labels(sequences[0],timesteps,SIL);
-    memcpy(ypc,sequences[0],ypc_len * sizeof(int));
+    int ypc_len;
+    if (m->loss_func == 'C') {
+        /* CTC beam search returns already collapsed, SIL terminated labels */
+        int beamwidth = 10;
+        int sequences[beamwidth][MTe + 1];
+        float scores[beamwidth];
+        ctc_beam_search(yp,MTe,N,beamwidth,sequences,scores);
+        for (ypc_len = 0; sequences[0][ypc_len] != SIL; ypc_len++)
+            ;
+        memcpy(ypc,sequences[0],ypc_len * sizeof(int));
+    }
+    else {
+        onehot_decode(yp,ypc,MTe,N);
+        ypc_len = dedup_labels(ypc,MTe,SIL);
+    }
 
     /* Align the true and predicted phoneme sequences */
     int rlen = ((ytc_len > ypc_len) ? ytc_len : ypc_len) * 2;
+    if (rlen == 0) rlen = 1;
     int ypc2[rlen];
     int ytc2[rlen];
-    alignseq(ypc,ypc_len,ytc,ytc_len,ypc2,ytc2,rlen,SIL);
+    int dist = alignseq(ypc,ypc_len,ytc,ytc_len,ypc2,ytc2,rlen,SIL);
 
     /* Print the sequences */
+    const char** rpn = reduced_phoneme_names;
     printf("True phonemes:      ");
     for (int i = 0; i < rlen; i++) {
         if (ytc2[i] != SIL || ypc2[i] != SIL)
-            printf("%-3s ",reduced_phoneme_names[ytc2[i]]);
+            printf("%-3s ",ytc2[i] == SIL ? "-" : rpn[ytc2[i]]);
         else
             break;
     }
@@ -117,7 +138,7 @@ int main(int argc, char **argv)
     printf("Predicted phonemes: ");
     for (int i = 0; i < rlen; i++) {
         if (ytc2[i] != SIL || ypc2[i] != SIL)
-            printf("%-3s ",reduced_phoneme_names[ypc2[i]]);
+            printf("%-3s ",ypc2[i] == SIL ? "-" : rpn[ypc2[i]]);
         else
             break;
     }
@@ -134,7 +155,9 @@ int main(int argc, char **argv)
         else
             break;
     }
-    printf("%d out of %d matched (%5.3f)\n",mcnt,pcnt,(float) mcnt / pcnt);
+    printf("%d out of %d matched (%5.3f)\n",mcnt,pcnt,pcnt ? (float) mcnt / pcnt : 0.0f);
+    if (ytc_len > 0)
+        printf("Phoneme error rate (PER) %5.3f\n",(float) dist / ytc_len);
 
     model_free(m);
 }
