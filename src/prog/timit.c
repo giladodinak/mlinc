@@ -310,7 +310,8 @@ int timit_lstm_dense_classification(
     int nc = N;     /* Number of classes (inc. slience/blank)       */
     int off;        /* Current sequence offset within test data     */
     float mcnt;     /* Number of matching raw labels                */
-    /* variables for similarity calculations */
+    /* Variables for similarity calculations */
+    int phcnt;      /* Reference phoneme count (includes blanks)    */
     int dist1;      /* Raw label sequences edit distance (numerator)*/
     int dist2;      /* Phoneme sequences edit distance              */
     int dist3;      /* Beam search phoneme sequences edit distacne  */
@@ -319,6 +320,7 @@ int timit_lstm_dense_classification(
     int len3;       /* Beam search phoneme sequences edit length    */
     int i, j;
     mcnt = 0;
+    phcnt = 0;
     dist1 = dist2 = dist3 = 0;
     len1 = len2 = len3 = 0;
 
@@ -354,6 +356,7 @@ int timit_lstm_dense_classification(
          */
         memcpy(ytc,yTecEOP + off,sTe[i] * sizeof(int));
         int ytc_len = reference_labels(ytc,sTe[i],SIL);
+        phcnt += ytc_len;
         int ypc_len = dedup_labels(ypc,sTe[i],SIL,ctc_mode);
 
         /* Calulate edit distance of phonemes */
@@ -400,6 +403,7 @@ int timit_lstm_dense_classification(
     printf("Average similarity (%s) %5.3f\n",
                        ctc_mode ? "with beam search" : "phoneme alignment",
                                                 1.0 - ((float) dist3) / len3);
+    printf("Phoneme error rate (PER) %5.3f\n",(float) dist3 / phcnt);
 
     char cmfn[512];
     snprintf(cmfn,sizeof(cmfn),"cm-%s.csv",fns);
