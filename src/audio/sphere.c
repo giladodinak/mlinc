@@ -66,7 +66,7 @@ static void hdr2sf(SPHFILE* sf, const char* header)
         s = p + 1; // does not work as 3rd part of for loop
     }
     sf->bitDepth = sampleNbytes * 8;
-    sf->dataSize = sampleCount * sampleNbytes - 1024;
+    sf->dataSize = sampleCount * sampleNbytes;
     if (sf->audioFormat == 0 && sampleNbytes == 2)
         sf->audioFormat = 1; // Assume PCM
 }
@@ -190,7 +190,7 @@ size_t readSphereAudio(SPHFILE* sf, float *fltBuf, size_t numSamples)
                 for (size_t i = 0; i < samplesRead; i++)
                     pcmBuf[i] = __builtin_bswap16(pcmBuf[i]);
             } 
-            pcm2flt(pcmBuf,fltBuf,samplesRead);
+            pcm2flt(pcmBuf,fltBuf + cnt,samplesRead);
         }
         else {
             samplesRead = readSphereFile(sf,fltBuf,readSize);
