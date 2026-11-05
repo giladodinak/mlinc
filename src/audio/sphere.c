@@ -9,7 +9,7 @@
 #include "ulaw.h"
 #include "pcm.h"
 
-/* SPHERE header exmaple
+/* SPHERE header example
 NIST_1A 
    1024
 sample_coding -s3 pcm
@@ -81,8 +81,8 @@ void printSphereFileInfo(SPHFILE *sf, char *mode)
         default: format = "unknown";
     }
     switch (sf->endianess) {
-        case 'l': endianess = "little-endinan"; break;
-        case 'b': endianess = "big-endinan"; break;
+        case 'l': endianess = "little-endian"; break;
+        case 'b': endianess = "big-endian"; break;
         default: endianess = "unknown";
     }
     printf("Audio Format: %s\n",format);
@@ -108,7 +108,6 @@ SPHFILE* openSphereFile(const char* filename, char *mode, SPHFILE *sf)
         fprintf(stderr,"In openSphereFile('%s'): invalid mode '%s'; only 'r' supported.\n",filename,mode);
         return NULL;
     }
-    //printf("Openning '%s' for %s.\n",filename,(*mode == 'r') ? "read" : "write");
     
     if (*mode == 'r') {
         fileHandle = fopen(filename,"rb");
@@ -184,23 +183,25 @@ size_t readSphereAudio(SPHFILE* sf, float *fltBuf, size_t numSamples)
                 samplesRead = readSphereFile(sf,ulawBuf,readSize);
                 ulaw2pcm(ulawBuf,pcmBuf,samplesRead);
             }
-            else
+            else {
                 samplesRead = readSphereFile(sf,pcmBuf,readSize);
-            if (sf->endianess == 'b') {
-                for (size_t i = 0; i < samplesRead; i++)
-                    pcmBuf[i] = __builtin_bswap16(pcmBuf[i]);
-            } 
+                if (sf->endianess == 'b') {
+                    for (size_t i = 0; i < samplesRead; i++)
+                        pcmBuf[i] = __builtin_bswap16(pcmBuf[i]);
+                } 
+            }
             pcm2flt(pcmBuf,fltBuf + cnt,samplesRead);
         }
         else {
             samplesRead = readSphereFile(sf,fltBuf,readSize);
             if (sf->endianess == 'b') {
+                uint32_t *bits = (uint32_t*) fltBuf;
                 for (size_t i = 0; i < samplesRead; i++)
-                    fltBuf[i] = __builtin_bswap32(fltBuf[i]);
+                    bits[i] = __builtin_bswap32(bits[i]);
             }
         }
         cnt += samplesRead;
-        if (samplesRead < bufSize)
+        if (samplesRead < readSize)
             break;
     }
     return cnt;

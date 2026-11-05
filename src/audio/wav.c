@@ -67,8 +67,8 @@ static void printwf(WAVFILE *wf, char *mode)
         default: format = "unknown";
     }
     switch (wf->endianess) {
-        case 'l': endianess = "little-endinan"; break;
-        case 'b': endianess = "big-endinan"; break;
+        case 'l': endianess = "little-endian"; break;
+        case 'b': endianess = "big-endian"; break;
         default: endianess = "unknown";
     }
     printf("Audio Format: %s\n",format);
@@ -91,7 +91,6 @@ WAVFILE* openWavFile(const char* filename, char* mode, WAVFILE* wf)
         fprintf(stderr,"In openWavFile('%s'): invalid mode '%s'; only 'r' and 'w' supported.\n",filename,mode);
         return NULL;
     }
-    printf("Openning '%s' for %s.\n",filename,(*mode == 'r') ? "read" : "write");
     
     if (*mode == 'r') {
         fileHandle = fopen(filename,"rb");
@@ -149,7 +148,7 @@ WAVFILE* closeWavFile(WAVFILE* wf)
     FILE *fileHandle = wf->fileHandle;
     wf->fileHandle = NULL;
     if (fileHandle == NULL)
-      return wf;
+        return wf;
     if (wf->mode == 'w') {
         rv = fflush(fileHandle);
         if (rv == 0) {
@@ -162,8 +161,11 @@ WAVFILE* closeWavFile(WAVFILE* wf)
             if (fwrite(hdr,sizeof(hdr[0]),sizeof(hdr),fileHandle) != sizeof(hdr))
                 rv = -1;
         }
-        if (rv != 0)    
+        if (rv != 0) {
             fprintf(stderr,"In closeWavFile(): failed to update data size; it is incorrect.\n");
+            fclose(fileHandle);
+            return NULL;
+        }
     }
     rv = fclose(fileHandle);
     if (rv != 0) {
