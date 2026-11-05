@@ -157,7 +157,7 @@ In the project root directory, run these commands:
 
 `$ bin/har`
 
-`$ bin/timit`
+`$ bin/timittrain`
 
 `$ bin/word2vec`
 
