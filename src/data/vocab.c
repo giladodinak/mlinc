@@ -9,6 +9,7 @@
 
 #include "mem.h"
 #include "hash.h"
+#include "tokenizer.h"
 #include "textfile.h"
 #include "vocab.h"
 
@@ -64,9 +65,9 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     int calc_dist = flags & VOCAB_DIST;
     int verbose = flags & VOCAB_VERBOSE;
 
-    int tf_flags = 0;
-    if (flags & VOCAB_NUM) tf_flags |= TF_NUMBER;
-    if (flags & VOCAB_SPECIAL) tf_flags |= TF_SPECIAL;
+    int tok_flags = 0;
+    if (flags & VOCAB_NUM) tok_flags |= TOK_NUMBER;
+    if (flags & VOCAB_SPECIAL) tok_flags |= TOK_SPECIAL;
 
     int stdout_is_tty = isatty(fileno(stdout));
 
@@ -81,7 +82,7 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     for (int i = 0; i < num_files; i++) {
         tot_word_cnt += process_text_file(file_list[i],data_dir,hmap,1,
                                           max_vocab,word_cnt,NULL,0,
-                                          tf_flags);
+                                          tok_flags);
         if (verbose && stdout_is_tty) {
             printf("Processed file %d of %d, %lld words\r",
                    i + 1,num_files,tot_word_cnt);
@@ -99,7 +100,7 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     long long num_cnt = 0;
     int n = 1;
     for (int i = 1; i < used; i++) {
-        if (vocab_is_number(hashmap_inx2str(hmap,word_cnt[i].inx)))
+        if (token_is_number(hashmap_inx2str(hmap,word_cnt[i].inx)))
             num_cnt += word_cnt[i].cnt;
         else
             word_cnt[n++] = word_cnt[i];
@@ -108,7 +109,7 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     /* Move special tokens to word_cnt[1..nspec-1], always retained */
     int nspec = 1;
     for (int i = 1; i < n; i++) {
-        if (hashmap_inx2str(hmap,word_cnt[i].inx)[0] == '<') {
+        if (token_is_special(hashmap_inx2str(hmap,word_cnt[i].inx))) {
             WRDCNT t = word_cnt[i];
             word_cnt[i] = word_cnt[nspec];
             word_cnt[nspec++] = t;
@@ -207,7 +208,7 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     v->coverage = coverage;
     v->unk_id = unk_id;
     v->num_id = num_id;
-    v->tf_flags = tf_flags;
+    v->tok_flags = tok_flags;
     v->freq = freq;
     v->dist = dist;
     v->dist_size = dist_size;
@@ -225,11 +226,11 @@ void vocab_free(VOCAB* v)
 
 int vocab_tokenize(const VOCAB* v, const char* text, int* out, int max)
 {
-    char tok[101];
+    char token[255];
     int cnt = 0;
-    for (const char* p = text_next_token(text,v->tf_flags,tok,101);
-         p != NULL; p = text_next_token(p,v->tf_flags,tok,101)) {
-        int id = vocab_lookup(v,tok); /* <unk>/<num> fallbacks */
+    for (const char* p = text_next_token(text,v->tok_flags,token,255);
+         p != NULL; p = text_next_token(p,v->tok_flags,token,255)) {
+        int id = vocab_lookup(v,token); /* <unk>/<num> fallbacks */
         if (id > 0) {
             if (cnt < max) {
                 out[cnt++] = id;
@@ -240,7 +241,7 @@ int vocab_tokenize(const VOCAB* v, const char* text, int* out, int max)
             }
         }
         else {
-            fprintf(stderr, "'%s' not in vocabulary - skipping\n",tok);
+            fprintf(stderr, "'%s' not in vocabulary - skipping\n",token);
         }
     }
     return cnt;

@@ -5,98 +5,8 @@
 #include <ctype.h>
 #include "mem.h"
 #include "hash.h"
+#include "tokenizer.h"
 #include "textfile.h"
-
-#define ISALPHA(c) isalpha((unsigned char) (c))
-#define ISDIGIT(c) isdigit((unsigned char) (c))
-#define ISALNUM(c) isalnum((unsigned char) (c))
-#define TOLOWER(c) tolower((unsigned char) (c))
-
-/* Returns a pointer to the first character that can start a token, or NULL:
- * a letter; a digit if TF_NUMBER is set; '<' if TF_SPECIAL is set.
- */
-static inline char* token_start(char* s, int flags)
-{
-    const int num = (flags & TF_NUMBER);
-    const int spc = (flags & TF_SPECIAL);
-    for (; *s != '\0'; s++) {
-        if (ISALPHA(*s) || (num && ISDIGIT(*s)) || (spc && *s == '<'))
-            return s;
-    }
-    return NULL;
-}
-
-/* Returns a pointer past the end of the token that starts at s:
- *   word    - letters and apostrophes; with TF_NUMBER also digits, and
- *             single '.' or ',' between digits (2nd, mp3, 3.14, 1,000)
- *   special - '<', one or more letters/digits/'_', '>'
- * Returns s if s does not start a valid special token. A token that may
- * continue past the end of the buffer ends at the terminating '\0'.
- */
-static inline char* token_end(char* s, int flags)
-{
-    char* e = s;
-    if (*s == '<') {
-        for (e++; ISALNUM(*e) || *e == '_'; e++);
-        if (*e == '>' && e > s + 1)
-            return e + 1;
-        return (*e == '\0') ? e : s;
-    }
-    int num = flags & TF_NUMBER;
-    for (;;) {
-        while (ISALPHA(*e) || *e == '\'' || (num && ISDIGIT(*e))) e++;
-        if (num && e > s && (*e == '.' || *e == ',')) {
-            if (ISDIGIT(e[-1]) && (ISDIGIT(e[1]) || e[1] == '\0')) {
-                e++;
-                continue;
-            }
-        }
-        return e;
-    }
-}
-
-/* Extracts the next token from a string.
- *
- * Parameters:
- *   str   - A null-terminated string
- *   flags - Bitwise OR of TF_SPECIAL and/or TF_NUMBER
- *   token - Output buffer of at least len chars
- *   tlen  - Size of token buffer.
- *
- * Returns:
- *   Position past the token in str; NULL when there are no more tokens.
- *   Writes the token into token buffer (null terminted).
- *   Tokens longer than tlen - 1 are skipped.
- *
- * Example:
- *   char tok[101];
- *   for (const char* p = text_next_token(text,flags,tok,101);
- *        p != NULL;
- *        p = text_next_token(p,flags,tok,100))
- *       ... use tok ...
- */
-const char* text_next_token(const char* str, int flags, char* token, int tlen)
-{
-    char* p = (char*) str; /* Not modified */
-    for (char* w = token_start(p,flags); w != NULL; w = token_start(p,flags)) {
-        char* e = token_end(w,flags);
-        if (e == w || (*w == '<' && *(e - 1) != '>')) {
-            p = w + 1; /* '<' not starting a complete special token */
-            continue;
-        }
-        if (*(e - 1) == '\'' || *(e - 1) == '.' || *(e - 1) == ',')
-            e--;
-        int len = e - w;
-        p = e;
-        if (len < tlen) {
-            for (int i = 0; i < len; i++)
-                token[i] = TOLOWER(w[i]);
-            token[len] = '\0';
-            return e;
-        }
-    }
-    return NULL;
-}
 
 /* Processes an ASCII text file to create a word vocabulary, a word frequency
  * table, and/or an array of word tokens.
@@ -115,8 +25,8 @@ const char* text_next_token(const char* str, int flags, char* token, int tlen)
  *                zero, words not in the vocabulary are ignored (skipped).
  *   max_words  - Size of file_words array
  *   flags      - Bitwise OR of optional token types (0 = words only):
- *                TF_SPECIAL - "<name>" tokens, e.g. <bos>, <eos>, <sep>
- *                TF_NUMBER  - numbers, e.g. 42, 3.14, 1,000
+ *                TOK_SPECIAL - "<name>" tokens, e.g. <bos>, <eos>, <sep>
+ *                TOK_NUMBER  - numbers, e.g. 42, 3.14, 1,000
  *
  * Returns:
  *  - If hmap is not NULL: Returns the number of words that were not skipped.
@@ -124,16 +34,7 @@ const char* text_next_token(const char* str, int flags, char* token, int tlen)
  *  - Returns -1 on error.
  *
  * Notes:
- *  - Only consider alphabetic character sequences (and apostrophe), delimited
- *    by non-alphabetic characters, as words.
- *  - Convert all alphabetic characters to lowercase before further processing.
- *  - Apostrophe in the middle of alphabetic character string, but not at the
- *    begining or end, is considered to be part of a word.
- *  - With TF_SPECIAL, '<' followed by letters/digits/'_' and '>' is one
- *    token (lowercased); any other '<' is a delimiter.
- *  - With TF_NUMBER, digits are word characters, and '.' or ',' between
- *    two digits is part of the word: 42, 3.14, 1,000, 2nd, mp3 are single
- *    tokens. Otherwise digits are delimiters.
+ *  - Tokens are formed by the rules in tokenizer.h.
  */
 int process_text_file(const char* file_name,
                       const char* file_dir,
@@ -216,7 +117,7 @@ int process_text_file(const char* file_name,
             if (len <= max_word_len) {
                 /* Copy, as the char at e may begin the next token       */
                 for (int i = 0; i < len; i++)
-                    token[i] = TOLOWER(w[i]);
+                    token[i] = TOK_TOLOWER(w[i]);
                 token[len] = '\0';
                 if (hmap != NULL) {
                     int inx = hashmap_str2inx(hmap,token,add_new);

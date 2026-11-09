@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "hash.h"   /* HASHMAP */
+#include "tokenizer.h"
 
 typedef struct VOCAB {
     HASHMAP* hmap;      /* Map word <-> index; index 0 = PAD       */
@@ -16,7 +17,7 @@ typedef struct VOCAB {
     float*   freq;      /* [size] Unigram freq; NULL if unused     */
     int*     dist;      /* Negative-sampling table; NULL if unused */
     int      dist_size; /* Entries in dist, 0 if dist is NULL      */
-    int      tf_flags;  /* Tokenizer flags (TF_*) used by build    */
+    int      tok_flags; /* Tokenizer flags (TOK_*) used by build   */
 } VOCAB;
 
 /* vocab_build - Builds a vocabulary by scanning a corpus
@@ -69,17 +70,6 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
  */
 void vocab_free(VOCAB* v);
 
-/* vocab_is_number - True if word is a number token as produced by
- * process_text_file with TF_NUMBER: starts with a digit and contains only
- * digits, '.' and ',' (e.g. 42, 3.14, 1,000; not 2nd or mp3).
- */
-static inline int vocab_is_number(const char* word)
-{
-    if (!isdigit((unsigned char) word[0]))
-        return 0;
-    return word[strspn(word,"0123456789.,")] == '\0';
-}
-
 /* vocab_lookup - Looks up the token id of a single word
  *
  * Parameters:
@@ -102,7 +92,7 @@ static inline int vocab_lookup(const VOCAB* v, const char* word)
     int id = hashmap_str2inx(v->hmap,buf,0);
     if (id > 0)
         return id;
-    if (v->num_id && vocab_is_number(buf))
+    if (v->num_id && token_is_number(buf))
         return v->num_id;
     return v->unk_id;
 }
@@ -126,7 +116,7 @@ static inline const char* vocab_word(const VOCAB* v, int id)
 /* vocab_tokenize - Split text into words and map them to token ids
  *
  * Split text into words with the same rules used to read the training
- * corpus (process_text_file), map them to indices, and store up to max ids
+ * corpus (tokenizer.h), map them to indices, and store up to max ids
  * in out[]. Words are mapped with vocab_lookup. Words that map to
  * 0 (PAD), i.e. unknown words without <unk>, are reported on stderr and
  * skipped.
