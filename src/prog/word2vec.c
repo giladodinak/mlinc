@@ -201,7 +201,8 @@ int main(int argc, char** argv)
     printf("Creating vocabulary from dataset\n");
     fflush(stdout);
     VOCAB* vocab = vocab_build(file_list,num_files,data_dir,
-                               vocab_size,vocab_coverage,max_vocab,1,1,1);
+                               vocab_size,vocab_coverage,max_vocab,
+                               VOCAB_FREQ | VOCAB_DIST | VOCAB_VERBOSE);
     if (vocab == NULL) {
         fprintf(stderr,"Failed to create vocabulary\n");
         free_text_file_list(file_list,num_files);
@@ -257,7 +258,8 @@ int main(int argc, char** argv)
         for (int i = 0; i < num_files; i++) {
             file_cnt++;
             int fwcnt = process_text_file(file_list[i],data_dir,
-                        vocab->hmap,0,max_vocab,NULL,file_words,max_file_words);
+                                          vocab->hmap,0,max_vocab,NULL,
+                                          file_words,max_file_words,0);
 
             /* Sub sample frequent words by removing some */
             int cnt = 0;

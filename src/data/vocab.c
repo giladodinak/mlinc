@@ -31,19 +31,42 @@ static int qsort_compare_word_cnt(const void* a, const void* b)
  *   vocab_size - Number of vocabulary words; 0 - derive from coverage
  *   coverage   - Target corpus-coverage fraction when vocab_size == 0
  *   max_vocab  - Maximum number of distinct words (typ. 3 x vocab_size)
- *   calc_freq  - If set, calculate and store word frequencies
- *   calc_dist  - If set, calculate and store negative sampling distribution
- *   verbose    - If set, print progress to stdout
+ *   flags      - Bitwise OR of optional flags
+ *       VOCAB_UNK     - unknown words mapped to <unk>; otherwise ignored
+ *       VOCAB_NUM     - numbers mapped to <num>; otherwise unknown words
+ *       VOCAB_SPECIAL - recognize <name> special tokens
+ *       VOCAB_FREQ    - calculate and store word frequencies
+ *       VOCAB_DIST    - calculate and store negative sampling distribution
+ *       VOCAB_VERBOSE - print progress to stdout
+ *
+ * Notes:
+ *   - With VOCAB_SPECIAL, special tokens (<name>, e.g. <bos> <eos> <sep>)
+ *     found in the corpus are always retained, regardless of frequency.
+ *   - With VOCAB_UNK, <unk> is added; its count is the number of corpus
+ *     tokens dropped from the vocabulary
+ *   - With VOCAB_NUM numbers are counted as <num>; otherwise they are
+ *     unknown words.
+ *   - vocab_size counts PAD, special tokens and words; <unk> and <num> are
+ *     added on top of it. The final size is in VOCAB.size.
  *
  * Returns:
  *   A VOCAB; returns NULL on failure.
  */
 VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
-                   int vocab_size, float coverage, int max_vocab,
-                   int calc_freq, int calc_dist, int verbose)
+                   int vocab_size, float coverage, int max_vocab, int flags)
 {
     if (file_list == NULL || num_files <= 0 || max_vocab < 1)
         return NULL;
+
+    int has_unk = flags & VOCAB_UNK;
+    int has_num = flags & VOCAB_NUM;
+    int calc_freq = flags & VOCAB_FREQ;
+    int calc_dist = flags & VOCAB_DIST;
+    int verbose = flags & VOCAB_VERBOSE;
+
+    int tf_flags = 0;
+    if (flags & VOCAB_NUM) tf_flags |= TF_NUMBER;
+    if (flags & VOCAB_SPECIAL) tf_flags |= TF_SPECIAL;
 
     int stdout_is_tty = isatty(fileno(stdout));
 
@@ -56,8 +79,9 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
 
     long long tot_word_cnt = 0;
     for (int i = 0; i < num_files; i++) {
-        tot_word_cnt += process_text_file(file_list[i],data_dir,
-                                          hmap,1,max_vocab,word_cnt,NULL,0);
+        tot_word_cnt += process_text_file(file_list[i],data_dir,hmap,1,
+                                          max_vocab,word_cnt,NULL,0,
+                                          tf_flags);
         if (verbose && stdout_is_tty) {
             printf("Processed file %d of %d, %lld words\r",
                    i + 1,num_files,tot_word_cnt);
@@ -68,50 +92,89 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
         printf("\nDataset: %d files, %lld words, %d unique\n",
                num_files,tot_word_cnt,hmap->map_used);
 
-    qsort(word_cnt + 1,hmap->map_used - 1,
-          sizeof(WRDCNT),qsort_compare_word_cnt);
+    /* Remove numbers from word_cnt[1..n-1]: they never get their own entry
+     * and are counted as <num>, or as unknown (<unk>) without VOCAB_NUM.
+     */
+    int used = hmap->map_used < max_vocab ? hmap->map_used : max_vocab;
+    long long num_cnt = 0;
+    int n = 1;
+    for (int i = 1; i < used; i++) {
+        if (vocab_is_number(hashmap_inx2str(hmap,word_cnt[i].inx)))
+            num_cnt += word_cnt[i].cnt;
+        else
+            word_cnt[n++] = word_cnt[i];
+    }
 
-    long long wcnt = 0;
-    if (vocab_size <= 0) {
-        long long target = (long long)(coverage * (float) tot_word_cnt);
-        vocab_size = 1;
-        for (int i = 1; i < hmap->map_used && wcnt < target; i++) {
-            wcnt += word_cnt[i].cnt;
-            vocab_size = i + 1;
+    /* Move special tokens to word_cnt[1..nspec-1], always retained */
+    int nspec = 1;
+    for (int i = 1; i < n; i++) {
+        if (hashmap_inx2str(hmap,word_cnt[i].inx)[0] == '<') {
+            WRDCNT t = word_cnt[i];
+            word_cnt[i] = word_cnt[nspec];
+            word_cnt[nspec++] = t;
         }
     }
+
+    /* Rank ordinary words only */
+    qsort(word_cnt + nspec,n - nspec,sizeof(WRDCNT),qsort_compare_word_cnt);
+
+    /* Retained tokens: specials, numbers (if <num>), and top-ranked words */
+    long long wcnt = has_num ? num_cnt : 0;
+    for (int i = 1; i < nspec; i++)
+        wcnt += word_cnt[i].cnt;
+    int keep = nspec; /* Number of word_cnt entries retained */
+    if (vocab_size <= 0) {
+        long long target = (long long)(coverage * (double) tot_word_cnt);
+        while (keep < n && wcnt < target)
+            wcnt += word_cnt[keep++].cnt;
+    }
     else {
-        if (vocab_size > hmap->map_used)
-            vocab_size = hmap->map_used;
-        for (int i = 1; i < vocab_size; i++)
-            wcnt += word_cnt[i].cnt;
+        int lim = vocab_size < n ? vocab_size : n;
+        while (keep < lim)
+            wcnt += word_cnt[keep++].cnt;
     }
     coverage = tot_word_cnt ? (double) wcnt / tot_word_cnt : 0.0;
+
+    /* Re-index retained words into a compact hashmap; cnt[] is by new id */
+    HASHMAP* hmap2 = hashmap_create(3 * (keep + 2),hmap->mem_used);
+    long long* cnt = allocmem(keep + 2,1,long long);
+    memset(cnt,0,(keep + 2) * sizeof(long long));
+    for (int i = 0; i < keep; i++) { /* i == 0 is PAD ("") -> id 0 */
+        const char* w = hashmap_inx2str(hmap,word_cnt[i].inx);
+        cnt[hashmap_str2inx(hmap2,w,1)] = word_cnt[i].cnt;
+    }
+    hashmap_free(hmap);
+    freemem(word_cnt);
+
+    /* <unk>/<num> reuse the corpus entry if the corpus already has one */
+    int unk_id = 0;
+    if (has_unk) {
+        unk_id = hashmap_str2inx(hmap2,"<unk>",1);
+        cnt[unk_id] += tot_word_cnt - wcnt; /* Dropped tokens */
+    }
+    int num_id = 0;
+    if (has_num) {
+        num_id = hashmap_str2inx(hmap2,"<num>",1);
+        cnt[num_id] += num_cnt;
+    }
+
+    /* Use the retained vocabulary */
+    hmap = hmap2;
+    vocab_size = hmap->map_used;
     if (verbose)
         printf("Vocabulary limited to %d words, covering %2.0f%% of corpus\n",
                vocab_size, 100.0 * coverage);
 
-    /* Re-index retained words into a compact hashmap */
-    HASHMAP* hmap2 = hashmap_create(vocab_size * 3,hmap->mem_used);
-    hashmap_str2inx(hmap2, "", 1); /* PAD at 0 */
-    for (int i = 1; i < vocab_size; i++) {
-        const char* w = hashmap_inx2str(hmap,word_cnt[i].inx);
-        if (strlen(w) == 0)
-            continue;
-        word_cnt[i].inx = hashmap_str2inx(hmap2,w,1);
-    }
-    hashmap_free(hmap);
-    
-    /* Use the retained vocabulary */
-    hmap = hmap2;
-    tot_word_cnt = wcnt;
+    long long total = 0; /* Tokens as seen by the model (PAD excluded) */
+    for (int i = 1; i < vocab_size; i++)
+        total += cnt[i];
 
     float* freq = NULL;
-    if (calc_freq) {/* Per-word frequencies */
+    if (calc_freq) {/* Per-word frequencies, indexed by token id */
         freq = allocmem(vocab_size,1,float);
         freq[0] = 0.0; /* PAD */
         for (int i = 1; i < vocab_size; i++)
-            freq[i] = tot_word_cnt ? (double) word_cnt[i].cnt / tot_word_cnt : 0.0;
+            freq[i] = total ? (double) cnt[i] / total : 0.0;
     }
 
     int* dist = NULL;
@@ -126,23 +189,25 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
         const float dpow = 0.75;
         const int dscale = 10;
         for (int i = 1; i < vocab_size; i++)
-            dist_size += (int) (powf(word_cnt[i].cnt,dpow) / dscale) + 1;
+            dist_size += (int) (powf(cnt[i],dpow) / dscale) + 1;
         dist = allocmem(dist_size,1,int);
         for (int i = 1, j = 0; i < vocab_size; i++) {
-            int rpt = (int)(powf(word_cnt[i].cnt,dpow) / dscale) + 1;
+            int rpt = (int)(powf(cnt[i],dpow) / dscale) + 1;
             for (int k = 0; j < dist_size && k < rpt; k++)
-                dist[j++] = word_cnt[i].inx;
+                dist[j++] = i;
         }
         if (verbose)
             printf("Distribution table size %d\n", dist_size);
     }
-    freemem(word_cnt);
+    freemem(cnt);
 
-    /* freq[i] is the word frequency of word stored at index i in hmap */
     VOCAB* v = allocmem(1,1,VOCAB);
     v->hmap = hmap;
     v->size = vocab_size;
     v->coverage = coverage;
+    v->unk_id = unk_id;
+    v->num_id = num_id;
+    v->tf_flags = tf_flags;
     v->freq = freq;
     v->dist = dist;
     v->dist_size = dist_size;
@@ -160,16 +225,11 @@ void vocab_free(VOCAB* v)
 
 int vocab_tokenize(const VOCAB* v, const char* text, int* out, int max)
 {
-    char buf[65536];
-    snprintf(buf, sizeof(buf), "%s", text);
-
+    char tok[101];
     int cnt = 0;
-    char* save = NULL;
-    char* tok = strtok_r(buf, " \t\r\n", &save);
-    while (tok != NULL) {
-        for (char* q = tok; *q != '\0'; q++)
-            *q = (char) tolower((unsigned char) *q);
-        int id = hashmap_str2inx(v->hmap, tok, 0);
+    for (const char* p = text_next_token(text,v->tf_flags,tok,101);
+         p != NULL; p = text_next_token(p,v->tf_flags,tok,101)) {
+        int id = vocab_lookup(v,tok); /* <unk>/<num> fallbacks */
         if (id > 0) {
             if (cnt < max) {
                 out[cnt++] = id;
@@ -182,7 +242,6 @@ int vocab_tokenize(const VOCAB* v, const char* text, int* out, int max)
         else {
             fprintf(stderr, "'%s' not in vocabulary - skipping\n",tok);
         }
-        tok = strtok_r(NULL, " \t\r\n", &save);
     }
     return cnt;
 }

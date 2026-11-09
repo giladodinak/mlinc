@@ -3,15 +3,20 @@
 #define VOCAB_H
 
 #include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 #include "hash.h"   /* HASHMAP */
 
 typedef struct VOCAB {
     HASHMAP* hmap;      /* Map word <-> index; index 0 = PAD       */
     int      size;      /* Number of entries including PAD         */
     float    coverage;  /* Fraction of corpus covered              */
+    int      unk_id;    /* id of <unk>, PAD if not used            */
+    int      num_id;    /* id of <num>, PAD if not used            */
     float*   freq;      /* [size] Unigram freq; NULL if unused     */
     int*     dist;      /* Negative-sampling table; NULL if unused */
     int      dist_size; /* Entries in dist, 0 if dist is NULL      */
+    int      tf_flags;  /* Tokenizer flags (TF_*) used by build    */
 } VOCAB;
 
 /* vocab_build - Builds a vocabulary by scanning a corpus
@@ -23,26 +28,57 @@ typedef struct VOCAB {
  *   vocab_size - Number of vocabulary words; 0 - derive from coverage
  *   coverage   - Target corpus-coverage fraction when vocab_size == 0
  *   max_vocab  - Maximum number of distinct words (typ. 3 x vocab_size)
- *   calc_freq  - If set, calculate and store word frequencies
- *   calc_dist  - If set, calculate and store negative sampling distribution
- *   verbose    - If set, print progress to stdout
+ *   flags      - Bitwise OR of optional flags
+ *       VOCAB_UNK     - unknown words mapped to <unk>; otherwise ignored
+ *       VOCAB_NUM     - numbers mapped to <num>; otherwise unknown words
+ *       VOCAB_SPECIAL - recognize <name> special tokens
+ *       VOCAB_FREQ    - calculate and store word frequencies
+ *       VOCAB_DIST    - calculate and store negative sampling distribution
+ *       VOCAB_VERBOSE - print progress to stdout
+ *
+ * Notes:
+ *   - With VOCAB_SPECIAL, special tokens (<name>, e.g. <bos> <eos> <sep>)
+ *     found in the corpus are always retained, regardless of frequency.
+ *   - With VOCAB_UNK, <unk> is added; its count is the number of corpus
+ *     tokens dropped from the vocabulary
+ *   - With VOCAB_NUM numbers are counted as <num>; otherwise they are
+ *     unknown words.
+ *   - vocab_size counts PAD, special tokens and words; <unk> and <num> are
+ *     added on top of it. The final size is in VOCAB.size.
  *
  * Returns:
  *   A VOCAB; returns NULL on failure.
  */
 VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
-                   int vocab_size, float coverage, int max_vocab,
-                   int calc_freq, int calc_dist, int verbose);
+                   int vocab_size, float coverage, int max_vocab, int flags);
+
+#define VOCAB_UNK      1
+#define VOCAB_NUM      2
+#define VOCAB_SPECIAL  4
+#define VOCAB_FREQ     8
+#define VOCAB_DIST    16
+#define VOCAB_VERBOSE 32
 
 /* vocab_free - Releases all memory owned by a VOCAB
  *
  * Frees the hashmap, and the frequency and distribution tables if they
- * exists; then free the VOCAB itself.
+ * exist; then free the VOCAB itself.
  *
  * Parameters:
  *   v - Pointer to the VOCAB
  */
 void vocab_free(VOCAB* v);
+
+/* vocab_is_number - True if word is a number token as produced by
+ * process_text_file with TF_NUMBER: starts with a digit and contains only
+ * digits, '.' and ',' (e.g. 42, 3.14, 1,000; not 2nd or mp3).
+ */
+static inline int vocab_is_number(const char* word)
+{
+    if (!isdigit((unsigned char) word[0]))
+        return 0;
+    return word[strspn(word,"0123456789.,")] == '\0';
+}
 
 /* vocab_lookup - Looks up the token id of a single word
  *
@@ -51,8 +87,10 @@ void vocab_free(VOCAB* v);
  *   word - A string representing the word
  *
  * Returns:
- *   The token id (integer) of the word, if it exists in the vocabulary;
- *   otherwise returns 0. The lookup is case insensitive.
+ *   The token id (integer) of the word, if it exists in the vocabulary.
+ *   Otherwise: the <num> id for a number if numbers are mapped; else the
+ *   <unk> id if unknown words are mapped; else 0 (PAD).
+ *   The lookup is case insensitive.
  */
 static inline int vocab_lookup(const VOCAB* v, const char* word)
 {
@@ -61,7 +99,12 @@ static inline int vocab_lookup(const VOCAB* v, const char* word)
     for (; word[i] != '\0' && i < sizeof(buf) - 1; i++)
         buf[i] = (char) tolower((unsigned char) word[i]);
     buf[i] = '\0';
-    return hashmap_str2inx(v->hmap,buf,0);
+    int id = hashmap_str2inx(v->hmap,buf,0);
+    if (id > 0)
+        return id;
+    if (v->num_id && vocab_is_number(buf))
+        return v->num_id;
+    return v->unk_id;
 }
 
 /* vocab_word - Returns the word string of a token id
@@ -80,11 +123,13 @@ static inline const char* vocab_word(const VOCAB* v, int id)
     return hashmap_inx2str(v->hmap,id);
 }
 
-/* vocab_tokenize - Split text on whitespace and map words to token ids
+/* vocab_tokenize - Split text into words and map them to token ids
  *
- * Split text on whitespace, lowercase each word, map to indices, and store up
- * to max ids in out[]. Out-of-vocabulary words are reported on stderr and
- * skipped (there is no <unk> token).
+ * Split text into words with the same rules used to read the training
+ * corpus (process_text_file), map them to indices, and store up to max ids
+ * in out[]. Words are mapped with vocab_lookup. Words that map to
+ * 0 (PAD), i.e. unknown words without <unk>, are reported on stderr and
+ * skipped.
  *
  * Parameters:
  *   v      - Pointer to the VOCAB

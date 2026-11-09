@@ -1,6 +1,8 @@
 /* Copyright (c) 2026 Gilad Odinak       */
 /* Decoder-only language model functions */
+#include <stdio.h>
 #include <string.h>
+#include <math.h>
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -176,7 +178,7 @@ static void lm_use_cache(LM* m, int on)
  *
  * Uses acts[i] row 0 as the inter-layer buffer (only one row).
  */
-fArr2D lm_forward_step(LM* m, int token_id, int offset)
+static fArr2D lm_forward_step(LM* m, int token_id, int offset)
 {
     int E = m->E;
 
@@ -281,7 +283,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
     buffer[0] = '\0';
     int bufext = 0;
     int bufpos = 0;
-    int s = 0;
+    int generated = 0;
 
     float* logits = allocmem(1,K,float);
     float* tmp = allocmem(1,K,float); /* Top-k selection */
@@ -318,7 +320,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
 
     int pos = seedlen; /* Absolute position of next token */
 
-    for (s = 0; s < steps; s++) {
+    for (int s = 0; s < steps && pos < T; s++, pos++) {
 
         /* Project the current hidden state onto the vocabulary: z = W_o h_t.
          * h_t already encodes the prompt (and tokens generated so far) via
@@ -437,6 +439,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
         if (bufext < 0 || bufext >= buflen - bufpos)
             break;
         bufpos += bufext;
+        generated++;
 
         /* Record the emitted token in the repetition window so the
          * repetition penalty can down-weight it on later steps.
@@ -456,7 +459,6 @@ int lm_generate(LM* m, HASHMAP* hmap,
          * x_1..x_m, y_1..y_s for the following step.
          */
         H = lm_forward_step(m,nxt,pos);
-        pos++;
     }
     if (bufpos > 0 && buffer[bufpos - 1] == ' ')
         buffer[bufpos - 1] = '\0';
@@ -464,5 +466,5 @@ int lm_generate(LM* m, HASHMAP* hmap,
     freemem(logits);
     freemem(tmp);
     freemem(recent);
-    return s; /* Actual number of words generated (excluding seed) */
+    return generated; /* Actual number of words generated (excluding seed) */
 }

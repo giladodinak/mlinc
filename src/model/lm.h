@@ -2,7 +2,8 @@
 /* Decoder-only language model data structure and functions */
 #ifndef LM_H
 #define LM_H
-#include "array.h"
+#include "arraytypes.h"
+#include "hash.h"
 #include "lmemb.h"
 #include "layer.h"
 #include "smsftmax.h"

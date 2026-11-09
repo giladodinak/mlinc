@@ -68,12 +68,20 @@ static int read_word_embeddings(FILE* fp,
     for (int lineno = 2; ; lineno++) {
         int wrdinx;
         char word[MAX_WORD];
-        cnt = fscanf(fp,"%d,%255[^,],",&wrdinx,word);
+        cnt = fscanf(fp,"%d,",&wrdinx);
         if (cnt == EOF) /* End of file */
             break;
-        if (cnt < 2) {
-            fprintf(stderr,"In read_word_embeddings: invalid index, word "
-                           "format at line %d\n",lineno);
+        if (cnt < 1) {
+            fprintf(stderr,"In read_word_embeddings: invalid word index "
+                                                        "at line %d\n",lineno);
+            goto err;
+        }
+        cnt = fscanf(fp,"\"%255[^\"]\",",word);
+        if (cnt < 1)
+            cnt = fscanf(fp,"%255[^,],",word);
+        if (cnt < 1) {
+            fprintf(stderr,"In read_word_embeddings: invalid word "
+                                                 "format at line %d\n",lineno);
             goto err;
         }
         /* The row index of a word is the index assigned by the hashmap;
@@ -153,7 +161,7 @@ static int write_word_embeddings(FILE* fp,
         const char* word = hashmap_inx2str(hmap,wrdinx);
         if (word == NULL || strlen(word) == 0)
             word = "<unk>";
-        cnt = fprintf(fp,"%d,%s",wrdinx,word);
+        cnt = fprintf(fp,"%d,\"%s\"",wrdinx,word);
         for (int j = 0; j < embedding_dim && cnt > 0; j++)
             cnt = fprintf(fp,",%10.8f",E[wrdinx][j]);
         if (cnt > 0)

@@ -194,7 +194,8 @@ void validate(LM* m, const VOCAB* vocab, char** files, int nfiles,
 
     for (int fi = 0; fi < nfiles; fi++) {
         int fwcnt = process_text_file(files[fi],data_dir,
-                  vocab->hmap,0,vocab_size,NULL,file_words,max_file_words);
+                                      vocab->hmap,0,vocab_size,NULL,
+                                      file_words,max_file_words,0);
         if (fwcnt <= 1)
             continue;
 
@@ -443,7 +444,8 @@ int main(int argc, char** argv)
         printf("Creating vocabulary from dataset\n");
         fflush(stdout);
         vocab = vocab_build(file_list,num_files,data_dir,
-                            vocab_size,vocab_coverage,max_vocab,1,1,1);
+                            vocab_size,vocab_coverage,max_vocab,
+                            VOCAB_FREQ | VOCAB_DIST | VOCAB_VERBOSE);
         if (vocab == NULL) {
             fprintf(stderr,"Failed to create vocabulary\n");
             free_text_file_list(file_list,num_files);
@@ -518,7 +520,8 @@ int main(int argc, char** argv)
         double last_report = current_time();
         for (int fi = 0; fi < act_num_files; fi++) {
             int fwcnt = process_text_file(file_list[fi],data_dir,
-                     vocab->hmap,0,vocab_size,NULL,file_words,max_file_words);
+                                          vocab->hmap,0,vocab_size,NULL,
+                                          file_words,max_file_words,0);
             if (fwcnt <= 1)
                 continue;
 

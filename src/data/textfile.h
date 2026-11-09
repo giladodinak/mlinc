@@ -7,7 +7,7 @@
 /* Stores frequency of a word in the dataset */
 typedef struct wrdcnt_s {
     int inx;   /* Word index in hashmap                            */
-    int cnt;   /* Number of times word was encountered in the txet */
+    int cnt;   /* Number of times word was encountered in the text */
 } WRDCNT;
 
 /* Processes an ASCII text file to create a word vocabulary, a word frequency
@@ -26,6 +26,9 @@ typedef struct wrdcnt_s {
  *                index for each word encountered in the file. If add_new is
  *                zero, words not in the vocabulary are ignored (skipped).
  *   max_words  - Size of file_words array
+ *   flags      - Bitwise OR of optional token types (0 = words only):
+ *                TF_SPECIAL - "<name>" tokens, e.g. <bos>, <eos>, <sep>
+ *                TF_NUMBER  - numbers, e.g. 42, 3.14, 1,000
  *
  * Returns:
  *  - If hmap is not NULL: Returns the number of words that were not skipped.
@@ -36,14 +39,44 @@ typedef struct wrdcnt_s {
  *  - Only consider alphabetic character sequences (and apostrophe), delimited
  *    by non-alphabetic characters, as words.
  *  - Convert all alphabetic characters to lowercase before further processing.
- *  - Apostrophe in the middle of alphabetic character string, but not agt the 
+ *  - Apostrophe in the middle of alphabetic character string, but not at the
  *    begining or end, is considered to be part of a word.
+ *  - With TF_SPECIAL, '<' followed by letters/digits/'_' and '>' is one
+ *    token (lowercased); any other '<' is a delimiter.
+ *  - With TF_NUMBER, digits are word characters, and '.' or ',' between
+ *    two digits is part of the word: 42, 3.14, 1,000, 2nd, mp3 are single
+ *    tokens. Otherwise digits are delimiters.
  */
 int process_text_file(const char* file_name,
                       const char* file_dir,
                       HASHMAP* hmap, int add_new,
                       int max_vocab, WRDCNT* word_cnt,
-                      int *file_words, int max_words);
+                      int *file_words, int max_words, int flags);
+
+#define TF_SPECIAL 1   /* <name> tokens  */
+#define TF_NUMBER  2   /* numeric tokens */
+
+/* Extracts the next token from a string.
+ *
+ * Parameters:
+ *   str   - A null-terminated string
+ *   flags - Bitwise OR of TF_SPECIAL and/or TF_NUMBER
+ *   token - Output buffer of at least len chars
+ *   tlen  - Size of token buffer.
+ *
+ * Returns:
+ *   Position past the token in str; NULL when there are no more tokens.
+ *   Writes the token into token buffer (null terminted).
+ *   Tokens longer than tlen - 1 are skipped.
+ *
+ * Example:
+ *   char tok[101];
+ *   for (const char* p = text_next_token(text,flags,tok,101);
+ *        p != NULL;
+ *        p = text_next_token(p,flags,tok,100))
+ *       ... use tok ...
+ */
+const char* text_next_token(const char* str, int flags, char* token, int tlen);
 
 /* Reads a list file containing file names (one per line), filters to include
  * only those files that end with the ".txt" extension (case-insensitive),
@@ -58,8 +91,6 @@ int process_text_file(const char* file_name,
  *
  * Returns an array of pointers to file names, or NULL on failure.
  * The returned array should be freed by calling free_text_file_list().
- *
- * Note that the function only returns file names, not full file paths.
  */
 char** read_text_file_list(const char* list_file,
                            const char* data_dir,
