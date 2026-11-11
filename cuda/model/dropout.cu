@@ -248,8 +248,13 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
     if (n <= 0) return;
     if (rate <= 0.0f) return;
 
-    if (rate >= 1.0f)
-        rate = nextafterf(1.0f,0.0f);
+    /* Drop everything; matches dropout.c. The counter is not advanced,
+     * since backward with rate >= 1 does not regenerate a mask.
+     */
+    if (rate >= 1.0f) {
+        cudaMemsetAsync(mx_,0,(size_t) n * sizeof(float),cuda_stream());
+        return;
+    }
 
     DROPOUT_RNG* rng = (DROPOUT_RNG*) l->rng_state;
 
@@ -283,8 +288,12 @@ void dropout_backward(DROPOUT* restrict l,
     if (n <= 0) return;
 
     float rate = l->rate;
-    if (rate >= 1.0f)
-        rate = nextafterf(1.0f,0.0f);
+
+    /* All elements were dropped in forward; gradient is zero */
+    if (rate >= 1.0f) {
+        cudaMemsetAsync(out_,0,(size_t) n * sizeof(float),cuda_stream());
+        return;
+    }
 
     if (rate <= 0.0f) {
         if (in_ != out_) {
