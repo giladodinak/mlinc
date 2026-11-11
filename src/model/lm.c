@@ -299,8 +299,10 @@ int lm_generate(LM* m, HASHMAP* hmap,
     for (int i = 0; i < seedlen && buflen > 1; i++) {
         bufext = snprintf(buffer + bufpos,buflen - bufpos,
                           "%s ",hashmap_inx2str(hmap,seed[i]));
-        if (bufext < 0 || bufext >= buflen - bufpos)
+        if (bufext < 0 || bufext >= buflen - bufpos) {
+            buffer[bufpos] = '\0'; /* Drop the partially outputted token */
             break;
+        }
         bufpos += bufext;
     }
 
@@ -433,11 +435,13 @@ int lm_generate(LM* m, HASHMAP* hmap,
                     nxt = k;
         }
 
-        /* Emit the chosen token's surface string into the output buffer. */
+        /* Output the chosen token's string */
         bufext = snprintf(buffer + bufpos,buflen - bufpos,
                           "%s ",hashmap_inx2str(hmap,nxt));
-        if (bufext < 0 || bufext >= buflen - bufpos)
+        if (bufext < 0 || bufext >= buflen - bufpos) {
+            buffer[bufpos] = '\0'; /* Drop the partially outputted token */
             break;
+        }
         bufpos += bufext;
         generated++;
 
