@@ -109,8 +109,7 @@ int main(int argc, char **argv)
         int sequences[beamwidth][MTe + 1];
         float scores[beamwidth];
         ctc_beam_search(yp,MTe,N,beamwidth,sequences,scores);
-        for (ypc_len = 0; sequences[0][ypc_len] != SIL; ypc_len++)
-            ;
+        for (ypc_len = 0; sequences[0][ypc_len] != SIL; ypc_len++);
         memcpy(ypc,sequences[0],ypc_len * sizeof(int));
     }
     else {
