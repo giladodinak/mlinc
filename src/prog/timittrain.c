@@ -191,10 +191,10 @@ int timit_lstm_dense_classification(
 
 
     /* Create file name stem for this run */
-    char ls[40];
+    char ls[128];
     for (int i = 0, a = 0, n = layers_cnt; i < n; i++)
         a += snprintf(ls + a,sizeof(ls) - a,"%d%s",layers[i],((i<n-1)?"_":""));
-    char fns[128];
+    char fns[256];
     if (learning_rate == 0 && schedule != NULL) {
         snprintf(fns,sizeof(fns),"e%d-b%d-S%s-L%s-pid-%d",
              epochs,batch_size,schedule,ls,getpid());
@@ -311,7 +311,7 @@ int timit_lstm_dense_classification(
     int off;        /* Current sequence offset within test data     */
     float mcnt;     /* Number of matching raw labels                */
     /* Variables for similarity calculations */
-    int phcnt;      /* Reference phoneme count (includes blanks)    */
+    int phcnt;      /* Reference phoneme count (excludes blanks)    */
     int dist1;      /* Raw label sequences edit distance (numerator)*/
     int dist2;      /* Phoneme sequences edit distance              */
     int dist3;      /* Beam search phoneme sequences edit distacne  */
@@ -371,8 +371,7 @@ int timit_lstm_dense_classification(
             float scores[beamwidth];
             /* Sequences are already collapsed and SIL terminated */
             ctc_beam_search(yp,timesteps,nc,beamwidth,sequences,scores);
-            for (ypc_len = 0; sequences[0][ypc_len] != SIL; ypc_len++)
-                ;
+            for (ypc_len = 0; sequences[0][ypc_len] != SIL; ypc_len++);
             memcpy(ypc,sequences[0],ypc_len * sizeof(int));
         }
 
