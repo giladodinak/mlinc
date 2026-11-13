@@ -52,7 +52,7 @@ static __global__ void ctc_decode_kernel(const float* yp,
             float p = yp[k + l];
             float y = yt[k + l];
 
-            logyp[k + l] = logf(p);
+            logyp[k + l] = logf(fmaxf(p,1e-30f));
 
             if (p > ypmax) {
                 ypmax = p;
