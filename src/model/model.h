@@ -3,7 +3,7 @@
 #ifndef MODEL_H
 #define MODEL_H
 #include <math.h>
-#include "array.h"
+#include "arraytypes.h"
 #include "loss.h"
 #include "ctc.h"
 #include "adamw.h"
@@ -49,7 +49,8 @@ void model_free(MODEL* m);
 /* Adds a layer to a model
  * m points to a model
  * layer points to a neural network (e.g. DENSE) to be added as a layer
- * type is the type of the layer: "dense", "lstm" or "transformer"
+ * type is the type of the layer: "dense", "lstm", "transformer",
+ * "negsample" or "dropout"
  * 
  * The layer is added after all other layers in the model
  */

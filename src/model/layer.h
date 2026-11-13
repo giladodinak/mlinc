@@ -3,23 +3,26 @@
 #ifndef LAYER_H
 #define LAYER_H
 #include <stdio.h>
+#include "mem.h"
 #include "array.h"
 #include "dense.h"
 #include "lstm.h"
 #include "transformer.h"
 #include "negsample.h"
+#include "dropout.h"
 
 typedef struct layer_s {
-    char type;      /* (d)ense (l)stm (t)ransformer (n)egsample */
+    char type;      /* (d)ense (l)stm (t)ransformer (n)egsample drop(o)ut */
     union {
         DENSE* dense;
         LSTM* lstm;
         TRANSFORMER* transformer;
         NEGSAMPLE* negsample;
+        DROPOUT* dropout;
     };
     fArr2D* opt_state; /* Array of optimizer state buffers */
     int num_opt_state; /* Number of entries in opt_state[] */
-    fArr2D out;        /* Scratch buffer                   */
+    fArr2D out;        /* Output buffer (transformer, dropout) */
 } LAYER;
 
 /* Reports use of a not-yet-implemented layer type and aborts. */
@@ -45,6 +48,7 @@ static inline int layer_output_dim(const LAYER* l)
         case 'l': return l->lstm->S;
         case 't': return l->transformer->D; /* in == out  */
         case 'n': return l->negsample->E;   /* passthrout */
+        case 'o': return l->dropout->D;     /* in == out  */
     }
     layer_unsupported("layer_output_dim",l->type);
     return 0; /* not reached */
@@ -58,6 +62,7 @@ static inline int layer_batch_size(const LAYER* l)
         case 'l': return l->lstm->B;
         case 't': return l->transformer->BT; /* row count is B*T */
         case 'n': return l->negsample->B;
+        case 'o': return l->dropout->B;
     }
     layer_unsupported("layer_batch_size",l->type);
     return 0; /* not reached */
@@ -82,6 +87,17 @@ static inline fArr2D layer_forward(LAYER* l,
             transformer_forward(l->transformer,X,training,l->out,lyr);
             return l->out;
         case 'n': return negsample_forward(l->negsample,X,lyr);
+        case 'o':
+            /* Masks a copy of X, so the producing layer's own output
+             * (e.g. LSTM h, read again by its backward) stays intact.
+             * Pass-through when not training or rate is 0.
+             */
+            if (training && l->dropout->rate > 0) {
+                nnfltcpy(l->out,X,l->dropout->B * l->dropout->D);
+                dropout_forward(l->dropout,l->out);
+                return l->out;
+            }
+            return (fArr2D) X;
     }
     layer_unsupported("layer_forward",l->type);
     return NULL; /* Not reached */
@@ -113,6 +129,14 @@ static inline void layer_backward(LAYER* l, fArr2D dy,
             return;
         case 'n':
             negsample_backward(l->negsample,dy,dx,lyr);
+            return;
+        case 'o':
+            if (dx == NULL)
+                return;
+            if (l->dropout->rate > 0)
+                dropout_backward(l->dropout,dy,dx);
+            else
+                nnfltcpy(dx,dy,l->dropout->B * l->dropout->D);
             return;
     }
     layer_unsupported("layer_backward",l->type);

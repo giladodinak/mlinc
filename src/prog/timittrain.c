@@ -15,6 +15,7 @@
 #include "array.h"
 #include "dense.h"
 #include "lstm.h"
+#include "dropout.h"
 #include "accuracy.h"
 #include "model.h"
 #include "modelio.h"
@@ -115,6 +116,9 @@ int reference_labels(iVec restrict labels, int len, int blank_inx)
  *
  * layers_cnt is the number of entries in layers array.
  *
+ * dropout_rate, if greater than 0, adds a dropout layer with this rate after
+ * each LSTM layer (ignored if a model is loaded from a file).
+ *
  * if ctc_mode is not zero, trains model using ctc loss function, and decodes
  * using beam search. Otherwise, trains model using cross entropy loss, and
  * collapses identical labels while decoding.
@@ -123,7 +127,8 @@ int reference_labels(iVec restrict labels, int len, int blank_inx)
  */
 int timit_lstm_dense_classification(
                         const char* loadmodel, const char* storemodel,
-                        int layers[], int layers_cnt, int rng_seed, 
+                        int layers[], int layers_cnt,
+                        int rng_seed, float dropout_rate,
                         int ctc_mode, char* optimizer, int batch_size,
                         float learning_rate, 
                         float weight_decay, 
@@ -139,6 +144,8 @@ int timit_lstm_dense_classification(
     const int D = EXPENDED_FEAT_CNT;    /* Expended input vectors dimension */
     const int N = REDUCED_PHONEME_CNT;  /* Output vector dimension          */
     int L = layers_cnt + 1;             /* Number of layers                 */
+    if (dropout_rate > 0)               /* One dropout after each LSTM      */
+        L += layers_cnt;
     int B = batch_size;                 /* Batch size                       */
 
     MODEL* m;
@@ -151,12 +158,15 @@ int timit_lstm_dense_classification(
             model_set_batch_size(m,B);
         else /* use original model batch size */
             B = m->batch_size;
-        layers_cnt = m->num_layers - 1;
-        for (int i = 0; i < layers_cnt; i++) {
+        /* Collect LSTM sizes and dropout rate; skip the output layer */
+        layers_cnt = 0;
+        dropout_rate = 0;
+        for (int i = 0; i < m->num_layers - 1; i++) {
             LAYER l = m->layer[i];
             switch(l.type) {
-                case 'd': layers[i] = l.dense->S; break;
-                case 'l': layers[i] = l.lstm->S; break;
+                case 'd': layers[layers_cnt++] = l.dense->S; break;
+                case 'l': layers[layers_cnt++] = l.lstm->S; break;
+                case 'o': dropout_rate = l.dropout->rate; break;
             }
         }
     }
@@ -165,9 +175,11 @@ int timit_lstm_dense_classification(
         if (B < 0)
             B = -B;
         m = model_create(L,B,D,1);
-        model_add(m,lstm_create(layers[0],1,1),"lstm"); 
-        for (int i = 1; i < L - 1; i++)
+        for (int i = 0; i < layers_cnt; i++) {
             model_add(m,lstm_create(layers[i],1,1),"lstm");
+            if (dropout_rate > 0)
+                model_add(m,dropout_create(dropout_rate),"dropout");
+        }
         model_add(m,dense_create(N,"softmax",1),"dense");
         model_compile(m,loss_func,optimizer);
     }
@@ -175,10 +187,12 @@ int timit_lstm_dense_classification(
     init_lrng(rng_seed);
     printf("Random number generator seed is %d\n",rng_seed);
 
-    printf("%d layers (including output layer) ",L);
+    printf("%d layers (including output layer) ",layers_cnt + 1);
     for (int i = 0; i < layers_cnt; i++)
         printf("%d,",layers[i]);
     printf("%d.\n",N);
+    if (dropout_rate > 0)
+        printf("Dropout rate %.3g after each LSTM layer.\n",dropout_rate);
     printf("Input dimension %d. Expended input dimension %d. Batch size %d.\n",
                                                                        Dr,D,B);
     printf("%d epochs, ",epochs);
@@ -194,6 +208,10 @@ int timit_lstm_dense_classification(
     char ls[128];
     for (int i = 0, a = 0, n = layers_cnt; i < n; i++)
         a += snprintf(ls + a,sizeof(ls) - a,"%d%s",layers[i],((i<n-1)?"_":""));
+    if (dropout_rate > 0) {
+        int a = strlen(ls);
+        snprintf(ls + a,sizeof(ls) - a,"-d%g",dropout_rate);
+    }
     char fns[256];
     if (learning_rate == 0 && schedule != NULL) {
         snprintf(fns,sizeof(fns),"e%d-b%d-S%s-L%s-pid-%d",
@@ -462,7 +480,8 @@ int main(int argc, char** argv)
       "             [-r <learning rate>] [-w weight decay] [-b <batch size>]\n"
       "             [-L 's1 s2 ...'] [-S e:lr:wd,e:lr:wd,...]               \n"
       "             [-l <model file>] [-s <model file>]                     \n"
-      "             [-R <rng seed>] [-ctc | -cross-entropy]                 \n"
+      "             [-R <rng seed>] [-d <dropout rate>]                     \n"
+      "             [-ctc | -cross-entropy]                                 \n"
       "                                                                     \n"
       " -L: LSTM layer specification. One additional output layer           \n"
       "     is implied. So for example -L '128 64' specifies two            \n"
@@ -474,6 +493,8 @@ int main(int argc, char** argv)
       " -l: Load model from file and continue to train for number           \n"
       "     of epochs specified by -e; ignore -L option.                    \n"
       " -s: Store model in file at the end of training                      \n"
+      " -d: Add a dropout layer with this rate after each LSTM layer        \n"
+      "     (default 0, no dropout); ignored with -l.                       \n"
       "\n";
 
     int epochs = 25;
@@ -486,8 +507,9 @@ int main(int argc, char** argv)
     int layers[maxlyrcnt+1] = {128,128,128};
     int ctc_mode = 1;
     int rng_seed = 42;
+    float dropout_rate = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "e:l:s:b:r:w:L:S:R:c:h")) != -1) {
+    while ((opt = getopt(argc, argv, "e:l:s:b:r:w:L:S:R:d:c:h")) != -1) {
         switch (opt) {
             case 'h': printf(usage); exit(0);
             case 'e': epochs = atoi(optarg); break;
@@ -508,6 +530,7 @@ int main(int argc, char** argv)
             break;
             case 'S': sch = optarg; break;
             case 'R': rng_seed = atoi(optarg); break;
+            case 'd': dropout_rate = atof(optarg); break;
             case 'c': /* optarg contains the option string sans first character */
                 if (strcmp(optarg,"tc") == 0)
                     ctc_mode = 1;
@@ -528,6 +551,6 @@ int main(int argc, char** argv)
     }
     int ok;
     ok = timit_lstm_dense_classification(loadfile,storefile,layers,lyrcnt,
-                            rng_seed,ctc_mode,"adamw",bsize,lr,wd,epochs,sch);
+                rng_seed,dropout_rate,ctc_mode,"adamw",bsize,lr,wd,epochs,sch);
     return (ok) ? 0 : -1;
 }

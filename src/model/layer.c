@@ -42,6 +42,11 @@ int layer_init(LAYER* l, int input_dim, int batch_size)
         case 'n':
             negsample_init(l->negsample,input_dim,batch_size,1);
             return l->negsample->E;
+        case 'o':
+            dropout_init(l->dropout,input_dim,batch_size);
+            if (l->dropout->rate > 0)
+                l->out = nnallocmem(batch_size,input_dim,float);
+            return input_dim;
     }
     layer_unsupported("layer_init",l->type);
     return 0; /* not reached */
@@ -54,6 +59,7 @@ void layer_reset(LAYER* l)
         case 'l': lstm_reset(l->lstm); break;
         case 't': /* transformer carries no cross-batch state */ break;
         case 'n': negsample_reset(l->negsample); break;
+        case 'o': /* model_fit already resets at sequence end */ break;
     }
 }
 
@@ -130,6 +136,12 @@ void layer_alloc_opt_state(LAYER* l, char optimizer)
             l->num_opt_state = 0;
         }
         break;
+        case 'o': {
+            /* No trainable parameters */
+            l->opt_state = NULL;
+            l->num_opt_state = 0;
+        }
+        break;
     }
 }
 
@@ -150,6 +162,7 @@ void layer_free(LAYER* l)
         case 'l': lstm_free(l->lstm); break;
         case 't': transformer_free(l->transformer); nnfreemem(l->out); break;
         case 'n': negsample_free(l->negsample); break;
+        case 'o': dropout_free(l->dropout); nnfreemem(l->out); break;
     }
     layer_free_opt_state(l);
 }
@@ -166,6 +179,14 @@ void layer_set_batch_size(LAYER* l, int batch_size)
             exit(-1);
         break;
         case 'n': negsample_set_batch_size(l->negsample,batch_size); break;
+        case 'o':
+            if (l->dropout->B == 0 || l->dropout->B == batch_size) break;
+            dropout_set_batch_size(l->dropout,batch_size);
+            if (l->out != NULL) {
+                nnfreemem(l->out);
+                l->out = nnallocmem(batch_size,l->dropout->D,float);
+            }
+        break;
     }
 }
 
@@ -278,6 +299,8 @@ void layer_update(LAYER* l, char optimizer,
         case 'n': /* Sparse SGD over touched rows, any optimizer */
             (void) uc;
             negsample_update(l->negsample,lr,wd);
+        break;
+        case 'o': /* No trainable parameters */
         break;
     }
 }

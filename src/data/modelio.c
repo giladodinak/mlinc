@@ -13,6 +13,7 @@
 #include "xfmrio.h"
 #include "negsample.h"
 #include "negsampio.h"
+#include "dropout.h"
 #include "model.h"
 #include "modelio.h"
 #include "ctc.h"
@@ -98,6 +99,20 @@ MODEL* read_model(FILE* fp)
                 l->negsample = read_negsample(fp);
                 ok = (l->negsample != NULL);
             break;
+            case 'o': { /* dropout: no weights, only its configuration */
+                float rate;
+                int D, B;
+                cnt = fscanf(fp," DROPOUT rate " FMTF " input_dim %d "
+                             "batch_size %d\n",&rate,&D,&B);
+                ok = (cnt == 3);
+                if (ok) {
+                    l->dropout = dropout_create(rate);
+                    layer_init(l,D,B); /* dropout_init + output buffer */
+                }
+            }
+            break;
+            default:
+                ok = 0;
         }
         if (!ok) {
             fprintf(stderr,
@@ -231,6 +246,10 @@ int write_model(const MODEL* m, int final, FILE* fp)
             case 'l': ok = write_lstm(l->lstm,fin,fp); break;
             case 't': ok = write_transformer(l->transformer,fin,fp); break;
             case 'n': ok = write_negsample(l->negsample,fin,fp); break;
+            case 'o': ok = fprintf(fp,
+                "DROPOUT rate %.6g input_dim %d batch_size %d\n",
+                l->dropout->rate,l->dropout->D,l->dropout->B) > 0; break;
+            default: ok = 0;
         }
         if (!ok) {
             fprintf(stderr,

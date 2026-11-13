@@ -14,6 +14,7 @@
 #include "lstm.h"
 #include "transformer.h"
 #include "negsample.h"
+#include "dropout.h"
 #include "layer.h"
 #include "activation.h"
 #include "clip.h"
@@ -21,7 +22,6 @@
 #include "normalize.h"
 #include "accuracy.h"
 #include "model.h"
-#include "modelio.h"
 
 static void model_batch_forward(MODEL* m, fArr2D x, int training, fArr2D* yp);
 static void model_batch_backward(MODEL* m, fArr2D x, fArr2D* dy, fArr2D* yp);
@@ -81,7 +81,8 @@ void model_free(MODEL* m)
 /* Adds a layer to a model
  * m points to a model
  * layer points to a neural network (e.g. DENSE) to be added as a layer
- * type is the type of the layer: "dense", "lstm", "transformer" or "negsample"
+ * type is the type of the layer: "dense", "lstm", "transformer", "negsample"
+ * or "dropout"
  *
  * The layer is added after all other layers in the model
  */
@@ -111,6 +112,10 @@ void model_add(MODEL* m, void* layer, const char* type)
     if (!strcasecmp("negsample",type)) {
         m->layer[i].type = 'n';
         m->layer[i].negsample = layer;
+    }
+    if (!strcasecmp("dropout",type)) {
+        m->layer[i].type = 'o';
+        m->layer[i].dropout = layer;
     }
     if (m->layer[i].type == 0) {
         fflush(stdout);
