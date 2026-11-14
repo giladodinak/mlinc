@@ -39,7 +39,7 @@ int dedup_labels(iVec restrict labels, int len, int blank_inx)
 }
 
 
-/* Extracts one label per phoneme using the EOP markers, removing silence.
+/* Removes silence from a sequence of phoneme labels.
  * Preserves consecutive identical phonemes.
  * Modifies the array labels in place and returns the new length.
  */
@@ -47,8 +47,8 @@ int reference_labels(iVec restrict labels, int len, int blank_inx)
 {
     int j, k;
     for (j = 0, k = 0; j < len; j++)
-        if (labels[j] >= EOP && labels[j] - EOP != blank_inx)
-            labels[k++] = labels[j] - EOP;
+        if (labels[j] != blank_inx)
+            labels[k++] = labels[j];
     return k;
 }
 
@@ -73,6 +73,8 @@ int main(int argc, char **argv)
     int MTe = 1000;         /* Max number of samples 10 seconds */
     float xTe[MTe][D];      /* Input feature vectors            */
     int   yTec[MTe];        /* Phoneme indices (true labels)    */
+    int   phTe[MTe];        /* Phoneme sequence (true labels)   */
+    int   phcnt = 0;        /* Number of labels in phTe         */
 
     FILE* fp = fopen(featfile,"rb");
     if (fp == NULL) {
@@ -80,17 +82,30 @@ int main(int argc, char **argv)
         model_free(m);
         return -1;    
     }
-    int cnt = read_feature_file(fp,MTe,xTe,yTec);
+    /* Label file has the feature file's name, with LAB extension */
+    char labfile[strlen(featfile) + 5];
+    strcpy(labfile,featfile);
+    char* ext = strrchr(labfile,'.');
+    strcpy((ext != NULL) ? ext : labfile + strlen(labfile),".LAB");
+    FILE* lfp = fopen(labfile,"rb");
+    if (lfp == NULL) {
+        fprintf(stderr,"Failed to open file '%s' for read\n",labfile);
+        fclose(fp);
+        model_free(m);
+        return -1;    
+    }
+    int cnt = read_feature_file(fp,lfp,MTe,xTe,yTec,MTe,phTe,&phcnt);
     fclose(fp);
+    fclose(lfp);
     if (cnt == 0) {
         printf("feature file does not contain any data\n");
         model_free(m);
         return 0;
     }
     MTe = cnt; /* Actual number of samples */
-    int ytc[MTe];       /* True labels             */
-    memcpy(ytc,yTec,MTe * sizeof(int));
-    int ytc_len = reference_labels(ytc,MTe,SIL);
+    int ytc[phcnt + 1]; /* True labels             */
+    memcpy(ytc,phTe,phcnt * sizeof(int));
+    int ytc_len = reference_labels(ytc,phcnt,SIL);
     /* Each sequence contains multiple phonemes, find how many in total */
     int PTe = count_phoneme(yTec,MTe);
 

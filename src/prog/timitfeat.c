@@ -22,17 +22,27 @@
 /* Audio is divided into frames. For each frame compute LPC parameters,
  * and the residual error variance. Convert the LPC's to LSP's and the 
  * variance to standard deviation, sigma*. Calculate zero crossing ratio.
- * These values comprise a frame's feature vector. Feature vectors are
- * grouped into segments. Each segment spans one phoneme. If a segment
- * (phoneme) is shorter than one frame, no data is collected for it; 
- * if it is longer than maximum number of frames, only that number of
- * frames around the center of the phoneme is used.
+ * These values comprise a frame's feature vector.
  * *sigma = normalized lpc error residual = -log(err_res + 1e-7) / 30;
+ *
+ * For each audio file two output files are written:
+ *
+ * <name>.FEAT - all frames of the utterance, in time order, one row per
+ *               frame: frame index followed by the frame's features.
+ *               Frames are never dropped, cropped or synthesized.
+ *
+ * <name>.LAB  - the utterance's phonemes, in order, one row per phoneme:
+ *               phoneme name, label, start and end time in seconds, and
+ *               start and end position in (fractional) frame units.
+ *               Phonemes shorter than one frame are kept.
+ *
+ * Frame i is analyzed with a window spanning frames i-1 and i, so its
+ * center is at time i * FRAMETIME.
  */
 #define MAXFILELEN   10 /* Audio length in *seconds*         */
 #define FRAMETIME    10 /* Audio length in *milliseconds*    */
+#define TARGETRATE 8000 /* Features computed at this rate Hz */
 #define FRAMEFEATCNT 14 /* Features per audio frame          */
-#define MAXSEGMENT   32 /* Max number of frames in a segment */
 #define LPCORDER (FRAMEFEATCNT - 2) /* preceeded by zcr and sigma    */
 
 #ifndef __APPLE__
@@ -65,9 +75,6 @@ int frmcnt = 0; /* Actual number of rows in frame_features[][] */
 #define PHSIZE ((MAXFILELEN * 1000) / FRAMETIME) 
 PHNINFO phonemes[PHSIZE]; /* Phonemes of the entire audio file     */
 int phncnt = 0;           /* Acutal number of entries in phoneme[] */
-
-/* Maximum number of features in one segment */
-#define MAX_FEATURES MAXSEGMENT * (FRAMEFEATCNT + 1)
 
 /* Check if a float value is a number. Works even when using -ffast-math */
 static int isnumber(float f)
@@ -108,6 +115,10 @@ int main(int argc, char **argv)
         return 0;
     }
     init_lrng(42);
+    /* Feature statistics accumulated over all files */
+    double stat_sum[FRAMEFEATCNT] = {0.0};
+    double stat_sumsq[FRAMEFEATCNT] = {0.0};
+    long stat_cnt = 0;
     int fileno;
     for (fileno = 0;; fileno++) { /* Process one audio, phoneme file pair */
         /* Construct file path to the files */
@@ -136,8 +147,18 @@ int main(int argc, char **argv)
             continue;
         }
         int sample_rate = sfin.sampleRate;
+        int decim = sample_rate / TARGETRATE; /* Decimation factor */
+        if (decim < 1 || decim * TARGETRATE != sample_rate) {
+            fprintf(stderr,"Sample rate %d of '%s' is not a multiple of %d"
+                           " - skipping\n",sample_rate,fn,TARGETRATE);
+            closeSphereFile(sfp);
+            continue;
+        }
+        /* Input samples per frame; also maps PHN sample positions to frames */
         int frame_sample_cnt = ((sample_rate * FRAMETIME) / 1000);
-        size_t winSize = 2 * frame_sample_cnt;
+        /* Samples per frame after decimation */
+        int out_frame_cnt = frame_sample_cnt / decim;
+        size_t winSize = 2 * out_frame_cnt;
         float window[winSize];
         HANNWIN hannWin;
         int rv = hannWindowInit(&hannWin,winSize);
@@ -149,11 +170,12 @@ int main(int argc, char **argv)
         float rdBuf[winSize];
         memset(rdBuf,0,winSize * sizeof(rdBuf[0]));
         
-        FILTER filter1, filter2, filter3;
+        FILTER filter1, filter2, filter3, filter4;
         int rv3 = initFilter(&filter3,4,"h",sample_rate,180);
-        int rv2 = initFilter(&filter2,4,"l",sample_rate,3600);
+        int rv2 = initFilter(&filter2,4,"l",sample_rate,3400);
         int rv1 = initFilter(&filter1,1,"h",sample_rate,2000);
-        if (rv3 == -1 ||rv2 == -1 || rv1 == -1) {
+        int rv4 = initFilter(&filter4,4,"l",sample_rate,3400);
+        if (rv3 == -1 ||rv2 == -1 || rv1 == -1 || rv4 == -1) {
             fprintf(stderr,"Failed to initialize filter(s) for '%s' - skipping\n",fn);
             closeSphereFile(sfp);
             continue;
@@ -188,9 +210,11 @@ int main(int argc, char **argv)
 
         /* Extract features from audio */
         frmcnt = 0;
-        size_t fsize = winSize / 2;
+        size_t fsize = frame_sample_cnt; /* Input samples per frame  */
+        size_t osize = out_frame_cnt;    /* Output samples per frame */
         while (frmcnt < FRAMEARRSIZE) {
             float fltBuf[fsize];
+            float decBuf[osize];
             
             size_t fcnt = readSphereAudio(sfp,fltBuf,fsize);
             if (fcnt <= 0) /* EOF (or error) */
@@ -206,11 +230,16 @@ int main(int argc, char **argv)
             runFiler(&filter3,fltBuf,fltBuf,fsize);
             runFiler(&filter2,fltBuf,fltBuf,fsize);
             runFiler(&filter1,fltBuf,fltBuf,fsize);
+            runFiler(&filter4,fltBuf,fltBuf,fsize);
 
-            double zcr = zeroCrossings(fltBuf,fsize);
+            /* Decimate to TARGETRATE */
+            for (size_t i = 0; i < osize; i++)
+                decBuf[i] = fltBuf[i * decim];
 
-            for (int i = 0; i < (int) fsize; i++)
-                rdBuf[fsize + i] = fltBuf[i];
+            double zcr = zeroCrossings(decBuf,osize);
+
+            for (int i = 0; i < (int) osize; i++)
+                rdBuf[osize + i] = decBuf[i];
 
             hannWindow(&hannWin,rdBuf,window,winSize);
 
@@ -233,10 +262,20 @@ int main(int argc, char **argv)
              
             frmcnt++;
             
-            memmove(rdBuf,rdBuf + fsize,fsize * sizeof(rdBuf[0]));
-            memset(rdBuf + fsize,0,fsize * sizeof(rdBuf[0]));
+            memmove(rdBuf,rdBuf + osize,osize * sizeof(rdBuf[0]));
+            memset(rdBuf + osize,0,osize * sizeof(rdBuf[0]));
         }
         closeSphereFile(sfp);
+
+        /* Accumulate statistics; feature 1 as written to the file */
+        for (int i = 0; i < frmcnt; i++)
+            for (int j = 0; j < FRAMEFEATCNT; j++) {
+                double v = (j == 1) ? -log(frame_features[i][1] + 1e-7) / 30
+                                    : frame_features[i][j];
+                stat_sum[j] += v;
+                stat_sumsq[j] += v * v;
+            }
+        stat_cnt += frmcnt;
 
         /* TIMIT file names start with either TEST or TRAIN.
          * Skip file path prefix that precedes that, if one exists
@@ -247,104 +286,83 @@ int main(int argc, char **argv)
         if (tfn != NULL)
             fn = tfn;
                 
-        /* Create an output file path that is the path of the 
-         * input file in the output directory, with FEAT extension.
+        /* Create output file paths that are the path of the input file
+         * in the output directory, with FEAT and LAB extensions.
          */
         ext = rindex(fn,'.'); /* fn ends with ".PHN" */
         *ext = '\0'; /* Remove previous file name suffix */
-        
+
         char outfn[3 * maxpath];
-        snprintf(outfn,sizeof(outfn) - 1,"%s/%s.FEAT",featdir,fn);
+        snprintf(outfn,sizeof(outfn) - 6,"%s/%s",featdir,fn);
         for (int i = strlen(featdir) + 1; i < (int) strlen(outfn); i++)
             if (outfn[i] == '/')
                 outfn[i] = '_';
+        char *outext = outfn + strlen(outfn); /* Extension goes here */
 
+        /* Warn if phonemes extend past the extracted frames */
+        int last_frame = phonemes[phncnt - 1].endPos / frame_sample_cnt;
+        if (last_frame > frmcnt + 1)
+            fprintf(stderr,"Phonemes of '%s' end at frame %d, audio has "
+                           "%d frames\n",fn,last_frame,frmcnt);
+
+        /* Feature file: all frames, in time order, one row per frame */
+        strcpy(outext,".FEAT");
         FILE *fp1 = fopen(outfn,"wb");
         if (fp1 == NULL) {
             fclose(fp);
             fprintf(stderr,"Failed to open '%s' for write - aborting\n",outfn);
             return 0;
         }
-        
-        static char commas[MAX_FEATURES + 1] = { [0 ... MAX_FEATURES-1] = ',', '\0' };
-        fprintf(fp1,"phoneme,label,start,end,file,fsize,nfrm,%s\n",commas);
-
-        for (int phninx = 0; phninx < phncnt; phninx++) {
-            char *phoneme = phonemes[phninx].phoneme;
-            int label = phonemes[phninx].label;
-            int seg_start_sample = (int) phonemes[phninx].startPos;
-            int seg_end_sample = (int) phonemes[phninx].endPos;
-            int seg_start_frame = seg_start_sample / frame_sample_cnt;
-            int seg_end_frame = seg_end_sample / frame_sample_cnt;
-            int fsize = FRAMEFEATCNT;
-            int nfrm = seg_end_frame - seg_start_frame;
-            double (*ff)[FRAMEFEATCNT] = &frame_features[0]; 
-            double one_frame_features[1][FRAMEFEATCNT];
-
-            if (nfrm > MAXSEGMENT) {
-                int midway = (seg_start_frame + seg_end_frame) / 2;
-                seg_start_frame = midway - MAXSEGMENT / 2;
-                seg_end_frame = midway + MAXSEGMENT / 2;
-                nfrm = seg_end_frame - seg_start_frame;
-            }
-            if (nfrm == 0) { /* Segment too short */
-                /* synthesize a frame that is 
-                 * an average of previous and this frames
-                 */
-                for (int i = 0; i < FRAMEFEATCNT; i++)
-                    one_frame_features[0][i] = ff[seg_start_frame][i];
-                if (seg_start_frame > 0) {
-                    for (int i = 0; i < FRAMEFEATCNT; i++)
-                        one_frame_features[0][i] += ff[seg_start_frame - 1][i];
-                    for (int i = 0; i < FRAMEFEATCNT; i++)
-                        one_frame_features[0][i] /= 2;
-                }
-                ff = &one_frame_features[0];
-                seg_start_frame = 0;
-                seg_end_frame = 1;
-                nfrm = 1;
-            }
-
-            double stime = ((double)seg_start_sample) / ((double)sample_rate);
-            double etime = ((double)seg_end_sample) / ((double)sample_rate);
-            fprintf(fp1,"%s,%2d,%5.3lf,%5.3lf,%s,%2d,%4d,",
-                        phoneme,label,stime,etime,fn,fsize,nfrm);
-
-            for(int i = seg_start_frame; i < seg_end_frame; i++) {
-                fprintf(fp1,"%12.4le,",ff[i][0]); /* zcr */
-                fprintf(fp1,"%12.4le,",-log(ff[i][1] + 1e-7) / 30); /* normalized sigma */
-                for (int j = 2; j < fsize; j++)
-                    fprintf(fp1,"%7.4lf,",ff[i][j]);
-                assert(i - seg_start_frame < nfrm);
-            }
-            int nc = MAX_FEATURES - 
-                        (seg_end_frame - seg_start_frame) * fsize;
-            fprintf(fp1,"%*.*s\n",nc,nc,commas);
-            fflush(fp1);
+        fprintf(fp1,"frame,zcr,sigma");
+        for (int j = 2; j < FRAMEFEATCNT; j++)
+            fprintf(fp1,",lsp%d",j - 1);
+        fprintf(fp1,"\n");
+        for (int i = 0; i < frmcnt; i++) {
+            int frminx = i;
+            float zcr = frame_features[i][0];
+            float sigma = -log(frame_features[i][1] + 1e-7) / 30;
+            fprintf(fp1,"%4d,%12.4le,%12.4le",frminx,zcr,sigma);
+            for (int j = 2; j < FRAMEFEATCNT; j++) /* lsp */
+                fprintf(fp1,",%7.4lf",frame_features[i][j]);
+            fprintf(fp1,"\n");
         }
         fclose(fp1);
+
+        /* Label file: all phonemes, in order, one row per phoneme.
+         * Times in seconds; positions in fractional frame units.
+         */
+        strcpy(outext,".LAB");
+        FILE *fp2 = fopen(outfn,"wb");
+        if (fp2 == NULL) {
+            fclose(fp);
+            fprintf(stderr,"Failed to open '%s' for write - aborting\n",outfn);
+            return 0;
+        }
+        fprintf(fp2,"phoneme,label,start,end,sfrm,efrm\n");
+        for (int phninx = 0; phninx < phncnt; phninx++) {
+            double ssmp = (double) phonemes[phninx].startPos;
+            double esmp = (double) phonemes[phninx].endPos;
+            fprintf(fp2,"%s,%2d,%5.3lf,%5.3lf,%7.2lf,%7.2lf\n",
+                        phonemes[phninx].phoneme,phonemes[phninx].label,
+                        ssmp / sample_rate,esmp / sample_rate,
+                        ssmp / frame_sample_cnt,esmp / frame_sample_cnt);
+        }
+        fclose(fp2);
     }
 
     fclose(fp);
     printf("Processed %d files\n",fileno);
 
-    double sum[FRAMEFEATCNT] = {0.0};
-    for (int i = 0; i < frmcnt; i++)
-        for (int j = 0; j < FRAMEFEATCNT; j++)
-            sum[j] += frame_features[i][j];
+    if (stat_cnt == 0)
+        return 0;
 
     double mean[FRAMEFEATCNT];
-    for (int j = 0; j < FRAMEFEATCNT; j++)
-        mean[j] = sum[j] / frmcnt;
-
-    double var[FRAMEFEATCNT] = {0.0};
-    for (int i = 0; i < frmcnt; i++)
-        for (int j = 0; j < FRAMEFEATCNT; j++)
-            var[j] += pow(frame_features[i][j] - mean[j],2);
-    
     double stddev[FRAMEFEATCNT];
-    for (int j = 0; j < FRAMEFEATCNT; j++) 
-        stddev[j] = sqrt(var[j] / frmcnt);
+    for (int j = 0; j < FRAMEFEATCNT; j++) {
+        mean[j] = stat_sum[j] / stat_cnt;
+        double var = stat_sumsq[j] / stat_cnt - mean[j] * mean[j];
+        stddev[j] = sqrt(var > 0 ? var : 0);
+    }
 
     printf("\nfeature mean and stddev:\n");
     for (int j = 0; j < FRAMEFEATCNT; j++) 

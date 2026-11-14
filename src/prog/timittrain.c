@@ -41,6 +41,7 @@ const char* timit_te_file_list = "data/timit/te_file.lst";
 #define TIMIT_VD_MAX_SAMPLE_CNT    150000
 #define TIMIT_TE_MAX_SEQUENCE_CNT    2000
 #define TIMIT_TE_MAX_SAMPLE_CNT    600000
+#define TIMIT_TE_MAX_PHONEME_CNT   100000
 
 /* Each sequence contains multiple phonemes, find how many in total.
  * Notice this function removes the EOP marker the terminal phoneme label.
@@ -83,7 +84,7 @@ int dedup_labels(iVec restrict labels, int len, int blank_inx, int ctc_mode)
     return k;
 }
 
-/* Extracts one label per phoneme using the EOP markers, removing silence.
+/* Removes silence from a sequence of phoneme labels.
  * Preserves consecutive identical phonemes.
  * Modifies the array labels in place and returns the new length.
  */
@@ -91,8 +92,8 @@ int reference_labels(iVec restrict labels, int len, int blank_inx)
 {
     int j, k;
     for (j = 0, k = 0; j < len; j++)
-        if (labels[j] >= EOP && labels[j] - EOP != blank_inx)
-            labels[k++] = labels[j] - EOP;
+        if (labels[j] != blank_inx)
+            labels[k++] = labels[j];
     return k;
 }
 
@@ -247,13 +248,16 @@ int timit_lstm_dense_classification(
     VecS  sTe = allocmem(STe,1,int);    /* TIMIT test sequence lengths  */
     VecM  yTec = allocmem(MTe,1,int);   /* Test (true) labels           */
     ArrMN yTet = allocmem(MTe,N,float); /* Test label one-hot vectors   */
+    int PhTe = TIMIT_TE_MAX_PHONEME_CNT;
+    VecM  phTe = allocmem(PhTe,1,int);  /* Test phoneme sequences       */
+    VecS  pcTe = allocmem(STe,1,int);   /* Test phoneme sequence lengths*/
 
     int cnt;
 
     /* Read data */
     printf("%s Loading data...\n",date_time(datetimebuf));
     cnt = read_feature_files(timit_tr_data_dir,
-                             timit_tr_file_list,STr,sTr,MTr,xTr,yTrc);
+                          timit_tr_file_list,STr,sTr,MTr,xTr,yTrc,0,NULL,NULL);
     if (cnt == 0)
         return 0;
     /* Update sTr, MTr with actual values */
@@ -266,7 +270,7 @@ int timit_lstm_dense_classification(
     int PTr = count_phoneme(yTrc,MTr);
 
     cnt = read_feature_files(timit_vd_data_dir,
-                             timit_vd_file_list,SVd,sVd,MVd,xVd,yVdc);
+                          timit_vd_file_list,SVd,sVd,MVd,xVd,yVdc,0,NULL,NULL);
     if (cnt == 0)
         return 0;
     /* Update sVd, MVd with actual values */
@@ -279,7 +283,7 @@ int timit_lstm_dense_classification(
     int PVd = count_phoneme(yVdc,MVd);
 
     cnt = read_feature_files(timit_te_data_dir,
-                             timit_te_file_list,STe,sTe,MTe,xTe,yTec);
+                       timit_te_file_list,STe,sTe,MTe,xTe,yTec,PhTe,phTe,pcTe);
     if (cnt == 0)
         return 0;
     /* Update sTe, MTe with actual values */
@@ -288,9 +292,6 @@ int timit_lstm_dense_classification(
     for (int i = 0; i < STe; i++)
         cnt += sTe[i];
     MTe = cnt;
-    /* Keep a copy of test labels with EOP markers, for reference phonemes */
-    VecM yTecEOP = allocmem(MTe,1,int);
-    memcpy(yTecEOP,yTec,MTe * sizeof(int));
     /* Each sequence contains multiple phonemes, find how many in total */
     int PTe = count_phoneme(yTec,MTe);
 
@@ -349,6 +350,10 @@ int timit_lstm_dense_classification(
     for (i = 0; i < STe; i++)
         if (sTeMax < sTe[i])
             sTeMax = sTe[i];
+    for (i = 0; i < STe; i++)
+        if (sTeMax < pcTe[i])
+            sTeMax = pcTe[i];
+    int poff = 0;   /* Current phoneme sequence offset              */
 
     ArrMN yp = allocmem(sTeMax,N,float); /* Predicted probabilities */
     VecS ypc = allocmem(sTeMax,1,int);   /* Predicted labels        */
@@ -372,8 +377,9 @@ int timit_lstm_dense_classification(
         /* Convert labels to phonemes: 
          * merge repeated labels, remove silence/blanks 
          */
-        memcpy(ytc,yTecEOP + off,sTe[i] * sizeof(int));
-        int ytc_len = reference_labels(ytc,sTe[i],SIL);
+        memcpy(ytc,phTe + poff,pcTe[i] * sizeof(int));
+        int ytc_len = reference_labels(ytc,pcTe[i],SIL);
+        poff += pcTe[i];
         phcnt += ytc_len;
         int ypc_len = dedup_labels(ypc,sTe[i],SIL,ctc_mode);
 
@@ -466,7 +472,8 @@ int timit_lstm_dense_classification(
     freemem(yVdt);
     freemem(xTe);
     freemem(sTe);
-    freemem(yTecEOP);
+    freemem(phTe);
+    freemem(pcTe);
     freemem(yTec);
     freemem(yTet);
     model_free(m);

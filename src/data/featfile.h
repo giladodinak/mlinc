@@ -50,20 +50,27 @@ extern const int timit2reduced[TIMIT_PHONEME_CNT] /* = {
    30,  zh->sh      0,  pau->sil    0,  epi->sil    0  h#->sil
 }*/;
 
-/* Reads speech samples from speech feature file.
+/* Reads speech samples from speech feature file and its label file.
  *
- * The file contains a sequence of phonemes, one phoneme per text line.
- * Each phoneme is represented by a number of vectors (aka frames) and 
- * each frame consists of a vector of real numbers; all the vectors of
- * a phoneme have the same label, the phonme's name.
+ * The feature file contains all the frames of one utterance, in time order,
+ * one frame per text line: the frame index followed by the frame's features.
+ * The label file contains the utterance's phonemes, in order, one phoneme
+ * per text line: name, label, start and end time in seconds, start and end
+ * position in (fractional) frames. Frame i is labeled with the phoneme
+ * whose span contains i; phonemes that contain no frame are not assigned
+ * to any frame, but are included in the returned phoneme sequence.
  *
  * The feature vectors read from the files are expanded to include
  * deltas and delta-deltas of their values.
  *
  * Parameters
  *   fp   - A pointer to a feature file open for read.
+ *   lfp  - A pointer to a label file open for read.
  *   maxs - The maximum number of samples (number of rows in x,
  *          and number of elements in yc)
+ *   maxp - The maximum number of phonemes (number of elements in ph)
+ *   ph   - If not NULL, updated with the utterance's phoneme labels
+ *   phcnt- If not NULL, updated with the number of labels in ph
  *   
  * Returns:
  *   An array of feature vectors in x, their corresponding labels in yc.
@@ -77,26 +84,31 @@ extern const int timit2reduced[TIMIT_PHONEME_CNT] /* = {
  *   In the later case TIMIT phonemes are mapped to their CMU equivalents.
  *   Reference: Speaker-Independent Phone Recognition, Lee and Hon 1989
  */
-int read_feature_file(FILE* fp, int maxs, 
-                      float x[][EXPENDED_FEAT_CNT], int yc[]);
+int read_feature_file(FILE* fp, FILE* lfp, int maxs, 
+                      float x[][EXPENDED_FEAT_CNT], int yc[],
+                      int maxp, int ph[], int* phcnt);
 
 /* Reads speech samples from speech feature files.
  *
- * Each file contains a sequence of phonemes, one phoneme per text line.
- * Each phoneme is represented by a number of vectors (aka frames) and 
- * each frame consists of a vector of real numbers; all the vectors of
- * a phoneme have the same label, the phonme's name.
+ * Each feature file contains all the frames of one utterance, one frame
+ * per text line, and is accompanied by a label file containing the
+ * utterance's phonemes (see read_feature_file()).
  *
  * The feature vectors read from the files are expanded to include
  * deltas and delta-deltas of their values.
  *
  * Parameters
  * - input_dir is a directory containing speech feature files, whose name
- *   ends with '.feat'.
+ *   ends with '.FEAT', and label files, whose name ends with '.LAB'.
  * - file_list is a text file containing the names of the files to be loaded.
  * - max_sequences is the maximum number of sequences (size of seq_length[])
  * - max_samples is the maximum number of samples (number of rows in x, and
  *   number of elements in yc)
+ * - max_phonemes is the maximum number of phonemes (number of elements
+ *   in ph)
+ * - ph, if not NULL, is updated with the phoneme labels of all sequences.
+ * - ph_count, if not NULL, is updated with the number of phoneme labels
+ *   of each sequence (same number of elements as seq_length).
  *   
  * Returns:
  *   An array of feature vectors in x, their corresponding labels in yc,
@@ -116,6 +128,7 @@ int read_feature_file(FILE* fp, int maxs,
  */
 int read_feature_files(const char* input_dir, const char* file_list,
                        int max_sequences, int *seq_length,
-                       int max_samples, float x[][EXPENDED_FEAT_CNT], int yc[]);
+                       int max_samples, float x[][EXPENDED_FEAT_CNT], int yc[],
+                       int max_phonemes, int ph[], int ph_count[]);
 
 #endif
