@@ -11,7 +11,7 @@
 int main(int argc, char **argv)
 {
     if (argc < 4) {
-        fprintf(stderr,"Syntax: testhann <windowsize>    <infilename> <outfilename>\n");
+        fprintf(stderr,"Syntax: testhann <windowsize> <infilename> <outfilename>\n");
         return 0;
     }
     WAVFILE wfin, wfout, *wfp;
@@ -24,7 +24,7 @@ int main(int argc, char **argv)
         return 0; 
     }
     HANNWIN hannWin;
-    int rv = hannWindowInit(&hannWin,winSize);
+    int rv = hannWindowInit(&hannWin,winSize,1);
     if (rv == -1) {
          fprintf(stderr,"Failed to initialize hann window of winSize %d\n",winSize);
         return 0; 
@@ -75,7 +75,7 @@ int main(int argc, char **argv)
                    ((winSize / 2) - samplesRead) * sizeof(rdBuf[0]));
         }
 
-        hannWindow(&hannWin,rdBuf,window,winSize);
+        hannWindow(&hannWin,rdBuf,window);
 
         for (int i = 0; i < winSize; i++)
             wrBuf[i] += window[i];

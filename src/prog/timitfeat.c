@@ -161,7 +161,7 @@ int main(int argc, char **argv)
         size_t winSize = 2 * out_frame_cnt;
         float window[winSize];
         HANNWIN hannWin;
-        int rv = hannWindowInit(&hannWin,winSize);
+        int rv = hannWindowInit(&hannWin,winSize,1);
         if (rv == -1) {
             fprintf(stderr,"Failed to initialize hann window for '%s' - skipping\n",fn);
             closeSphereFile(sfp);
@@ -241,7 +241,7 @@ int main(int argc, char **argv)
             for (int i = 0; i < (int) osize; i++)
                 rdBuf[osize + i] = decBuf[i];
 
-            hannWindow(&hannWin,rdBuf,window,winSize);
+            hannWindow(&hannWin,rdBuf,window);
 
             double lpcCoeffs[LPCORDER + 1];
             double lspCoeffs[LPCORDER + 1];
