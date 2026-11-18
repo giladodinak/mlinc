@@ -33,6 +33,13 @@
  * CUDA Graphs capture the repeated sequential operations to reduce launch
  * overhead. The LSTM equations themselves are unchanged; the changes are
  * primarily storage layout, transposition, fusion, and batching.
+ *
+ * A graph replays a fixed number of time steps. To avoid processing all B
+ * steps for a partial batch of cnt < B valid rows, graphs are recorded for
+ * LSTM_GRAPH_CNT step counts, ceil(k * B / LSTM_GRAPH_CNT) for k = 1 ..
+ * LSTM_GRAPH_CNT, and a batch replays the smallest one that covers cnt.
+ * The steps past cnt are padding; their output gradients must be zero
+ * (model_batch_backward clears them), so they add nothing to the gradients.
  */
 
 #include <stdio.h>
@@ -52,6 +59,43 @@
 #include "graph.h"
 
 #define THCNT 256
+
+#define LSTM_GRAPH_CNT 8 /* Number of recorded graph step counts */
+
+/* Recorded graphs, one per step count (stored in l->state) */
+typedef struct {
+    GRAPH* graph[LSTM_GRAPH_CNT];
+} LSTM_GRAPHS;
+
+static LSTM_GRAPHS* lstm_graphs_create(void)
+{
+    LSTM_GRAPHS* g = (LSTM_GRAPHS*) allocmem(1,1,LSTM_GRAPHS);
+    for (int k = 0; k < LSTM_GRAPH_CNT; k++)
+        g->graph[k] = graph_create();
+    return g;
+}
+
+static void lstm_graphs_destroy(LSTM_GRAPHS* g)
+{
+    if (g == NULL)
+        return;
+    for (int k = 0; k < LSTM_GRAPH_CNT; k++)
+        graph_destroy(g->graph[k]);
+    freemem(g);
+}
+
+/* Returns the index of the graph to replay for cnt valid rows out of B,
+ * and in T its number of time steps: the smallest of
+ * ceil(k * B / LSTM_GRAPH_CNT), k = 1 .. LSTM_GRAPH_CNT, that is >= cnt.
+ */
+static int lstm_graph_index(int B, int cnt, int* T)
+{
+    int k = (LSTM_GRAPH_CNT * cnt + B - 1) / B;
+    if (k < 1) k = 1;
+    if (k > LSTM_GRAPH_CNT) k = LSTM_GRAPH_CNT;
+    *T = (k * B + LSTM_GRAPH_CNT - 1) / LSTM_GRAPH_CNT;
+    return k - 1;
+}
 
 /* Creates a long short term memory (LSTM) neural network.
  *
@@ -279,7 +323,7 @@ extern "C" void lstm_init(LSTM* l, int input_dim, int batch_size, int training)
         l->do_ = (fArr2D) ((float*) l->df + 3 * l->S);
     }
 
-    l->state = graph_create();
+    l->state = lstm_graphs_create();
 }
 
 /* Sets a new batch size.
@@ -296,7 +340,7 @@ extern "C" void lstm_set_batch_size(LSTM* l, int batch_size)
     if (l->B == 0)
         return;
     if (batch_size != l->B) {
-        graph_destroy((GRAPH*) l->state);
+        lstm_graphs_destroy((LSTM_GRAPHS*) l->state);
         cufreemem(l->f);
         cufreemem(l->h);
         cufreemem(l->c);
@@ -320,7 +364,7 @@ extern "C" void lstm_set_batch_size(LSTM* l, int batch_size)
             l->do_ = (fArr2D) ((float*) l->df + 3 * l->S);
         }
 
-        l->state = graph_create();
+        l->state = lstm_graphs_create();
     }
     else {
         cufltclr(l->f,l->B * 4 * l->S);
@@ -337,7 +381,7 @@ extern "C" void lstm_set_batch_size(LSTM* l, int batch_size)
  */
 extern "C" void lstm_free(LSTM* l)
 {
-    graph_destroy((GRAPH*) l->state);
+    lstm_graphs_destroy((LSTM_GRAPHS*) l->state);
     cufreemem(l->f);
     cufreemem(l->h);
     cufreemem(l->c);
@@ -408,8 +452,8 @@ static __global__ void lstm_forward_kernel(float* g, const float* b,
  *   l   - Pointer to the LSTM layer's data
  *   X   - Array of input vectors BxD, where B is the number of 
  *         input vectors, and D is the number of features in each vector
- *   cnt - Number of valid rows (time steps) in X (<= B)
- *         (ignored; all B time steps are processed)
+ *   cnt - Number of valid rows (time steps) in X (<= B); the smallest
+ *         recorded step count >= cnt is processed (see top of file)
  *   lyr - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -423,10 +467,10 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
                     const fArr2D restrict X /*[B][D]*/, int cnt, int lyr)
 {
     (void) lyr;
-    (void) cnt; /* CUDA graph is recorded for all B time steps */
     const int D = l->D;
     const int S = l->S;
-    const int B = l->B;
+    int B;   /* Number of time steps processed (>= cnt) */
+    const int gi = lstm_graph_index(l->B,cnt,&B);
     const int blocks = (S + THCNT - 1) / THCNT;
     typedef float (*ArrTD)[D];
 
@@ -446,10 +490,10 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
         cufltcpy(c[-1],l->pc,S);
     }
 
-    /* [f i cc o] = X @ W.T */
-    matmulT(l->f,X,l->Wf,B,D,4 * S);
+    /* [f i cc o] = X @ W.T (padding rows cnt..B-1 stay zero) */
+    matmulT(l->f,X,l->Wf,cnt,D,4 * S);
 
-    GRAPH* graph = (GRAPH*) l->state;
+    GRAPH* graph = ((LSTM_GRAPHS*) l->state)->graph[gi];
 
     if (graph_record_exists(graph,GRAPH_FORWARD)) {
         graph_play(graph,GRAPH_FORWARD);
@@ -470,8 +514,8 @@ extern "C" fArr2D lstm_forward(LSTM* restrict l,
         graph_play(graph,GRAPH_FORWARD);
     }
 
-    cufltcpy(l->ph,h[B-1],S);
-    cufltcpy(l->pc,c[B-1],S);
+    cufltcpy(l->ph,h[cnt-1],S);
+    cufltcpy(l->pc,c[cnt-1],S);
     return h;
 }
 
@@ -525,8 +569,9 @@ static __global__ void lstm_backward_kernel(const float* dy,
  *   X    - Array of input vectors BxD, where B is the number of input
  *          vectors, and D is the number of features in each vector
  *   dX   - Output parameter for the input vector gradient (if not NULL)
- *   cnt  - Number of valid rows (time steps) in dY, X, dX (<= B)
- *          (ignored; all B time steps are processed)
+ *   cnt  - Number of valid rows (time steps) in dY, X, dX (<= B); the
+ *          smallest recorded step count >= cnt is processed (see top of
+ *          file). Rows cnt..B-1 of dY must be zero.
  *   lyr  - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -551,10 +596,10 @@ extern "C" void lstm_backward(LSTM* restrict l,
                    int cnt, int lyr)
 {
     (void) lyr;
-    (void) cnt; /* CUDA graph is recorded for all B time steps */
     const int D = l->D;
     const int S = l->S;
-    const int B = l->B;
+    int B;   /* Number of time steps processed (>= cnt) */
+    const int gi = lstm_graph_index(l->B,cnt,&B);
     const int blocks = (S + THCNT - 1) / THCNT;
     typedef float (*ArrBD)[D];
     ArrBD x = (ArrBD) X;
@@ -582,7 +627,7 @@ extern "C" void lstm_backward(LSTM* restrict l,
     cufltclr(dh_next,S);
     cufltclr(dc_next,S);
 
-    GRAPH* graph = (GRAPH*) l->state;
+    GRAPH* graph = ((LSTM_GRAPHS*) l->state)->graph[gi];
 
     if (graph_record_exists(graph,GRAPH_BACKWARD)) {
         graph_play(graph,GRAPH_BACKWARD);
@@ -608,10 +653,12 @@ extern "C" void lstm_backward(LSTM* restrict l,
         graph_play(graph,GRAPH_BACKWARD);
     }
 
-    /* Gradients of the stored transposed fused matrices */
-    Tmatmul(l->gWf,dg,x,4 * S,B,D);
-    Tmatmul(l->gUf,dg,l->h,4 * S,B,S); /* l->h is h[-1] */
+    /* Gradients of the stored transposed fused matrices
+     * (rows cnt..B-1 of dg are zero, so only cnt rows are used)
+     */
+    Tmatmul(l->gWf,dg,x,4 * S,cnt,D);
+    Tmatmul(l->gUf,dg,l->h,4 * S,cnt,S); /* l->h is h[-1] */
 
     if (dx != NULL)
-        matmul(dx,dg,l->Wf,B,4 * S,D);
+        matmul(dx,dg,l->Wf,cnt,4 * S,D);
 }
