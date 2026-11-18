@@ -548,7 +548,7 @@ void mha_forward(MHA* restrict l,
                 if (training && l->training)
                     if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                         cufltcpy(AttTemp,Ah,T * T);
-                        dropout_forward(l->dropout[b * H + h],AttTemp);
+                        dropout_forward(l->dropout[b * H + h],AttTemp,T);
                         Ah = AttTemp;
                     }
 
@@ -949,7 +949,7 @@ void mha_backward(MHA* restrict l,
                  */
                 if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                     /* Use AttTemp as scratch buffer */
-                    dropout_backward(l->dropout[b * H + h],&Att[base],AttTemp);
+                    dropout_backward(l->dropout[b * H + h],&Att[base],AttTemp,T);
                     Tmatmul_ld(dVh,AttTemp,dOh,T,T,Dh,T,D,D);
                 }
                 else
@@ -962,7 +962,7 @@ void mha_backward(MHA* restrict l,
                  * dScores /= sqrt(Dh)                 (reverse scaling)
                  */
                 if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
-                    dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
+                    dropout_backward(l->dropout[b * H + h],dAtt,dAtt,T);
 
                 const int* pad_mask = (const int*) l->pad_mask;
                 const int threads = 256; /* Tunable: multiple of 32, maximum 1024 */

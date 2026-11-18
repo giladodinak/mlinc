@@ -235,14 +235,15 @@ void dropout_reset(DROPOUT* l)
  *
  * Parameters:
  *   mx   : Pointer to the 2D array to be processed
+ *   cnt  : Number of valid rows in mx (<= B); only these are processed
  *
  * Notes:
  *   In a CUDA graph each replay reads and advances the
  *   device-resident counter, so every execution draws a new mask.
  */
-void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
+void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/, int cnt)
 {
-    int n = l->B * l->D;
+    int n = cnt * l->D;
     float rate = l->rate;
 
     if (n <= 0) return;
@@ -279,12 +280,13 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/)
  * Parameters:
  *   in  : Pointer to the 2D input array to be masked
  *   out : Pointer to the 2D output array to receive the masked result
+ *   cnt : Number of valid rows in in, out (<= B); only these are processed
  */
 void dropout_backward(DROPOUT* restrict l,
                       const fArr2D in_/*[B][D]*/,
-                      fArr2D out_/*[B][D]*/)
+                      fArr2D out_/*[B][D]*/, int cnt)
 {
-    int n = l->B * l->D;
+    int n = cnt * l->D;
     if (n <= 0) return;
 
     float rate = l->rate;

@@ -162,6 +162,7 @@ static inline void bias_gradient(fVec gb_, const fArr2D dy_, int B, int S)
  * Parameters:
  *   l   - Pointer to the dense layer's data
  *   X   - An array of input vectors (BxD dimensions, which includes bias)
+ *   cnt - Number of valid rows in X (<= B); only these are processed
  *   lyr - The ordinal number of this layer in a model (not used)
  *
  * Returns:
@@ -171,21 +172,21 @@ static inline void bias_gradient(fVec gb_, const fArr2D dy_, int B, int S)
  * X is the (activated) output of a previous layer.
  */
 fArr2D dense_forward(DENSE* restrict l, 
-                     const fArr2D restrict X/*[B][D]*/, int lyr)
+                     const fArr2D restrict X/*[B][D]*/, int cnt, int lyr)
 {
     (void) lyr;
-    matmul(l->h,X,l->Wx,l->B,l->D,l->S); /* h = X @ Wx */
+    matmul(l->h,X,l->Wx,cnt,l->D,l->S); /* h = X @ Wx */
     if (l->use_bias)
-        add_bias(l->h,l->b,l->B,l->S);
+        add_bias(l->h,l->b,cnt,l->S);
     switch (l->activation) {
-        case 's' : sigmoid(l->h,l->B,l->S); break;
-        case 'r' : relu(l->h,l->B,l->S); break;
+        case 's' : sigmoid(l->h,cnt,l->S); break;
+        case 'r' : relu(l->h,cnt,l->S); break;
         case 'g' : 
             if (l->training)
-                fltcpy(l->z,l->h,l->B * l->S);
-             gelu(l->h,l->B,l->S);
+                fltcpy(l->z,l->h,cnt * l->S);
+             gelu(l->h,cnt,l->S);
         break;
-        case 'S' : softmax(l->h,l->B,l->S); break;
+        case 'S' : softmax(l->h,cnt,l->S); break;
     }
     return l->h;
 }
@@ -196,6 +197,8 @@ fArr2D dense_forward(DENSE* restrict l,
  *   l   - Pointer to the dense layer's data
  *   dy  - The output vector gradient of dense_create's units dimension
  *   X   - An input vector (D dimensions, which includes bias)
+ *   dx  - Output parameter for the input vector gradient (written if not NULL)
+ *   cnt - Number of valid rows in dy, X, dx (<= B); only these are processed
  *   lyr - The ordinal number of this layer in a model (not used)
  *
  * Calculates the weight matrix gradients with respect to the weights 
@@ -212,19 +215,19 @@ void dense_backward(DENSE* restrict l,
                     fArr2D restrict dy/*[B][S]*/, 
                     const fArr2D restrict X/*[B][D]*/,
                     fArr2D restrict dx/*[B][D]*/,
-                    int lyr)
+                    int cnt, int lyr)
 {
     (void) lyr;
 
     switch (l->activation) {
         case 's':
-            d_sigmoid(dy,l->h,l->B,l->S);
+            d_sigmoid(dy,l->h,cnt,l->S);
             break;
         case 'r':
-            d_relu(dy,l->h,l->B,l->S);
+            d_relu(dy,l->h,cnt,l->S);
             break;
         case 'g':
-            d_gelu(dy,l->z,l->B,l->S);
+            d_gelu(dy,l->z,cnt,l->S);
             break;
         /* Softmax intentionally excluded:
          * dy must already be (y_pred - y_true)
@@ -232,13 +235,13 @@ void dense_backward(DENSE* restrict l,
     }
 
     /* Gradient with respect to weights: gWx = X.T @ dy */
-    Tmatmul(l->gWx,X,dy,l->D,l->B,l->S);
+    Tmatmul(l->gWx,X,dy,l->D,cnt,l->S);
     if (l->use_bias)
-        bias_gradient(l->gb,dy,l->B,l->S);
+        bias_gradient(l->gb,dy,cnt,l->S);
 
     if (dx != NULL) {
         /* dx = (dy @ Wx.T) */
-        matmulT(dx,dy,l->Wx,l->B,l->S,l->D);
+        matmulT(dx,dy,l->Wx,cnt,l->S,l->D);
     }
 }
 

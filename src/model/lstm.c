@@ -265,6 +265,7 @@ static inline void lstm_add_bias(fVec v_, const fVec b_, int S)
  *   l   - Pointer to the LSTM layer's data
  *   X   - Array of input vectors BxD, where B is the number of 
  *         input vectors, and D is the number of features in each vector
+ *   cnt - Number of valid rows (time steps) in X (<= B)
  *   lyr - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -275,12 +276,12 @@ static inline void lstm_add_bias(fVec v_, const fVec b_, int S)
  *   X is the (activated) output of a previous layer.
  */
 fArr2D lstm_forward(LSTM* restrict l,
-                    const fArr2D restrict X /*[B][D]*/, int lyr)
+                    const fArr2D restrict X /*[B][D]*/, int cnt, int lyr)
 {
     (void) lyr;
     const int D = l->D;
     const int S = l->S;
-    const int B = l->B;
+    const int B = cnt;   /* Number of time steps processed */
     typedef float (*ArrTD)[D];
     ArrTD x = (ArrTD) X;
     /* Note that for arrays with B+1 rows row t is the state at time step t-1.
@@ -373,6 +374,7 @@ static inline float lstm_d_activate(float x)
  *   X    - Array of input vectors BxD, where B is the number of input
  *          vectors, and D is the number of features in each vector
  *   dX   - Output parameter for the input vector gradient (if not NULL)
+ *   cnt  - Number of valid rows (time steps) in dY, X, dX (<= B)
  *   lyr  - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -394,12 +396,12 @@ void lstm_backward(LSTM* restrict l,
                    const fArr2D restrict dY/*[B][S]*/,
                    const fArr2D restrict X/*[B][D]*/,
                    fArr2D restrict dX/*[B][D]*/,
-                   int lyr)
+                   int cnt, int lyr)
 {
     (void) lyr;
     const int D = l->D;
     const int S = l->S;
-    const int B = l->B;
+    const int B = cnt;   /* Number of time steps processed */
     typedef float (*ArrBD)[D];
     ArrBD x = (ArrBD) X;
     ArrBD dx = (ArrBD) dX;

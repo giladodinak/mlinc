@@ -166,33 +166,33 @@ extern "C" void dense_reset(DENSE* l)
 
 extern "C" fArr2D dense_forward(DENSE* restrict l,
                                 const fArr2D restrict X,
-                                int lyr)
+                                int cnt, int lyr)
 {
     (void)lyr;
 
-    matmul(l->h,X,l->Wx,l->B,l->D,l->S);
+    matmul(l->h,X,l->Wx,cnt,l->D,l->S);
 
     if (l->use_bias) {
-        int n = l->B * l->S;
+        int n = cnt * l->S;
         int blocks = (n + THDCNT - 1) / THDCNT;
         add_bias_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
-                             (float*)l->h,(const float*)l->b,l->B,l->S);
+                             (float*)l->h,(const float*)l->b,cnt,l->S);
     }
 
     switch (l->activation) {
         case 's':
-            sigmoid(l->h,l->B,l->S);
+            sigmoid(l->h,cnt,l->S);
             break;
         case 'r':
-            relu(l->h,l->B,l->S);
+            relu(l->h,cnt,l->S);
             break;
         case 'g':
             if (l->training)
-                cufltcpy(l->z,l->h,l->B * l->S);
-            gelu(l->h,l->B,l->S);
+                cufltcpy(l->z,l->h,cnt * l->S);
+            gelu(l->h,cnt,l->S);
             break;
         case 'S':
-            softmax(l->h,l->B,l->S);
+            softmax(l->h,cnt,l->S);
             break;
     }
 
@@ -203,30 +203,30 @@ extern "C" void dense_backward(DENSE* restrict l,
                                fArr2D restrict dy,
                                const fArr2D restrict X,
                                fArr2D restrict dx,
-                               int lyr)
+                               int cnt, int lyr)
 {
     (void)lyr;
 
     switch (l->activation) {
         case 's':
-            d_sigmoid(dy,l->h,l->B,l->S);
+            d_sigmoid(dy,l->h,cnt,l->S);
             break;
         case 'r':
-            d_relu(dy,l->h,l->B,l->S);
+            d_relu(dy,l->h,cnt,l->S);
             break;
         case 'g':
-            d_gelu(dy,l->z,l->B,l->S);
+            d_gelu(dy,l->z,cnt,l->S);
             break;
     }
 
-    Tmatmul(l->gWx,X,dy,l->D,l->B,l->S);
+    Tmatmul(l->gWx,X,dy,l->D,cnt,l->S);
 
     if (l->use_bias) {
         int blocks = (l->S + THDCNT - 1) / THDCNT;
         bias_gradient_kernel<<<blocks,THDCNT,0,cuda_stream()>>>(
-                                  (float*)l->gb,(const float*)dy,l->B,l->S);
+                                  (float*)l->gb,(const float*)dy,cnt,l->S);
     }
 
     if (dx != NULL)
-        matmulT(dx,dy,l->Wx,l->B,l->S,l->D);
+        matmulT(dx,dy,l->Wx,cnt,l->S,l->D);
 }

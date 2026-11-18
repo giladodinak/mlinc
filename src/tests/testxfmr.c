@@ -545,7 +545,7 @@ void training_test(void)
         for (int i = 0; i < NLYR; i++)
             transformer_forward(layers[i],act[i],1,act[i + 1],0);
 
-        fArr2D yp = dense_forward(out,act[NLYR],0);
+        fArr2D yp = dense_forward(out,act[NLYR],BT,0);
 
         nnfltcpy(yph,yp,BT * K);
         float loss = cross_entropy_loss((fArr2D)yph,(fArr2D)yt,BT,K);
@@ -564,7 +564,7 @@ void training_test(void)
          *   out->gWx   = act[NLYR].T @ dy_out
          *   dact[NLYR] = dy_out @ Wx.T */
         dense_backward(out,(fArr2D) dy_out,
-                       (fArr2D) act[NLYR],(fArr2D) dact[NLYR],0);
+                       (fArr2D) act[NLYR],(fArr2D) dact[NLYR],BT,0);
 
         /* Transformer layers backward */
         for (int i = NLYR - 1; i >= 0; i--)
@@ -586,7 +586,7 @@ void training_test(void)
     transformer_forward(layers[0],act[0],1,act[1],0);
     for (int i = 1; i < NLYR; i++)
         transformer_forward(layers[i],act[i],1,act[i + 1],0);
-    fArr2D yp = dense_forward(out,act[NLYR],0);
+    fArr2D yp = dense_forward(out,act[NLYR],BT,0);
 
     nnfltcpy(probs,yp,BT * K);
 

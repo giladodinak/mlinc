@@ -197,7 +197,7 @@ void transformer_forward(TRANSFORMER* restrict l,
      */
     mha_forward(l->mha,X,l->mha_out,0,training,lyr);
     if (training && l->training && l->dropout1 != NULL)
-        dropout_forward(l->dropout1,l->mha_out);
+        dropout_forward(l->dropout1,l->mha_out,l->BT);
 
     /* Step 2 - First residual add + layer norm (Sec. 3.1):
      * norm1_out = LayerNorm(X + mha_out)
@@ -209,11 +209,11 @@ void transformer_forward(TRANSFORMER* restrict l,
      * ffn2_out = ffn1_out @ Wx2
      * ffn2_out = dropout(ffn2_out)
      */
-    fArr2D ffn1_out = dense_forward(l->ffn1,l->norm1_out,lyr);
-    fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,lyr);
+    fArr2D ffn1_out = dense_forward(l->ffn1,l->norm1_out,l->ffn1->B,lyr);
+    fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,l->ffn2->B,lyr);
 
     if (training && l->training && l->dropout2 != NULL)
-        dropout_forward(l->dropout2,ffn2_out);
+        dropout_forward(l->dropout2,ffn2_out,l->BT);
 
     /* Step 4 - Second residual add + layer norm (Sec. 3.1):
      * Y = LayerNorm(norm1_out + ffn2_out)
@@ -246,8 +246,8 @@ void transformer_forward_step(TRANSFORMER* restrict l,
     addnorm_forward(l->norm1,X,l->mha_out,l->norm1_out);
 
     /* FFN (one row) */
-    fArr2D ffn1_out = dense_forward(l->ffn1,l->norm1_out,lyr);
-    fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,lyr);
+    fArr2D ffn1_out = dense_forward(l->ffn1,l->norm1_out,l->ffn1->B,lyr);
+    fArr2D ffn2_out = dense_forward(l->ffn2,ffn1_out,l->ffn2->B,lyr);
 
     /* Residual + norm */
     addnorm_forward(l->norm2,l->norm1_out,ffn2_out,Y);
@@ -341,7 +341,7 @@ void transformer_backward(TRANSFORMER* restrict l,
      */
     fArr2D d_ffn2_in = l->d_ffn2_in;
     if (l->training && l->dropout2 != NULL)
-        dropout_backward(l->dropout2,d_norm2_in,d_ffn2_in);
+        dropout_backward(l->dropout2,d_norm2_in,d_ffn2_in,BT);
     else
         d_ffn2_in = (fArr2D) d_norm2_in;
 
@@ -353,9 +353,9 @@ void transformer_backward(TRANSFORMER* restrict l,
      * gWx1 = norm1_out.T @ d_ffn1_in
      * d_norm1_in = d_ffn1_in @ Wx1.T (through gelu derivative)
      */
-    dense_backward(l->ffn2,d_ffn2_in,l->ffn1->h,(fArr2D) d_ffn1_in,lyr);
+    dense_backward(l->ffn2,d_ffn2_in,l->ffn1->h,(fArr2D) d_ffn1_in,BT,lyr);
 
-    dense_backward(l->ffn1,(fArr2D) d_ffn1_in,norm1_out,d_norm1_in,lyr);
+    dense_backward(l->ffn1,(fArr2D) d_ffn1_in,norm1_out,d_norm1_in,BT,lyr);
 
     /* Residual accumulation for norm2 skip connection:
      * d_norm1_in += d_norm2_in
@@ -379,7 +379,7 @@ void transformer_backward(TRANSFORMER* restrict l,
      */
     fArr2D d_mha_masked = l->d_mha_masked;
     if (l->training && l->dropout1 != NULL)
-        dropout_backward(l->dropout1,d_mha_out,d_mha_masked);
+        dropout_backward(l->dropout1,d_mha_out,d_mha_masked,BT);
     else
         d_mha_masked = l->d_mha_out;
 

@@ -124,6 +124,7 @@ void lstm_reset(LSTM* l);
  *   l   - Pointer to the LSTM layer's data
  *   X   - Array of input vectors BxD, where B is the number of 
  *         input vectors, and D is the number of features in each vector
+ *   cnt - Number of valid rows (time steps) in X (<= B)
  *   lyr - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -134,7 +135,7 @@ void lstm_reset(LSTM* l);
  *   X is the (activated) output of a previous layer.
  */
 fArr2D lstm_forward(LSTM* restrict l,
-                    const fArr2D restrict X /*[B][D]*/, int lyr);
+                    const fArr2D restrict X /*[B][D]*/, int cnt, int lyr);
 
 /* Performs LSTM layer training's backward pass.
  * 
@@ -144,6 +145,7 @@ fArr2D lstm_forward(LSTM* restrict l,
  *   X    - Array of input vectors BxD, where B is the number of input
  *          vectors, and D is the number of features in each vector
  *   dX   - Output parameter for the input vector gradient (if not NULL)
+ *   cnt  - Number of valid rows (time steps) in dY, X, dX (<= B)
  *   lyr  - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -165,7 +167,7 @@ void lstm_backward(LSTM* restrict l,
                    const fArr2D restrict dY/*[B][S]*/,
                    const fArr2D restrict X/*[B][D]*/,
                    fArr2D restrict dX/*[B][D]*/,
-                   int lyr);
+                   int cnt, int lyr);
 
 
 #ifdef __cplusplus

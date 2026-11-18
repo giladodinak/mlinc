@@ -408,6 +408,8 @@ static __global__ void lstm_forward_kernel(float* g, const float* b,
  *   l   - Pointer to the LSTM layer's data
  *   X   - Array of input vectors BxD, where B is the number of 
  *         input vectors, and D is the number of features in each vector
+ *   cnt - Number of valid rows (time steps) in X (<= B)
+ *         (ignored; all B time steps are processed)
  *   lyr - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -418,9 +420,10 @@ static __global__ void lstm_forward_kernel(float* g, const float* b,
  *   X is the (activated) output of a previous layer.
  */
 extern "C" fArr2D lstm_forward(LSTM* restrict l,
-                    const fArr2D restrict X /*[B][D]*/, int lyr)
+                    const fArr2D restrict X /*[B][D]*/, int cnt, int lyr)
 {
     (void) lyr;
+    (void) cnt; /* CUDA graph is recorded for all B time steps */
     const int D = l->D;
     const int S = l->S;
     const int B = l->B;
@@ -522,6 +525,8 @@ static __global__ void lstm_backward_kernel(const float* dy,
  *   X    - Array of input vectors BxD, where B is the number of input
  *          vectors, and D is the number of features in each vector
  *   dX   - Output parameter for the input vector gradient (if not NULL)
+ *   cnt  - Number of valid rows (time steps) in dY, X, dX (<= B)
+ *          (ignored; all B time steps are processed)
  *   lyr  - Ordinal number of this layer in a model (not used)
  * 
  * Returns:
@@ -543,9 +548,10 @@ extern "C" void lstm_backward(LSTM* restrict l,
                    const fArr2D restrict dY/*[B][S]*/,
                    const fArr2D restrict X/*[B][D]*/,
                    fArr2D restrict dX/*[B][D]*/,
-                   int lyr)
+                   int cnt, int lyr)
 {
     (void) lyr;
+    (void) cnt; /* CUDA graph is recorded for all B time steps */
     const int D = l->D;
     const int S = l->S;
     const int B = l->B;

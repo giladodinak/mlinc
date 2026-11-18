@@ -78,9 +78,9 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
         fArr2D yp[L]; /* pointers to layers' prediction arrays */
 
         /* Forward pass */
-        yp[0] = dense_forward(l[0],Xnn,0);
+        yp[0] = dense_forward(l[0],Xnn,M,0);
         for (int j = 1; j < L; j++)
-            yp[j] = dense_forward(l[j],yp[j - 1],j);
+            yp[j] = dense_forward(l[j],yp[j - 1],M,j);
         nnfltcpy(y,yp[L - 1],M * N); /* Save final forward pass result */
 
         float loss = mean_square_error(y,yt,M,N);
@@ -95,8 +95,8 @@ int test_dense(const float range[3], const int layers[], int layers_cnt,
         nnfltcpy(dy[L - 1],dyt,M * N);
 
         for (int j = L - 1; j > 0; j--)
-            dense_backward(l[j],dy[j],yp[j - 1],dy[j - 1],0);
-        dense_backward(l[0],dy[0],Xnn,NULL,0);
+            dense_backward(l[j],dy[j],yp[j - 1],dy[j - 1],M,0);
+        dense_backward(l[0],dy[0],Xnn,NULL,M,0);
 
         /* Update weights */
         for (int j = 0; j < L; j++)

@@ -84,6 +84,7 @@ void dense_reset(DENSE* l);
  * Parameters:
  *   l   - Pointer to the dense layer's data
  *   X   - An array of input vectors (BxD dimensions, which includes bias)
+ *   cnt - Number of valid rows in X (<= B); only these are processed
  *   lyr - The ordinal number of this layer in a model (not used)
  *
  * Returns:
@@ -93,7 +94,7 @@ void dense_reset(DENSE* l);
  * X is the (activated) output of a previous layer.
  */
 fArr2D dense_forward(DENSE* restrict l, 
-                     const fArr2D restrict X/*[B][D]*/, int lyr);
+                     const fArr2D restrict X/*[B][D]*/, int cnt, int lyr);
 
 /* Performs dense layer training's backward pass.
  *
@@ -101,6 +102,8 @@ fArr2D dense_forward(DENSE* restrict l,
  *   l   - Pointer to the dense layer's data
  *   dy  - The output vector gradient of dense_create's units dimension
  *   X   - An input vector (D dimensions, which includes bias)
+ *   dx  - Output parameter for the input vector gradient (written if not NULL)
+ *   cnt - Number of valid rows in dy, X, dx (<= B); only these are processed
  *   lyr - The ordinal number of this layer in a model (not used)
  *
  * Calculates the weight matrix gradients with respect to the weights 
@@ -117,7 +120,7 @@ void dense_backward(DENSE* restrict l,
                     fArr2D restrict dy/*[B][S]*/, 
                     const fArr2D restrict X/*[B][D]*/,
                     fArr2D restrict dx/*[B][D]*/,
-                    int lyr);
+                    int cnt, int lyr);
 
 #ifdef __cplusplus
 }

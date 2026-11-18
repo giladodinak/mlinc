@@ -445,7 +445,7 @@ void mha_forward(MHA* restrict l,
 
             if (training && l->training)
                 if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
-                    dropout_forward(l->dropout[b * H + h],Scores);
+                    dropout_forward(l->dropout[b * H + h],Scores,T);
 
             /* In Eq. 1: Attention @ V */
             matmul(Oh,Scores,&Vh[base],T,T,Dh);
@@ -698,7 +698,7 @@ void mha_backward(MHA* restrict l,
              */
             if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {
                 /* Use Scroes as scratch buffer */
-                dropout_backward(l->dropout[b * H + h],&Att[base],s->Scores);
+                dropout_backward(l->dropout[b * H + h],&Att[base],s->Scores,T);
                 Tmatmul(dVh,s->Scores,dOh,T,T,Dh);
             }
             else
@@ -711,7 +711,7 @@ void mha_backward(MHA* restrict l,
              * dScores /= sqrt(Dh)                  (reverse scaling)
              */
             if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0)
-                dropout_backward(l->dropout[b * H + h],dAtt,dAtt);
+                dropout_backward(l->dropout[b * H + h],dAtt,dAtt,T);
 
             d_softmax(dScores,dAtt,&Att[base],T,T);
 

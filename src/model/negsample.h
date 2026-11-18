@@ -96,6 +96,7 @@ void negsample_reset(NEGSAMPLE* l);
  * Parameters:
  *   l   - Pointer to the layer's data
  *   X   - Input array [B][E] (the stack's output)
+ *   cnt - Number of valid rows in X (<= B)
  *   lyr - Ordinal number of this layer in a model (not used)
  *
  * Returns:
@@ -103,10 +104,10 @@ void negsample_reset(NEGSAMPLE* l);
  */
 static inline fArr2D negsample_forward(NEGSAMPLE* restrict l,
                                        const fArr2D restrict X/*[B][E]*/,
-                                       int lyr)
+                                       int cnt, int lyr)
 {
     (void) lyr;
-    nnfltcpy(l->h,X,l->B * l->E);
+    nnfltcpy(l->h,X,cnt * l->E);
     return l->h;
 }
 
@@ -119,16 +120,17 @@ static inline fArr2D negsample_forward(NEGSAMPLE* restrict l,
  *   l   - Pointer to the layer
  *   dy  - Output gradient [B][E] (grad w.r.t. h, from negsample_loss)
  *   dx  - Input gradient [B][E] (written if not NULL)
+ *   cnt - Number of valid rows in dy, dx (<= B)
  *   lyr - Ordinal number of this layer in a model (not used)
  */
 static inline void negsample_backward(NEGSAMPLE* restrict l,
                                       const fArr2D restrict dy/*[B][E]*/,
                                       fArr2D restrict dx/*[B][E]*/,
-                                      int lyr)
+                                      int cnt, int lyr)
 {
     (void) lyr;
     if (dx == NULL) return;
-    nnfltcpy(dx,dy,l->B * l->E);
+    nnfltcpy(dx,dy,cnt * l->E);
 }
 
 /* Computes the negative-sampling loss and its gradients for a batch.

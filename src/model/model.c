@@ -23,9 +23,14 @@
 #include "accuracy.h"
 #include "model.h"
 
-static void model_batch_forward(MODEL* m, fArr2D x, int training, fArr2D* yp);
-static void model_batch_backward(MODEL* m, fArr2D x, fArr2D* dy, fArr2D* yp);
+static void model_batch_forward(MODEL* m,
+                                fArr2D x, int cnt, int training, fArr2D* yp);
+
+static void model_batch_backward(MODEL* m,
+                                 fArr2D x, fArr2D* dy, fArr2D* yp, int cnt);
+
 static void model_update(MODEL* m, float learning_rate, float weight_decay);
+
 static void print_status(int epoch, int nepochs, int progress, float etime,
                              float loss, float acc, float v_loss, float v_acc);
 
@@ -393,7 +398,7 @@ void model_fit(MODEL* m,
                 break;
             if (m->normalize)
                 normalize(x,B,D,nn_mean,nn_sdev,0);
-            model_batch_forward(m,x,1,yp);
+            model_batch_forward(m,x,cnt,1,yp);
             sample_cnt += cnt;
 
             /* Note that gradient calculation below is additive.
@@ -429,7 +434,8 @@ void model_fit(MODEL* m,
                 }
                 break;
             }
-            model_batch_backward(m,x,dy,yp);
+
+            model_batch_backward(m,x,dy,yp,cnt);
             if (verbose) {
                 print_status(epoch + 1,num_epochs,
                             (B < MTr) ? sample_cnt * 100 / MTr : -1,
@@ -466,7 +472,7 @@ void model_fit(MODEL* m,
                     break;
                 if (m->normalize)
                     normalize(x,B,D,nn_mean,nn_sdev,0); 
-                model_batch_forward(m,x,0,yp);
+                model_batch_forward(m,x,cnt,0,yp);
                 v_sample_cnt += cnt;
 
                 switch(m->loss_func) {
@@ -591,7 +597,7 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
             break;
         if (m->normalize)
             normalize(xb,B,D,nn_mean,nn_sdev,0); 
-        model_batch_forward(m,xb,0,yp);
+        model_batch_forward(m,xb,cnt,0,yp);
         if (m->loss_func == 'N') {
             /* Full-vocabulary pass, then normalize to a distribution */
             negsample_logits(m->layer[L - 1].negsample,yp[L - 1],
@@ -610,20 +616,38 @@ void model_predict(MODEL* m, const fArr2D x_, fArr2D y_, int len)
     batch_free(b);
 }
 
-static void model_batch_forward(MODEL* m, fArr2D x, int training, fArr2D* yp)
+/* Runs the forward pass of all layers on the first cnt rows of x */
+static void model_batch_forward(MODEL* m,
+                                fArr2D x, int cnt, int training, fArr2D* yp)
 {
     int L = m->num_layers;
-    yp[0] = layer_forward(&m->layer[0],x,training,0);
+    yp[0] = layer_forward(&m->layer[0],x,cnt,training,0);
     for (int j = 1; j < L; j++)
-        yp[j] = layer_forward(&m->layer[j],yp[j - 1],training,j);
+        yp[j] = layer_forward(&m->layer[j],yp[j - 1],cnt,training,j);
 }
 
-static void model_batch_backward(MODEL* m, fArr2D x, fArr2D* dy, fArr2D* yp)
+/* Clears the gradients of padded rows cnt..B-1 of a layer's output, 
+ * for layers that process all B rows regardless of cnt (CUDA LSTM).
+ */
+static inline void clear_padded_grads(LAYER* l, fArr2D dy, int cnt)
+{
+    int B = layer_batch_size(l);
+    int S = layer_output_dim(l);
+    if (cnt < B)
+        nnfltclr((float*) dy + cnt * S,(B - cnt) * S);
+}
+
+/* Runs the backward pass of all layers on the first cnt rows */
+static void model_batch_backward(MODEL* m, fArr2D x, fArr2D* dy, fArr2D* yp,
+                                 int cnt)
 {
     int L = m->num_layers;
-    for (int j = L - 1; j > 0; j--)
-        layer_backward(&m->layer[j],dy[j],yp[j - 1],dy[j - 1],j);
-    layer_backward(&m->layer[0],dy[0],x,NULL,0);
+    for (int j = L - 1; j > 0; j--) {
+        clear_padded_grads(&m->layer[j],dy[j],cnt);
+        layer_backward(&m->layer[j],dy[j],yp[j - 1],dy[j - 1],cnt,j);
+    }
+    clear_padded_grads(&m->layer[0],dy[0],cnt);
+    layer_backward(&m->layer[0],dy[0],x,NULL,cnt,0);
 }
 
 /* Updates model weights */

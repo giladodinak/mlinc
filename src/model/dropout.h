@@ -71,8 +71,9 @@ void dropout_reset(DROPOUT* l);
  *
  * Parameters:
  *   mx   : Pointer to the 2D array to be processed
+ *   cnt  : Number of valid rows in mx (<= B); only these are processed
  */
-void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/);
+void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/, int cnt);
 
 /* Applies a precomputed dropout mask to an input array, writing the
  * result to an output array, which can be the same array as the input.
@@ -80,10 +81,11 @@ void dropout_forward(DROPOUT* restrict l, fArr2D mx_/*[B][D])*/);
  * Parameters:
  *   in  : Pointer to the 2D input array to be masked
  *   out : Pointer to the 2D output array to receive the masked result
+ *   cnt : Number of valid rows in in, out (<= B); only these are processed
  */
 void dropout_backward(DROPOUT* restrict l,
                       const fArr2D in_/*[B][D]*/,
-                      fArr2D out_/*[B][D]*/);
+                      fArr2D out_/*[B][D]*/, int cnt);
 
 #ifdef __cplusplus
 }

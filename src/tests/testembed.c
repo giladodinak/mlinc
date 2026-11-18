@@ -562,12 +562,12 @@ int run_demo(void)
 
         /* Forward pass */
         yp[0] = embedding_forward(embedding,contexts,0);
-        yp[1] = dense_forward(dense,yp[0],1);
+        yp[1] = dense_forward(dense,yp[0],cxt_cnt,1);
         loss += sparse_cross_entropy_loss(yp[1],labels,cxt_cnt,vocab_size);
 
         /* Backward pass */
         dLdy_sparse_cross_entropy_loss(yp[1],labels,dy[1],cxt_cnt,vocab_size);
-        dense_backward(dense,dy[1],yp[0],dy[0],1);
+        dense_backward(dense,dy[1],yp[0],dy[0],cxt_cnt,1);
         embedding_backward(embedding,dy[0],contexts,gWx,NULL,NULL,0);
 
         /* Update weights */

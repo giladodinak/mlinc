@@ -72,29 +72,32 @@ static inline int layer_batch_size(const LAYER* l)
  *
  * Parameters:
  *   X   - Input array [B][D]
+ *   cnt - Number of valid rows in X (<= B); only these are processed
+ *         (the transformer always processes all rows)
  *   lyr - Ordinal number of this layer in the model
  *
  * Returns:
  *   Pointer to the layer's output array [B][S].
  */
 static inline fArr2D layer_forward(LAYER* l, 
-                                   const fArr2D X, int training, int lyr)
+                                   const fArr2D X, int cnt, int training,
+                                   int lyr)
 {
     switch (l->type) {
-        case 'd': return dense_forward(l->dense,X,lyr);
-        case 'l': return lstm_forward(l->lstm,X,lyr);
+        case 'd': return dense_forward(l->dense,X,cnt,lyr);
+        case 'l': return lstm_forward(l->lstm,X,cnt,lyr);
         case 't':
             transformer_forward(l->transformer,X,training,l->out,lyr);
             return l->out;
-        case 'n': return negsample_forward(l->negsample,X,lyr);
+        case 'n': return negsample_forward(l->negsample,X,cnt,lyr);
         case 'o':
             /* Masks a copy of X, so the producing layer's own output
              * (e.g. LSTM h, read again by its backward) stays intact.
              * Pass-through when not training or rate is 0.
              */
             if (training && l->dropout->rate > 0) {
-                nnfltcpy(l->out,X,l->dropout->B * l->dropout->D);
-                dropout_forward(l->dropout,l->out);
+                nnfltcpy(l->out,X,cnt * l->dropout->D);
+                dropout_forward(l->dropout,l->out,cnt);
                 return l->out;
             }
             return (fArr2D) X;
@@ -112,31 +115,33 @@ static inline fArr2D layer_forward(LAYER* l,
  *   dy  - Output gradient [B][S]
  *   X   - The input that produced this layer's output [B][D]
  *   dx  - Input gradient [B][D] (may be NULL for the first layer)
+ *   cnt - Number of valid rows in dy, X, dx (<= B); only these are processed
+ *         (the transformer always processes all rows)
  *   lyr - Ordinal number of this layer in the model
  */
 static inline void layer_backward(LAYER* l, fArr2D dy, 
-                                  const fArr2D X, fArr2D dx, int lyr)
+                                  const fArr2D X, fArr2D dx, int cnt, int lyr)
 {
     switch (l->type) {
         case 'd':
-            dense_backward(l->dense,dy,X,dx,lyr);
+            dense_backward(l->dense,dy,X,dx,cnt,lyr);
             return;
         case 'l':
-            lstm_backward(l->lstm,dy,X,dx,lyr);
+            lstm_backward(l->lstm,dy,X,dx,cnt,lyr);
             return;
         case 't':
             transformer_backward(l->transformer,dy,X,dx,lyr);
             return;
         case 'n':
-            negsample_backward(l->negsample,dy,dx,lyr);
+            negsample_backward(l->negsample,dy,dx,cnt,lyr);
             return;
         case 'o':
             if (dx == NULL)
                 return;
             if (l->dropout->rate > 0)
-                dropout_backward(l->dropout,dy,dx);
+                dropout_backward(l->dropout,dy,dx,cnt);
             else
-                nnfltcpy(dx,dy,l->dropout->B * l->dropout->D);
+                nnfltcpy(dx,dy,cnt * l->dropout->D);
             return;
     }
     layer_unsupported("layer_backward",l->type);
