@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
+#include <sys/stat.h>
 #include <math.h>
 #include <assert.h>
 #include "random.h"
@@ -20,7 +22,7 @@
 #include "featfile.h"
 
 /* Audio is divided into frames. For each frame compute LPC parameters,
- * and the residual error variance. Convert the LPC's to LSP's and the 
+ * and the residual error variance. Convert the LPC's to LSP's and the
  * variance to standard deviation, sigma*. Calculate zero crossing ratio.
  * These values comprise a frame's feature vector.
  * *sigma = normalized lpc error residual = -log(err_res + 1e-7) / 30;
@@ -38,6 +40,10 @@
  *
  * Frame i is analyzed with a window spanning frames i-1 and i, so its
  * center is at time i * FRAMETIME.
+ *
+ * Uses LPC based features, which may be more resilient to background noise
+ * than FFT based features. Reference:
+ *  https://www.isca-archive.org/eurospeech_2001/wet01_eurospeech.pdf
  */
 #define MAXFILELEN   10 /* Audio length in *seconds*         */
 #define FRAMETIME    10 /* Audio length in *milliseconds*    */
@@ -63,6 +69,9 @@ typedef struct phnfile_t {
     char mode;         // 'r'
 } PHNFILE;
 
+#define MAXPATH 512
+
+int create_dir_path(const char* path);
 PHNFILE* openPhonemeFile(const char* filename, char *mode, PHNFILE* pf);
 PHNFILE* closePhonemeFile(PHNFILE* pf);
 size_t readPhonemeFile(PHNFILE* pf, size_t cnt, PHNINFO *phninfo);
@@ -72,14 +81,14 @@ size_t readPhonemeFile(PHNFILE* pf, size_t cnt, PHNINFO *phninfo);
 double frame_features[FRAMEARRSIZE][FRAMEFEATCNT]; /* Features of audio file */
 int frmcnt = 0; /* Actual number of rows in frame_features[][] */
 
-#define PHSIZE ((MAXFILELEN * 1000) / FRAMETIME) 
+#define PHSIZE ((MAXFILELEN * 1000) / FRAMETIME)
 PHNINFO phonemes[PHSIZE]; /* Phonemes of the entire audio file     */
 int phncnt = 0;           /* Acutal number of entries in phoneme[] */
 
 /* Check if a float value is a number. Works even when using -ffast-math */
 static int isnumber(float f)
 {
-    char s[32]; 
+    char s[32];
     snprintf(s,sizeof(s),"%f  ",f);
     /* not a number strings are nan, inf, -nan, -inf, +nan, +inf */
     if (s[0] == 'n' || s[0] == 'i' || s[1] == 'n' || s[1] == 'i')
@@ -91,8 +100,8 @@ int main(int argc, char **argv)
 {
     if (argc < 4) {
         fprintf(stderr,
-            "Syntax: timitfeat <filelist file> \\\n"
-            "            <timit files directory> <feature files directory>\n");
+            "Syntax: timitfeat <filelist file> "
+            "<timit files directory> <feature files directory>\n");
         return 0;
     }
 
@@ -100,19 +109,22 @@ int main(int argc, char **argv)
     FILE *fp = fopen(filelist,"rb");
     if (fp == NULL) {
         fprintf(stderr,"Failed to open '%s' for read\n",filelist);
-        return 0;
+        return -1;
     }
     char *timitdir = argv[2];
     char *featdir = argv[3];
-    const int maxpath = 512;
-    char buffer[3 * maxpath];
-    if ((int) strlen(timitdir) >= maxpath) {
+    char buffer[3 * MAXPATH];
+    if ((int) strlen(timitdir) >= MAXPATH) {
         fprintf(stderr,"Directory name too long: '%s'\n",timitdir);
-        return 0;
+        return -1;
     }
-    if ((int) strlen(featdir) >= maxpath) {
+    if ((int) strlen(featdir) >= MAXPATH) {
         fprintf(stderr,"Directory name too long: '%s'\n",featdir);
-        return 0;
+        return -1;
+    }
+    if (create_dir_path(featdir) != 0) {
+        fprintf(stderr,"Directory does not exist and cannot be created: '%s'\n",featdir);
+        return -1;
     }
     init_lrng(42);
     /* Feature statistics accumulated over all files */
@@ -127,7 +139,7 @@ int main(int argc, char **argv)
         if (buffer[pfxlen - 1] != '/')
             strcat(buffer,"/");
         char* fn = buffer + strlen(buffer);
-        fn = fgets(fn,maxpath,fp);
+        fn = fgets(fn,MAXPATH,fp);
         if (fn == NULL || strlen(fn) == 0)
             break;      /* End of file list */
         fn = buffer;    /* fn now points to file path */
@@ -137,7 +149,7 @@ int main(int argc, char **argv)
             *ext = '\0'; /* Remove extension if any */
         printf("Processing file %s.WAV, with %s.PHN\n",fn,fn);
         fflush(stdout);
-        
+
         /* Audio file */
         strcat(fn,".WAV");
         SPHFILE sfin, *sfp;
@@ -169,7 +181,7 @@ int main(int argc, char **argv)
         }
         float rdBuf[winSize];
         memset(rdBuf,0,winSize * sizeof(rdBuf[0]));
-        
+
         FILTER filter1, filter2, filter3, filter4;
         int rv3 = initFilter(&filter3,4,"h",sample_rate,180);
         int rv2 = initFilter(&filter2,4,"l",sample_rate,3400);
@@ -180,7 +192,7 @@ int main(int argc, char **argv)
             closeSphereFile(sfp);
             continue;
         }
-        
+
         ext = rindex(fn,'.'); /* fn ends with ".WAV" */
         /* Phoneme file */
         strcpy(ext,".PHN"); /* Replace previous file name suffix */
@@ -215,10 +227,10 @@ int main(int argc, char **argv)
         while (frmcnt < FRAMEARRSIZE) {
             float fltBuf[fsize];
             float decBuf[osize];
-            
+
             size_t fcnt = readSphereAudio(sfp,fltBuf,fsize);
             if (fcnt <= 0) /* EOF (or error) */
-                break; 
+                break;
             if (fcnt < fsize) /* Complete partial frame */
                 memset(fltBuf + fcnt,0,(fsize - fcnt) * sizeof(fltBuf[0]));
 
@@ -255,13 +267,13 @@ int main(int argc, char **argv)
             for (int i = 0; i < FRAMEFEATCNT; i++) {
                 if (!isnumber(frame_features[frmcnt][i])) {
                     printf("in %s frame %d feature %d is not a number\n",
-                                                                  fn,frmcnt,i);
+                                                              fn,frmcnt,i);
                     frame_features[frmcnt][i] = 0;
                 }
-            }          
-             
+            }
+
             frmcnt++;
-            
+
             memmove(rdBuf,rdBuf + osize,osize * sizeof(rdBuf[0]));
             memset(rdBuf + osize,0,osize * sizeof(rdBuf[0]));
         }
@@ -285,14 +297,14 @@ int main(int argc, char **argv)
             tfn = strstr(fn,"TEST/");
         if (tfn != NULL)
             fn = tfn;
-                
+
         /* Create output file paths that are the path of the input file
          * in the output directory, with FEAT and LAB extensions.
          */
         ext = rindex(fn,'.'); /* fn ends with ".PHN" */
         *ext = '\0'; /* Remove previous file name suffix */
 
-        char outfn[3 * maxpath];
+        char outfn[3 * MAXPATH];
         snprintf(outfn,sizeof(outfn) - 6,"%s/%s",featdir,fn);
         for (int i = strlen(featdir) + 1; i < (int) strlen(outfn); i++)
             if (outfn[i] == '/')
@@ -311,7 +323,7 @@ int main(int argc, char **argv)
         if (fp1 == NULL) {
             fclose(fp);
             fprintf(stderr,"Failed to open '%s' for write - aborting\n",outfn);
-            return 0;
+            return -1;
         }
         fprintf(fp1,"frame,zcr,sigma");
         for (int j = 2; j < FRAMEFEATCNT; j++)
@@ -319,9 +331,10 @@ int main(int argc, char **argv)
         fprintf(fp1,"\n");
         for (int i = 0; i < frmcnt; i++) {
             int frminx = i;
+            fprintf(fp1,"%4d",frminx);
             float zcr = frame_features[i][0];
             float sigma = -log(frame_features[i][1] + 1e-7) / 30;
-            fprintf(fp1,"%4d,%12.4le,%12.4le",frminx,zcr,sigma);
+            fprintf(fp1,",%12.4le,%12.4le",zcr,sigma);
             for (int j = 2; j < FRAMEFEATCNT; j++) /* lsp */
                 fprintf(fp1,",%7.4lf",frame_features[i][j]);
             fprintf(fp1,"\n");
@@ -336,7 +349,7 @@ int main(int argc, char **argv)
         if (fp2 == NULL) {
             fclose(fp);
             fprintf(stderr,"Failed to open '%s' for write - aborting\n",outfn);
-            return 0;
+            return -1;
         }
         fprintf(fp2,"phoneme,label,start,end,sfrm,efrm\n");
         for (int phninx = 0; phninx < phncnt; phninx++) {
@@ -353,31 +366,56 @@ int main(int argc, char **argv)
     fclose(fp);
     printf("Processed %d files\n",fileno);
 
-    if (stat_cnt == 0)
-        return 0;
-
-    double mean[FRAMEFEATCNT];
-    double stddev[FRAMEFEATCNT];
-    for (int j = 0; j < FRAMEFEATCNT; j++) {
-        mean[j] = stat_sum[j] / stat_cnt;
-        double var = stat_sumsq[j] / stat_cnt - mean[j] * mean[j];
-        stddev[j] = sqrt(var > 0 ? var : 0);
+    if (stat_cnt > 0) {
+        double mean[FRAMEFEATCNT];
+        double stddev[FRAMEFEATCNT];
+        for (int j = 0; j < FRAMEFEATCNT; j++) {
+            mean[j] = stat_sum[j] / stat_cnt;
+            double var = stat_sumsq[j] / stat_cnt - mean[j] * mean[j];
+            stddev[j] = sqrt(var > 0 ? var : 0);
+        }
+        printf("\nfeature mean and stddev:\n");
+        for (int j = 0; j < FRAMEFEATCNT; j++)
+            printf("%7.4lf %8.4lf \n",mean[j],stddev[j]);
+        printf("\n");
     }
+}
 
-    printf("\nfeature mean and stddev:\n");
-    for (int j = 0; j < FRAMEFEATCNT; j++) 
-        printf("%7.4lf %8.4lf \n",mean[j],stddev[j]);    
-    printf("\n");
+int create_dir_path(const char* path)
+{
+    char buf[MAXPATH];
+    mode_t mode = 0755;
+    size_t len = strlen(path);
+    if (len == 0 || len >= sizeof(buf))
+        return -1;
+
+    memcpy(buf,path,len + 1);
+
+    for (char* p = buf + 1; ; p++) {
+        if (*p == '/' || *p == '\0') {
+            char c = *p;
+            *p = '\0';
+            if (mkdir(buf,mode) != 0) {
+                struct stat st;
+                if (errno != EEXIST ||
+                                    stat(buf,&st) != 0 || !S_ISDIR(st.st_mode))
+                    return -1;
+            }
+            if (c == '\0')
+                break;
+            *p = c;
+        }
+    }
+    return 0;
 }
 
 PHNFILE* openPhonemeFile(const char* filename, char *mode, PHNFILE* pf)
 {
-    FILE* fileHandle = NULL;   
+    FILE* fileHandle = NULL;
     if (*mode != 'r') {
         fprintf(stderr,"In openPhonemeFile('%s'): invalid mode '%s'; only 'r' supported.\n",filename,mode);
         return NULL;
     }
-    //printf("Openning '%s' for read.\n",filename);
 
     fileHandle = fopen(filename,"rb");
     if (fileHandle == NULL) {
@@ -385,7 +423,7 @@ PHNFILE* openPhonemeFile(const char* filename, char *mode, PHNFILE* pf)
         return NULL;
     }
     pf->fileHandle = fileHandle;
-    pf->mode = *mode;   
+    pf->mode = *mode;
     return pf;
 }
 

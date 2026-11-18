@@ -15,17 +15,18 @@
 #include "lsp.h"
 #include "filter.h"
 
+/* Reads a feature file created by timitfeat, one row per frame, and
+ * creates an audio file from it by LPC synthesis of the LPC/LSP features.
+ */
 #define TIMIT_FEAT_CNT      14
 #define MAX_SAMPLES 1000 /* 10 seconds */
 float samples[MAX_SAMPLES][TIMIT_FEAT_CNT];
 int samplecnt = 0;
 
-/* Somewhat arbitrary (divisble by 1000) */
-int audioSampleRate = 16000;
-/* These are calculated from first phoneme data */
-float duration = 0; // in seconds
-int frameSize = 0;  // in milliseconds
-int winSize = 0;    // in samples
+/* Rate at which timitfeat computes features */
+int audioSampleRate = 8000;
+int frameSize = 10; // in milliseconds
+int winSize = 160;  // in samples, two frames
 int featcnt = 0;    // sample vector dimension
 
 int main(int argc, char **argv)
@@ -71,70 +72,63 @@ int main(int argc, char **argv)
             if (!isspace(line[i]))
                 line[len++] = line[i];
         line[len] = '\0';
-        const char* header = "phoneme,"; /* Header line starts with this */
-        if (strncmp(line,header,strlen(header)) == 0) /* Header */
+        const char* header = "frame,"; /* Header line starts with this */
+        if (strncmp(line,header,strlen(header)) == 0) { /* Header */
+            /* Number of values per frame is number of columns - 1 */
+            featcnt = 0;
+            for (int i = 0; line[i] != '\0'; i++)
+                if (line[i] == ',')
+                    featcnt++;
+            if (featcnt != TIMIT_FEAT_CNT) {
+                fprintf(stderr,"In file '%s' line %d: %d values per frame, "
+                        "should be %d\n",featfilename,lineno,featcnt,
+                        TIMIT_FEAT_CNT);
+                fclose(fp);
+                return -1;
+            }
             continue;
+        }
+        if (featcnt == 0) {
+            fprintf(stderr,"In file '%s' line %d: missing header line\n",
+                                                          featfilename,lineno);
+            fclose(fp);
+            return -1;
+        }
         /* Replace commas with spaces */
         for (int i = 0; line[i] != '\0'; i++)
             if (line[i] == ',')
                 line[i] = ' ';
-        /* Read the first 7 fields */
-        const char* fmt = "%4s %d " FMTF " " FMTF " %255s %d %d";
-        char ph[5];
-        int label;
-        float stime,etime;
-        char fn[256];
-        int fcnt, nfrm;             
-        int cnt = sscanf(line,fmt,ph,&label,&stime,&etime,fn,&fcnt,&nfrm);
-        if (cnt < 7) {
+        /* Read frame index */
+        char* end = line;
+        int frame = strtol(line,&end,10);
+        if (line == end || frame != vecinx) {
             fprintf(stderr,"In file '%s' line %d: malformed line\n",
                                                           featfilename,lineno);
             fclose(fp);
             return -1;
         }
-        if (fcnt != TIMIT_FEAT_CNT) {
-            fprintf(stderr,"In file '%s' line %d: fcnt is %d, should be %d\n",
-                                      featfilename,lineno,fcnt,TIMIT_FEAT_CNT);
-            fclose(fp);
-            return -1;
-        }
-        if (nfrm == 0) /* Line has no features */
-            continue;
-
-        if (winSize == 0) {
-            duration = etime - stime; // in seconds
-            frameSize = (int) (duration * 1000 / nfrm); // in milliseconds
-            winSize = (2 * frameSize) * audioSampleRate / 1000; // in samples
-            featcnt = fcnt;
-        }
-        /* Advance line to space past last scanned value */
-        while (cnt > 0 && *line != '\0')
-            if (*line++ == ' ')
-                cnt--;
-        /* Read all vectors of current phoneme */
-        for (int i = 0; i < nfrm; i++) {
-            for (int j = 0; j < TIMIT_FEAT_CNT; j++) {
-                char* end = line;
-                float feat;
-                feat = strtof(line,&end);
-                if (line == end) {
-                    fprintf(stderr,
-                            "In file '%s' line %d: malformed feature #%d\n",
-                            featfilename,lineno,i * TIMIT_FEAT_CNT + j);
-                    fclose(fp);
-                    return -1;
-                 }
-                 samples[vecinx][j] = feat; 
-                 line = end;
-            }
-            vecinx++;
-            samplecnt = vecinx;
-            if (vecinx >= MAX_SAMPLES) {
+        line = end;
+        /* Read frame's values */
+        for (int j = 0; j < featcnt; j++) {
+            float feat;
+            feat = strtof(line,&end);
+            if (line == end) {
                 fprintf(stderr,
-                        "In file '%s' line %d: reached %d samples, "
-                        "ignoring the rest\n",featfilename,lineno,MAX_SAMPLES);
-                break;
-            }
+                        "In file '%s' line %d: malformed feature #%d\n",
+                        featfilename,lineno,j);
+                fclose(fp);
+                return -1;
+             }
+             samples[vecinx][j] = feat; 
+             line = end;
+        }
+        vecinx++;
+        samplecnt = vecinx;
+        if (vecinx >= MAX_SAMPLES) {
+            fprintf(stderr,
+                    "In file '%s' line %d: reached %d samples, "
+                    "ignoring the rest\n",featfilename,lineno,MAX_SAMPLES);
+            break;
         }
     }
     fclose(fp);
@@ -145,9 +139,7 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    printf("winSize %d samples, frameSize %d millisec "
-           "(first sample " FMTF " seconds)\n",
-           winSize,frameSize,duration);
+    printf("winSize %d samples, frameSize %d millisec\n",winSize,frameSize);
  
     wfout.audioFormat = 3; // float
     wfout.sampleRate = audioSampleRate;
