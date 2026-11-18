@@ -94,7 +94,15 @@ int main(int argc, char **argv)
         model_free(m);
         return -1;    
     }
-    int cnt = read_feature_file(fp,lfp,MTe,xTe,yTec,MTe,phTe,&phcnt);
+    if (feature_dim(fp) != D) {
+        fprintf(stderr,"Feature file '%s' dimension does not match model "
+                       "input dimension %d\n",featfile,D);
+        fclose(fp);
+        fclose(lfp);
+        model_free(m);
+        return -1;
+    }
+    int cnt = read_feature_file(fp,lfp,MTe,D,(float*)xTe,yTec,MTe,phTe,&phcnt);
     fclose(fp);
     fclose(lfp);
     if (cnt == 0) {
@@ -103,7 +111,7 @@ int main(int argc, char **argv)
         return 0;
     }
     MTe = cnt; /* Actual number of samples */
-    int ytc[phcnt + 1]; /* True labels             */
+    int ytc[phcnt + 1]; /* True labels     */
     memcpy(ytc,phTe,phcnt * sizeof(int));
     int ytc_len = reference_labels(ytc,phcnt,SIL);
     /* Each sequence contains multiple phonemes, find how many in total */

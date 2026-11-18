@@ -19,14 +19,17 @@
  * whose span contains i; phonemes that contain no frame are not assigned
  * to any frame, but are included in the returned phoneme sequence.
  *
- * The feature vectors read from the files are expanded to include
- * deltas and delta-deltas of their values.
+ * The feature file contains F features per frame (F up to MAX_FEAT_CNT),
+ * which are expanded to include deltas and delta-deltas of their values
+ * (DELTA_EXPANSION * F values per row of x). F is determined by the file's
+ * header line (see feature_dim()).
  *
  * Parameters
  *   fp   - A pointer to a feature file open for read.
  *   lfp  - A pointer to a label file open for read.
  *   maxs - The maximum number of samples (number of rows in x,
  *          and number of elements in yc)
+ *   dim  - Number of values per row of x; must be DELTA_EXPANSION * F
  *   maxp - The maximum number of phonemes (number of elements in ph)
  *   ph   - If not NULL, updated with the utterance's phoneme labels
  *   phcnt- If not NULL, updated with the number of labels in ph
@@ -44,8 +47,8 @@
  *   Reference: Speaker-Independent Phone Recognition, Lee and Hon 1989
  */
 #define MAX_UTTERANCE_PHONEMES 1024
-int read_feature_file(FILE* fp, FILE* lfp, int maxs, 
-                      float x[][EXPENDED_FEAT_CNT], int yc[],
+int read_feature_file(FILE* fp, FILE* lfp, int maxs, int dim,
+                      float* x, int yc[],
                       int maxp, int ph[], int* phcnt)
 {
     int lineno = 0;
@@ -99,6 +102,9 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
         *phcnt = (np < maxp) ? np : maxp;
 
     /* Read the utterance's frames and label them */
+    typedef float (*ArrXD)[dim];
+    ArrXD X = (ArrXD) x;
+    int fcnt = 0;    /* Values per frame in the file, 0 until header read */
     lineno = 0;
     int p = 0;      /* Current phoneme */
     int prev = -2;  /* Phoneme of previous frame; -1 if none */
@@ -120,8 +126,23 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
                 line[len++] = line[i];
         line[len] = '\0';
         const char* header = "frame,"; /* Header line starts with this */
-        if (strncmp(line,header,strlen(header)) == 0) /* Header */
+        if (strncmp(line,header,strlen(header)) == 0) { /* Header */
+            fcnt = 0;
+            for (int i = 0; line[i] != '\0'; i++)
+                if (line[i] == ',')
+                    fcnt++;
+            if (fcnt < 1 || fcnt > MAX_FEAT_CNT ||
+                dim != DELTA_EXPANSION * fcnt) {
+                fprintf(stderr,"In line %d: %d values per frame, %d per "
+                               "row, invalid\n",lineno,fcnt,dim);
+                return 0;
+            }
             continue;
+        }
+        if (fcnt == 0) {
+            fprintf(stderr,"Line %d: missing header line\n",lineno);
+            return 0;
+        }
         /* Replace commas with spaces */
         for (int i = 0; line[i] != '\0'; i++)
             if (line[i] == ',')
@@ -133,7 +154,7 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
             return 0;
         }
         line = end;
-        for (int j = 0; j < FEAT_CNT; j++) {
+        for (int j = 0; j < fcnt; j++) {
             float feat;
             feat = strtof(line,&end);
             if (line == end) {
@@ -141,7 +162,7 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
                                                               lineno,j);
                 return 0;
              }
-             x[vecinx][j] = feat; 
+             X[vecinx][j] = feat; 
              line = end;
         }
         /* Phoneme whose span contains this frame, -1 if none */
@@ -163,14 +184,45 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
     if (seqlen == 0)
         return 0;
     yc[vecinx - 1] += EOP; /* Last frame ends a phoneme */
-    /* Expand features */
+    /* Expand features: columns [0,F) features, [F,2F) deltas and [2F,3F)
+     * delta-deltas over a window of 3, [3F,4F) deltas and [4F,5F)
+     * delta-deltas over a window of 5
+     */
     int M = seqlen;
-    int N = EXPENDED_FEAT_CNT;
-    calculate_deltas(x[vecinx - M],M,N,0,14,14,3);  /* deltas       */
-    calculate_deltas(x[vecinx - M],M,N,14,28,14,3); /* delta-deltas */
-    calculate_deltas(x[vecinx - M],M,N,0,14,42,5);  /* deltas       */
-    calculate_deltas(x[vecinx - M],M,N,42,56,14,5); /* delta-deltas */
+    int N = dim;
+    int F = fcnt;
+    calculate_deltas(X[vecinx - M],M,N,0,F,F,3);         /* deltas       */
+    calculate_deltas(X[vecinx - M],M,N,F,2 * F,F,3);     /* delta-deltas */
+    calculate_deltas(X[vecinx - M],M,N,0,3 * F,F,5);     /* deltas       */
+    calculate_deltas(X[vecinx - M],M,N,3 * F,4 * F,F,5); /* delta-deltas */
     return seqlen;
+}
+
+/* Returns the number of values per row of x that read_feature_file()
+ * produces for a feature file, based on the file's header line:
+ * DELTA_EXPANSION * F for F features.
+ * The file position is restored. Returns 0 if the header is invalid.
+ */
+int feature_dim(FILE* fp)
+{
+    long pos = ftell(fp);
+    char buf[20000];
+    char* line = fgets(buf,sizeof(buf),fp);
+    fseek(fp,pos,SEEK_SET);
+    if (line == NULL)
+        return 0;
+    int len = 0;
+    for (int i = 0; line[i] != '\0'; i++)
+        if (!isspace(line[i]))
+            line[len++] = line[i];
+    line[len] = '\0';
+    if (strncmp(line,"frame,",6) != 0)
+        return 0;
+    int fcnt = 0;
+    for (int i = 0; line[i] != '\0'; i++)
+        if (line[i] == ',')
+            fcnt++;
+    return (fcnt >= 1 && fcnt <= MAX_FEAT_CNT) ? DELTA_EXPANSION * fcnt : 0;
 }
 
 
@@ -180,8 +232,9 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
  * per text line, and is accompanied by a label file containing the
  * utterance's phonemes (see read_feature_file()).
  *
- * The feature vectors read from the files are expanded to include
- * deltas and delta-deltas of their values.
+ * Feature files contain features, which are expanded to include deltas
+ * and delta-deltas of their values (see read_feature_file()). All files
+ * must have the same number of features per frame.
  *
  * Parameters
  * - input_dir is a directory containing speech feature files, whose name
@@ -190,6 +243,7 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
  * - max_sequences is the maximum number of sequences (size of seq_length[])
  * - max_samples is the maximum number of samples (number of rows in x, and
  *   number of elements in yc)
+ * - dim is the number of values per row of x (see feature_files_dim())
  * - max_phonemes is the maximum number of phonemes (number of elements
  *   in ph)
  * - ph, if not NULL, is updated with the phoneme labels of all sequences.
@@ -214,7 +268,7 @@ int read_feature_file(FILE* fp, FILE* lfp, int maxs,
  */
 int read_feature_files(const char* input_dir, const char* file_list,
                        int max_sequences, int *seq_length,
-                       int max_samples, float x[][EXPENDED_FEAT_CNT], int yc[],
+                       int max_samples, int dim, float* x, int yc[],
                        int max_phonemes, int ph[], int ph_count[])
 {
     const int maxpath = 512;
@@ -268,8 +322,8 @@ int read_feature_files(const char* input_dir, const char* file_list,
             continue;
         }
         int phcnt = 0;
-        int veccnt = read_feature_file(fp,lfp2,max_samples - vecinx, 
-                                       x + vecinx,yc + vecinx,
+        int veccnt = read_feature_file(fp,lfp2,max_samples - vecinx,dim,
+                                       x + (size_t) vecinx * dim,yc + vecinx,
                                        max_phonemes - phinx,
                                        (ph != NULL) ? ph + phinx : NULL,&phcnt);
         fclose(fp);
@@ -288,6 +342,52 @@ int read_feature_files(const char* input_dir, const char* file_list,
     }
     fclose(lfp);
     return seqinx;
+}
+
+/* Returns the number of values per row of x that read_feature_files()
+ * produces for the files in file_list, based on the first file's header
+ * line (see feature_dim()). Returns 0 if the file cannot be read.
+ */
+int feature_files_dim(const char* input_dir, const char* file_list)
+{
+    const int maxpath = 512;
+    char buffer[3 * maxpath];
+    if ((int) strlen(input_dir) >= maxpath) {
+        fprintf(stderr,"Directory name too long: '%s'\n",input_dir);
+        return 0;
+    }
+    FILE *lfp = fopen(file_list,"rb");
+    if (lfp == NULL) {
+        fprintf(stderr,"Failed to open '%s' for read\n",file_list);
+        return 0;
+    }
+    strcpy(buffer,input_dir);
+    if (buffer[strlen(buffer) - 1] != '/')
+        strcat(buffer,"/");
+    char* filepath = buffer + strlen(buffer);
+    filepath = fgets(filepath,maxpath,lfp);
+    fclose(lfp);
+    if (filepath == NULL || strlen(filepath) == 0)
+        return 0;
+    for (int i = 0; filepath[i] != '\0'; i++)
+        if (filepath[i] == '/')
+            filepath[i] = '_';
+    filepath = buffer;
+    filepath[strlen(filepath) - 1] = '\0'; /* Punch out end of line char */
+    char *ext = rindex(filepath,'.');
+    if (ext != NULL)
+        *ext = '\0'; /* Remove extension if any */
+    strcat(filepath,".FEAT");
+    FILE* fp = fopen(filepath,"rb");
+    if (fp == NULL) {
+        fprintf(stderr,"Failed to open file '%s' for read\n",filepath);
+        return 0;
+    }
+    int dim = feature_dim(fp);
+    fclose(fp);
+    if (dim == 0)
+        fprintf(stderr,"Invalid header line in file '%s'\n",filepath);
+    return dim;
 }
 
 const char* timit_phoneme_names[TIMIT_PHONEME_CNT] = {

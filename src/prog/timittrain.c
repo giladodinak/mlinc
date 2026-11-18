@@ -141,13 +141,13 @@ int timit_lstm_dense_classification(
     printf("\nTrains a multi layer LSTM followed by Dense layer to predict the\n");
     printf("classes of samples from the TIMIT dataset\n\n");
     printf("Run 'timit -h' to list program options\n\n");
-    const int Dr = FEAT_CNT;            /* Input vectors dimension          */
-    const int D = EXPENDED_FEAT_CNT;    /* Expended input vectors dimension */
+    const int D = feature_files_dim(timit_tr_data_dir,timit_tr_file_list);
+    const int Dr = D / DELTA_EXPANSION; /* Input dimension                  */
     const int N = REDUCED_PHONEME_CNT;  /* Output vector dimension          */
+    int B = batch_size;                 /* Batch size                       */
     int L = layers_cnt + 1;             /* Number of layers                 */
     if (dropout_rate > 0)               /* One dropout after each LSTM      */
         L += layers_cnt;
-    int B = batch_size;                 /* Batch size                       */
 
     MODEL* m;
     if (loadmodel != NULL) {
@@ -155,6 +155,12 @@ int timit_lstm_dense_classification(
         if (m == NULL)
             return 0;
         L = m->num_layers;
+        if (m->input_dim != D) {
+            fprintf(stderr,"Model input dimension %d does not match feature "
+                           "files dimension %d\n",m->input_dim,D);
+            model_free(m);
+            return 0;
+        }
         if (B >= 0) /* use batch size specified on command line */
             model_set_batch_size(m,B);
         else /* use original model batch size */
@@ -194,8 +200,8 @@ int timit_lstm_dense_classification(
     printf("%d.\n",N);
     if (dropout_rate > 0)
         printf("Dropout rate %.3g after each LSTM layer.\n",dropout_rate);
-    printf("Input dimension %d. Expended input dimension %d. Batch size %d.\n",
-                                                                       Dr,D,B);
+    printf("Input dimension %d. Expended input dimension %d. ",Dr,D);
+    printf("Batch size %d.\n",B);
     printf("%d epochs, ",epochs);
     if (learning_rate == 0 && schedule != NULL)
         printf("learning rate schedule %s \n",schedule);
@@ -203,7 +209,6 @@ int timit_lstm_dense_classification(
         printf("learning rate %g, weight decay %g \n",
                                                    learning_rate,weight_decay);
     printf("Using %s loss function\n\n",loss_func);
-
 
     /* Create file name stem for this run */
     char ls[128];
@@ -257,7 +262,8 @@ int timit_lstm_dense_classification(
     /* Read data */
     printf("%s Loading data...\n",date_time(datetimebuf));
     cnt = read_feature_files(timit_tr_data_dir,
-                          timit_tr_file_list,STr,sTr,MTr,xTr,yTrc,0,NULL,NULL);
+                             timit_tr_file_list,STr,sTr,MTr,D,(float*) xTr,yTrc,
+                             0,NULL,NULL);
     if (cnt == 0)
         return 0;
     /* Update sTr, MTr with actual values */
@@ -270,7 +276,8 @@ int timit_lstm_dense_classification(
     int PTr = count_phoneme(yTrc,MTr);
 
     cnt = read_feature_files(timit_vd_data_dir,
-                          timit_vd_file_list,SVd,sVd,MVd,xVd,yVdc,0,NULL,NULL);
+                             timit_vd_file_list,SVd,sVd,MVd,D,(float*) xVd,yVdc,
+                             0,NULL,NULL);
     if (cnt == 0)
         return 0;
     /* Update sVd, MVd with actual values */
@@ -283,7 +290,8 @@ int timit_lstm_dense_classification(
     int PVd = count_phoneme(yVdc,MVd);
 
     cnt = read_feature_files(timit_te_data_dir,
-                       timit_te_file_list,STe,sTe,MTe,xTe,yTec,PhTe,phTe,pcTe);
+                             timit_te_file_list,STe,sTe,MTe,D,(float*) xTe,yTec,
+                             PhTe,phTe,pcTe);
     if (cnt == 0)
         return 0;
     /* Update sTe, MTe with actual values */
@@ -488,7 +496,7 @@ int main(int argc, char** argv)
       "             [-L 's1 s2 ...'] [-S e:lr:wd,e:lr:wd,...]               \n"
       "             [-l <model file>] [-s <model file>]                     \n"
       "             [-R <rng seed>] [-d <dropout rate>]                     \n"
-      "             [-ctc | -cross-entropy]                                 \n"
+      "             [--ctc | --cross-entropy]                               \n"
       "                                                                     \n"
       " -L: LSTM layer specification. One additional output layer           \n"
       "     is implied. So for example -L '128 64' specifies two            \n"
@@ -516,7 +524,7 @@ int main(int argc, char** argv)
     int rng_seed = 42;
     float dropout_rate = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "e:l:s:b:r:w:L:S:R:d:c:h")) != -1) {
+    while ((opt = getopt(argc, argv, "e:l:s:b:r:w:L:S:R:d:-:h")) != -1) {
         switch (opt) {
             case 'h': printf(usage); exit(0);
             case 'e': epochs = atoi(optarg); break;
@@ -538,14 +546,14 @@ int main(int argc, char** argv)
             case 'S': sch = optarg; break;
             case 'R': rng_seed = atoi(optarg); break;
             case 'd': dropout_rate = atof(optarg); break;
-            case 'c': /* optarg contains the option string sans first character */
-                if (strcmp(optarg,"tc") == 0)
+            case '-':
+                if (strcmp(optarg,"ctc") == 0)
                     ctc_mode = 1;
                 else
-                if (strcmp(optarg,"ross-entropy") == 0)
+                if (strcmp(optarg,"cross-entropy") == 0)
                     ctc_mode = 0;
                 else {
-                    fprintf(stderr,"%s: invalid option -- 'c%s'\n",argv[0],optarg);
+                    fprintf(stderr,"%s: invalid option '--%s'\n",argv[0],optarg);
                     printf(usage);
                     exit(-1);
                 }
@@ -558,6 +566,7 @@ int main(int argc, char** argv)
     }
     int ok;
     ok = timit_lstm_dense_classification(loadfile,storefile,layers,lyrcnt,
-                rng_seed,dropout_rate,ctc_mode,"adamw",bsize,lr,wd,epochs,sch);
+                rng_seed,dropout_rate,ctc_mode,"adamw",bsize,lr,wd,
+                epochs,sch);
     return (ok) ? 0 : -1;
 }
