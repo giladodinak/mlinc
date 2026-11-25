@@ -14,28 +14,36 @@ typedef struct VOCAB {
     float    coverage;  /* Fraction of corpus covered              */
     int      unk_id;    /* id of <unk>, PAD if not used            */
     int      num_id;    /* id of <num>, PAD if not used            */
+    int max_word_len;   /* words longer then this are skipped      */
     float*   freq;      /* [size] Unigram freq; NULL if unused     */
     int*     dist;      /* Negative-sampling table; NULL if unused */
     int      dist_size; /* Entries in dist, 0 if dist is NULL      */
-    int      tok_flags; /* Tokenizer flags (TOK_*) used by build   */
+    int      token_flags; /* Tokenizer flags (TOK_*) used by build */
 } VOCAB;
 
 /* vocab_build - Builds a vocabulary by scanning a corpus
  *
  * Parameters:
- *   file_list  - list of text files
- *   num_files  - number of files in file_list
- *   data_dir   - location of files
- *   vocab_size - Number of vocabulary words; 0 - derive from coverage
- *   coverage   - Target corpus-coverage fraction when vocab_size == 0
- *   max_vocab  - Maximum number of distinct words (typ. 3 x vocab_size)
- *   flags      - Bitwise OR of optional flags
- *       VOCAB_UNK     - unknown words mapped to <unk>; otherwise ignored
- *       VOCAB_NUM     - numbers mapped to <num>; otherwise unknown words
- *       VOCAB_SPECIAL - recognize <name> special tokens
- *       VOCAB_FREQ    - calculate and store word frequencies
- *       VOCAB_DIST    - calculate and store negative sampling distribution
- *       VOCAB_VERBOSE - print progress to stdout
+ *   file_list    - list of text files
+ *   num_files    - number of files in file_list
+ *   data_dir     - location of files
+ *   vocab_size   - Number of vocabulary words; 0 - derive from coverage
+ *   coverage     - Target corpus-coverage fraction when vocab_size == 0
+ *   max_vocab    - Maximum number of distinct words (typ. 3 x vocab_size)
+ *   max_word_len - words longer then this are skipped
+ *   flags        - Bitwise OR of optional flags (see below)
+ *   excpfx       - Tokens starting with this prefix (e.g. input-only tokens
+ *                  such as "<_" for <_aa>) are excluded from the negative
+ *                  sampling distribution; NULL or "" - none excluded
+ *
+ * Flags:
+ *   VOCAB_UNK     - unknown words mapped to <unk>; otherwise ignored
+ *   VOCAB_NUM     - numbers mapped to <num>; otherwise unknown words
+ *   VOCAB_SPECIAL - recognize <name> special tokens
+ *   VOCAB_FREQ    - calculate and store word frequencies
+ *   VOCAB_DIST    - calculate and store negative sampling distribution
+ *   VOCAB_VERBOSE - print progress to stdout
+ *
  *
  * Notes:
  *   - With VOCAB_SPECIAL, special tokens (<name>, e.g. <bos> <eos> <sep>)
@@ -51,7 +59,8 @@ typedef struct VOCAB {
  *   A VOCAB; returns NULL on failure.
  */
 VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
-                   int vocab_size, float coverage, int max_vocab, int flags);
+                   int vocab_size, float coverage, int max_vocab, int flags,
+                   int max_word_len, const char* excpfx);
 
 #define VOCAB_UNK      1
 #define VOCAB_NUM      2

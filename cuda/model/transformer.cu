@@ -106,6 +106,11 @@ extern "C" void transformer_set_pad_mask(TRANSFORMER* l, const iVec pad_mask)
     mha_set_pad_mask(l->mha,pad_mask);
 }
 
+extern "C" void transformer_set_seg_mask(TRANSFORMER* l, const iVec seg_mask)
+{
+    mha_set_seg_mask(l->mha,seg_mask);
+}
+
 extern "C" void transformer_free(TRANSFORMER* l)
 {
     if (l == NULL) return;

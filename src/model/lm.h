@@ -16,8 +16,9 @@ typedef struct lm_s {
     int N;              /* Number of transformer layers           */
     int BT;             /* B * T                                  */
     int n_neg;
+    int bos_id;         /* <bos> token id for reset-at-bos        */
     LMEMB* emb;
-    LAYER* tr;          /* N transformer LAYERs */
+    LAYER* tr;          /* N transformer LAYERs                   */
     SMSFTMAX* head;
     fArr2D* gHead;      /* Head gradient buffer [1] of [K][E]     */
 
@@ -32,6 +33,7 @@ typedef struct lm_s {
     fArr2D dnext;
 
     iVec pad_mask;      /* [BT]  1 real / 0 pad                   */
+    iVec seg_mask;      /* [BT]  segment id per position          */
     fArr2D labels;      /* [BT][1] next-token targets (as floats) */
     iVec ids;           /* [BT]  input token ids                  */
     void* devstat;      /* Additional implementation state        */

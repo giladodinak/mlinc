@@ -31,7 +31,8 @@
 #include "lmio.h"
 
 typedef struct lmstat_s {
-    iVec nn_pad_mask;
+    iVec nn_pad_mask; /* Backend-resident copy of pad_mask [BT] */
+    iVec nn_seg_mask; /* Backend-resident copy of seg_mask [BT] */
 } LMSTAT;
 
 /* Wrap the N transformer LAYERs and the output layer in a MODEL 
@@ -114,11 +115,13 @@ int write_lm(const LM* m, int final, const VOCAB* vocab,
     int cnt = fprintf(fp,"LM V %d E %d T %d B %d N %d n_neg %d "
                          "optimizer '%c' weight_decay %.6g learning_rate %.6g "
                          "lr_decay %.6g num_epochs %d epoch %d update_cnt %d "
-                         "lrng_seed %d sample_frac %.6g final %d\n",
+                         "lrng_seed %d sample_frac %.6g final %d "
+                         "reset_at_bos %d shuffle_batch %d\n",
                       m->V,m->E,m->T,m->B,m->N,m->n_neg,
                       st->optimizer,st->weight_decay,st->learning_rate,
                       st->lr_decay,st->num_epochs,st->epoch,st->update_cnt,
-                      st->lrng_seed,st->sample_frac,final);
+                      st->lrng_seed,st->sample_frac,final,
+                      st->reset_at_bos,st->shuffle_batch);
     if (cnt <= 0 || cnt == EOF) {
         fprintf(stderr,"In write_lm: failed to write the header\n");
         return 0;
@@ -157,14 +160,18 @@ LM* read_lm(FILE* fp, VOCAB** pvocab, LMPARAM* st)
     int V, E, T, B, N, n_neg, num_epochs, epoch, update_cnt, lrng_seed, final;
     char optimizer;
     float weight_decay, learning_rate, lr_decay, sample_frac;
+    int reset_at_bos  = 0;
+    int shuffle_batch = 0;
     int cnt = fscanf(fp," LM V %d E %d T %d B %d N %d n_neg %d "
                         "optimizer '%c' weight_decay %g learning_rate %g "
                         "lr_decay %g num_epochs %d epoch %d update_cnt %d "
-                        "lrng_seed %d sample_frac %g final %d\n",
+                        "lrng_seed %d sample_frac %g final %d "
+                        "reset_at_bos %d shuffle_batch %d\n",
                      &V,&E,&T,&B,&N,&n_neg,&optimizer,&weight_decay,
                      &learning_rate,&lr_decay,&num_epochs,&epoch,
-                     &update_cnt,&lrng_seed,&sample_frac,&final);
-    if (cnt < 16 || cnt == EOF) {
+                     &update_cnt,&lrng_seed,&sample_frac,&final,
+                     &reset_at_bos,&shuffle_batch);
+    if (cnt < 18 || cnt == EOF) {
         fprintf(stderr,"In read_lm: failed to read the header\n");
         return NULL;
     }
@@ -227,12 +234,31 @@ LM* read_lm(FILE* fp, VOCAB** pvocab, LMPARAM* st)
     m->dcur  = nnallocmem(m->BT,E,float);
     m->dnext = nnallocmem(m->BT,E,float);
 
+    m->bos_id   = 0; /* reset-at-bos disabled unless set by the caller */
     m->pad_mask = allocmem(m->BT,1,int);
+    m->seg_mask = allocmem(m->BT,1,int);
     m->labels   = allocmem(m->BT,1,float);
     m->ids      = allocmem(m->BT,1,int);
     LMSTAT* ds = allocmem(1,1,LMSTAT);
     ds->nn_pad_mask = (iVec) nnallocmem(m->BT,1,int);
+    ds->nn_seg_mask = (iVec) nnallocmem(m->BT,1,int);
     m->devstat = ds;
+
+    /* Neutral segment ids (all equal) so segment masking is a no-op until,
+     * and unless, reset-at-bos fills real ids each forward (mirrors lm_create).
+     */
+    for (int i = 0; i < m->BT; i++)
+        m->seg_mask[i] = 0;
+    nnmemcpy(ds->nn_seg_mask,m->seg_mask,m->BT * sizeof(int));
+
+    /* The transformer layers come from read_model(), so their masks were never
+     * wired. Wire the backend-resident pad and segment masks into every layer
+     * (set once, as lm_create does); their content is refreshed each lm_forward.
+     */
+    for (int i = 0; i < m->N; i++) {
+        transformer_set_pad_mask(m->tr[i].transformer,ds->nn_pad_mask);
+        transformer_set_seg_mask(m->tr[i].transformer,ds->nn_seg_mask);
+    }
 
     /* Re-attach the sampling table to the output */
     if (vocab->dist != NULL)
@@ -250,6 +276,8 @@ LM* read_lm(FILE* fp, VOCAB** pvocab, LMPARAM* st)
         st->lr_decay      = lr_decay;
         st->weight_decay  = weight_decay;
         st->lrng_seed     = lrng_seed;
+        st->reset_at_bos  = reset_at_bos;
+        st->shuffle_batch = shuffle_batch;
     }
     return m;
 }

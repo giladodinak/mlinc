@@ -22,6 +22,7 @@
 
 typedef struct lmstat_s {
     iVec nn_pad_mask; /* Backend-resident copy of pad_mask [BT] */
+    iVec nn_seg_mask; /* Backend-resident copy of seg_mask [BT] */
 } LMSTAT;
 
 LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
@@ -31,14 +32,16 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     LM* m = allocmem(1,1,LM);
     m->V = vocab; m->E = model_dim; m->T = seq_len; m->B = batch;
     m->N = layers; m->BT = batch * seq_len; m->n_neg = n_neg;
+    m->bos_id = 0; /* reset-at-bos disabled unless set by the caller */
 
     /* Embedding: owns its weights (untied), training mode. */
     m->emb = lmemb_create(model_dim,seq_len,/*padinx=*/0);
     lmemb_init(m->emb,vocab,batch,/*training=*/1,/*tied=*/0);
 
-    /* pad mask (common to all layers) */
+    /* Copies of the pad and segment masks (common to all layers)i */
     LMSTAT* s = allocmem(1,1,LMSTAT);
     s->nn_pad_mask = (iVec) nnallocmem(m->BT,1,int);
+    s->nn_seg_mask = (iVec) nnallocmem(m->BT,1,int);
     m->devstat = s;
 
     /* Transformer stack, each wrapped in a LAYER */
@@ -47,6 +50,7 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
         TRANSFORMER* t = transformer_create(heads,seq_len,model_dim,ffn_dim,0);
         transformer_init(t,batch,1,dropout);
         transformer_set_pad_mask(t,s->nn_pad_mask);
+        transformer_set_seg_mask(t,s->nn_seg_mask);
         m->tr[i].type = 't';
         m->tr[i].transformer = t;
         layer_alloc_opt_state(&m->tr[i],optimizer);
@@ -66,8 +70,18 @@ LM* lm_create(int vocab, int model_dim, int heads, int seq_len,
     m->dnext = nnallocmem(m->BT,model_dim,float);
 
     m->pad_mask = allocmem(m->BT,1,int);
+    m->seg_mask = allocmem(m->BT,1,int);
     m->labels = allocmem(m->BT,1,float);
     m->ids = allocmem(m->BT,1,int);
+
+    /* Neutral segment ids (all equal) so segment masking is a no-op until,
+     * and unless, reset-at-bos fills real ids each forward (see lm_forward).
+     * Mirrors pad_mask: the device pointer is wired once, only content changes.
+     */
+    for (int i = 0; i < m->BT; i++)
+        m->seg_mask[i] = 0;
+    nnmemcpy(s->nn_seg_mask,m->seg_mask,m->BT * sizeof(int));
+
     return m;
 }
 
@@ -89,11 +103,13 @@ void lm_free(LM* m)
     nnfreemem(m->dcur);
     nnfreemem(m->dnext);
     freemem(m->pad_mask);
+    freemem(m->seg_mask);
     freemem(m->labels);
     freemem(m->ids);
     if (m->devstat != NULL) {
         LMSTAT* s = (LMSTAT*) m->devstat;
         nnfreemem(s->nn_pad_mask);
+        nnfreemem(s->nn_seg_mask);
         freemem(s);
     }
     freemem(m);
@@ -110,6 +126,25 @@ fArr2D lm_forward(LM* m, int training)
 
     LMSTAT* s = (LMSTAT*) m->devstat;
     nnmemcpy(s->nn_pad_mask,m->pad_mask,m->BT * sizeof(int));
+
+    if (m->bos_id > 0) { /* reset-at-bos active */
+        /* Segment ids: give every token the same id within a
+         * document (<bos>..<eos> unit) and a distinct id per
+         * document, so attention can be confined within one.
+         */
+        iVec seg = m->seg_mask;
+        for (int b = 0; b < m->B; b++) {
+            int c = 0;
+            for (int t = 0; t < m->T; t++) {
+                int r = b * m->T + t;
+                if (m->ids[r] == m->bos_id)
+                    c++;
+                seg[r] = c;
+            }
+        }
+        nnmemcpy(s->nn_seg_mask,m->seg_mask,m->BT * sizeof(int));
+    }
+
     for (int i = 0; i < m->N; i++)
         transformer_forward(m->tr[i].transformer,
                             m->acts[i],training,m->acts[i + 1],i);
@@ -235,16 +270,23 @@ static float kth_largest(float* a, int n, int k)
  * the prompt and all tokens generated so far. The prompt and generated
  * tokens remain available as left context through the MHA KV cache.
  *
+ * Special tokens: tokens whose string starts with '<' (e.g. <bos>, <sep>,
+ * input-only tokens such as <_aa>) are never generated, except <eos>.
+ * Generating <eos> ends the sequence; <eos> is not written to buffer.
+ *
  * Parameters:
  *   m           - Language model
  *   hmap        - Token id <-> string map, used to render tokens
  *   seed        - Prompt token ids.
  *   seedlen     - Number of prompt tokens
- *   steps       - Number of tokens to generate
- *   buffer      - Output string buffer; null-terminated on return.
+ *   steps       - Maximum number of tokens to generate
+ *   buffer      - Output string buffer, receives the generated tokens only
+ *                 (not the prompt); null-terminated on return.
  *   buflen      - Capacity of `buffer` in characters. If the text would
  *                 overflow, output is truncated at a token boundary
- *   temperature - Sampling temperature
+ *   temperature - Sampling temperature; <= 0 selects greedy decoding
+ *   top_k       - Sample only from the top_k highest-scoring tokens
+ *                 (<= 0 to disable)
  *   rep_penalty - Repetition penalty multiplier (<= 1 to disable)
  *   rep_win_len - Size of the recent-token ring buffer used by the penalty
  *
@@ -292,19 +334,11 @@ int lm_generate(LM* m, HASHMAP* hmap,
     int* recent = (rep_win_len > 0) ? allocmem(rep_win_len,1,int) : NULL;
     int nrecent = 0;
 
-    /* Output buffer starts with the seed tokens: these are the
-     * conditioning context x_1..x_m, echoed back so the printed
-     * text reads prompt + continuation.
-     */
-    for (int i = 0; i < seedlen && buflen > 1; i++) {
-        bufext = snprintf(buffer + bufpos,buflen - bufpos,
-                          "%s ",hashmap_inx2str(hmap,seed[i]));
-        if (bufext < 0 || bufext >= buflen - bufpos) {
-            buffer[bufpos] = '\0'; /* Drop the partially outputted token */
-            break;
-        }
-        bufpos += bufext;
-    }
+    /* <eos> ends generation; other special tokens are never generated */
+    int eos = hashmap_str2inx(hmap,"<eos>",0);
+    unsigned char* excl = allocmem(K,1,unsigned char);
+    for (int k = 0; k < K; k++)
+        excl[k] = (k != eos && hashmap_inx2str(hmap,k)[0] == '<');
 
     /* Switch to single-row processing and use the MHA KV cache */
     lm_use_cache(m,1);
@@ -330,6 +364,11 @@ int lm_generate(LM* m, HASHMAP* hmap,
          */
         smsftmax_logits(m->head,(fArr2D) H,(fArr2D) logits,1);
 
+        /* Mask special tokens that are never generated */
+        for (int k = 1; k < K; k++)
+            if (excl[k])
+                logits[k] = -1e30f;
+
         /* log-softmax: log p_i = z_i - logsumexp(z)
          * (Ref. #4, gauge-fixing)
          */
@@ -347,9 +386,9 @@ int lm_generate(LM* m, HASHMAP* hmap,
             logits[k] -= logsum;
 
         /* Repetition penalty applied once per unique recent token.
-         * Scaling a normalized log-prob (which is <= 0) by rep_penalty > 1 
+         * Scaling a normalized log-prob (which is <= 0) by rep_penalty > 1
          * makes it more negative, i.e. lowers the probability of tokens
-         * already emitted in the window.
+         * already outputted in the window.
          * Ref. #2 Sec. 4.1, Ref. #4.
          */
         if (rep_penalty > 1) {
@@ -435,9 +474,12 @@ int lm_generate(LM* m, HASHMAP* hmap,
                     nxt = k;
         }
 
+        if (nxt == eos && eos > 0) /* End of sequence */
+            break;
+
         /* Output the chosen token's string */
-        bufext = snprintf(buffer + bufpos,buflen - bufpos,
-                          "%s ",hashmap_inx2str(hmap,nxt));
+        const char* token = hashmap_inx2str(hmap,nxt);
+        bufext = snprintf(buffer + bufpos,buflen - bufpos,"%s ",token);
         if (bufext < 0 || bufext >= buflen - bufpos) {
             buffer[bufpos] = '\0'; /* Drop the partially outputted token */
             break;
@@ -445,7 +487,7 @@ int lm_generate(LM* m, HASHMAP* hmap,
         bufpos += bufext;
         generated++;
 
-        /* Record the emitted token in the repetition window so the
+        /* Record the outputted token in the repetition window so the
          * repetition penalty can down-weight it on later steps.
          */
         if (rep_win_len > 0 && rep_penalty > 1) {
@@ -470,5 +512,6 @@ int lm_generate(LM* m, HASHMAP* hmap,
     freemem(logits);
     freemem(tmp);
     freemem(recent);
+    freemem(excl);
     return generated; /* Actual number of words generated (excluding seed) */
 }

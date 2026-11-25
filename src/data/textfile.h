@@ -15,21 +15,22 @@ typedef struct wrdcnt_s {
  * table, and/or an array of word tokens.
  *
  * Parameters:
- *   file_name  - Name of file to be processed.
- *   file_dir   - Directory prefix where the file is located (optional).
- *   hmap       - Hashmap that stores the word vocabulary (optional).
- *   add_new    - If non-zero, new words are added to the hashmap.
- *   max_vocab  - Maximum number of words to include in the vocabulary.
- *   word_cnt   - An output array of size max_vocab, where each entry is 
- *                incremented by the number of times the corresponding word
- *                appears in the text file (optional, requires hmap).
- *   file_words - An output array of size max_words, which stores the hashmap
- *                index for each word encountered in the file. If add_new is
- *                zero, words not in the vocabulary are ignored (skipped).
- *   max_words  - Size of file_words array
- *   flags      - Bitwise OR of optional token types (0 = words only):
- *                TOK_SPECIAL - "<name>" tokens, e.g. <bos>, <eos>, <sep>
- *                TOK_NUMBER  - numbers, e.g. 42, 3.14, 1,000
+ *   file_name    - Name of file to be processed.
+ *   file_dir     - Directory prefix where the file is located (optional).
+ *   hmap         - Hashmap that stores the word vocabulary (optional).
+ *   add_new      - If non-zero, new words are added to the hashmap.
+ *   max_vocab    - Maximum number of words to include in the vocabulary.
+ *   word_cnt     - An output array of size max_vocab, where each entry is 
+ *                  incremented by the number of times the corresponding word
+ *                  appears in the text file (optional, requires hmap).
+ *   file_words   - An output array of size max_words, which stores the hashmap
+ *                  index for each word encountered in the file. If add_new is
+ *                  zero, words not in the vocabulary are ignored (skipped).
+ *   max_words    - Size of file_words array
+ *   max_word_len - Words longer than this are skipped, ignored.
+ *   flags        - Bitwise OR of optional token types (0 = words only):
+ *                  TOK_SPECIAL - "<name>" tokens, e.g. <bos>, <eos>, <sep>
+ *                  TOK_NUMBER  - numbers, e.g. 42, 3.14, 1,000
  *
  * Returns:
  *  - If hmap is not NULL: Returns the number of words that were not skipped.
@@ -43,7 +44,8 @@ int process_text_file(const char* file_name,
                       const char* file_dir,
                       HASHMAP* hmap, int add_new,
                       int max_vocab, WRDCNT* word_cnt,
-                      int *file_words, int max_words, int flags);
+                      int *file_words, int max_words, 
+                      int max_word_len, int flags);
 
 /* Reads a list file containing file names (one per line), filters to include
  * only those files that end with the ".txt" extension (case-insensitive),

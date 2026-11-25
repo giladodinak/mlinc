@@ -100,10 +100,10 @@ int hashmap_str2inx_int(HASHMAP* restrict m, const char* str, int ins)
     }
 err1:
     fflush(stdout);
-    fprintf(stderr,"\nIn hashmap_str2inx: table full");
+    fprintf(stderr,"\nIn hashmap_str2inx: table full\n");
     exit(-1);
 err2:
     fflush(stdout);
-    fprintf(stderr,"\nIn hashmap_str2inx: string too long");
+    fprintf(stderr,"\nIn hashmap_str2inx: out of string memory\n");
     exit(-1);
 }

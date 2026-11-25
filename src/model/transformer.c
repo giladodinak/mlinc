@@ -1,7 +1,7 @@
 /* Copyright (c) 2026 Gilad Odinak */
 /* Decoder-only Transformer layer implementation
  *
- * Reference: Attention Is All You Need https://arxiv.org/pdf/1706.03762v7 
+ * Reference: Attention Is All You Need https://arxiv.org/pdf/1706.03762v7
  *
  * Notes:
  *   - The original paper uses ReLU. This implementation uses GELU instead.
@@ -119,6 +119,14 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
 void transformer_set_pad_mask(TRANSFORMER* l, const iVec pad_mask)
 {
     mha_set_pad_mask(l->mha,pad_mask);
+}
+
+/* Sets a segment mask for intra-document ("reset at <bos>") attention.
+ * Forwards to the layer's MHA. Passing NULL disables segment masking.
+ */
+void transformer_set_seg_mask(TRANSFORMER* l, const iVec seg_mask)
+{
+    mha_set_seg_mask(l->mha,seg_mask);
 }
 
 /* Releases all memory owned by the TRANSFORMER.

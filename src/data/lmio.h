@@ -6,7 +6,6 @@
 #include "vocab.h"
 #include "lm.h"
 
-/* Laguage Model training schedule / optimizer state */
 typedef struct {
     char  optimizer;     /* Optimizer code ('a' -> AdamW 'a')          */
     int   update_cnt;    /* AdamW step counter (for bias correction)   */
@@ -18,6 +17,8 @@ typedef struct {
     float lr_decay;      /* Per-epoch learning-rate decay              */
     float weight_decay;  /* AdamW weight decay                         */
     int   lrng_seed;     /* RNG state for exact continuation           */
+    int   reset_at_bos;  /* 1 if intra-document (<bos>) present        */
+    int   shuffle_batch; /* 1 if packed examples are reshuffled        */
 } LMPARAM;
 
 /* write_lm / read_lm - Write / read a model to / from an open file.
@@ -53,6 +54,7 @@ typedef struct {
  */
 int write_lm(const LM* m, int final, const VOCAB* vocab,
              const LMPARAM* st, FILE* fp);
+
 LM*  read_lm(FILE* fp, VOCAB** vocab, LMPARAM* st);
 
 /* load_lm / store_lm - Open the named file and read / write a model. */

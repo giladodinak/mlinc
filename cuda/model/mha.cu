@@ -207,6 +207,16 @@ void mha_set_pad_mask(MHA* l, const iVec pad_mask)
     l->pad_mask = pad_mask;
 }
 
+/* Sets a segment mask for intra-document ("reset at <bos>") attention.
+ * Passing NULL disables segment masking. Like pad_mask, the pointer is set
+ * once (so the forward CUDA Graph can capture it) and only its content is
+ * refreshed between forward passes.
+ */
+void mha_set_seg_mask(MHA* l, const iVec seg_mask)
+{
+    l->seg_mask = seg_mask;
+}
+
 /* Releases all memory owned by an MHA layer.
  *
  * Frees the projection weights, RoPE table, forward scratch buffers, and
@@ -312,14 +322,17 @@ static __device__ __forceinline__ float block_reduce_sum(float v, float* sh)
     return v;
 }
 
-/* Fused score scaling, causal/padding masks, and row-wise softmax.
+/* Fused score scaling, causal/padding/segment masks, and row-wise softmax.
  *
  * One CUDA block processes one attention row; each thread processes EPT row
  * elements, normally kept in registers by the compiler
  * (element j = threadIdx.x + k*blockDim.x, so loads and stores are coalesced).
  *
  * The row is read from global memory once and written once.  Masked elements
- * are not loaded and are written as 0.
+ * are not loaded and are written as 0.  A key j is masked when it is beyond
+ * the causal limit, is padding, or (when seg_mask is set) carries a different
+ * segment id than this query row, which confines attention within one
+ * <bos>..<eos> unit.
  *
  * If every key of the row is masked (only possible when the whole sequence
  * is padding), the row is set to the uniform distribution 1/T, matching the
@@ -333,6 +346,7 @@ static __device__ __forceinline__ float block_reduce_sum(float v, float* sh)
 
 static __global__ void scale_mask_softmax_kernel(float* Scores,
                                                  const int* pad_mask,
+                                                 const int* seg_mask,
                                                  int b, int T,
                                                  int lookahead, float scale)
 {
@@ -340,6 +354,8 @@ static __global__ void scale_mask_softmax_kernel(float* Scores,
     const int row = blockIdx.x;
     float* p = Scores + (size_t) row * T;
     const int* pm = (pad_mask != NULL) ? pad_mask + (size_t) b * T : NULL;
+    const int* sm = (seg_mask != NULL) ? seg_mask + (size_t) b * T : NULL;
+    const int srow = (sm != NULL) ? sm[row] : 0; /* this query's segment id */
 
     int limit = T;
     if (lookahead >= 0 && row + lookahead + 1 < T)
@@ -351,7 +367,7 @@ static __global__ void scale_mask_softmax_kernel(float* Scores,
     for (int k = 0; k < EPT; k++) {
         const int j = threadIdx.x + k * blockDim.x;
         float x = -INFINITY;
-        if (j < limit && (pm == NULL || pm[j]))
+        if (j < limit && (pm == NULL || pm[j]) && (sm == NULL || sm[j] == srow))
             x = p[j] * scale;
         v[k] = x;
         vmax = fmaxf(vmax,x);
@@ -388,7 +404,9 @@ static __global__ void scale_mask_softmax_kernel(float* Scores,
 /* Launches scale_mask_softmax_kernel over the T rows of one [T][T]
  * attention matrix.  blockDim.x = ceil(T/EPT) rounded up to a multiple of 32.
  */
-static void scale_mask_softmax(float* Scores, const int* pad_mask,
+static void scale_mask_softmax(float* Scores,
+                               const int* pad_mask,
+                               const int* seg_mask,
                                int b, int T, int lookahead, float scale)
 {
     if (T > MAX_CONTEXT) {
@@ -400,7 +418,7 @@ static void scale_mask_softmax(float* Scores, const int* pad_mask,
     threads = (threads + 31) / 32 * 32;
     const int blocks = T;
     scale_mask_softmax_kernel<<<blocks,threads,0,cuda_stream()>>>(
-        Scores,pad_mask,b,T,lookahead,scale);
+        Scores,pad_mask,seg_mask,b,T,lookahead,scale);
 }
 
 /* mha_forward - forward pass of Multi-Head Attention (MHA) layer
@@ -543,7 +561,9 @@ void mha_forward(MHA* restrict l,
                 matmulT_ld(Ah,Qh,Kh,T,Dh,T,D,D,T);
 
                 const int* pad_mask = (const int*) l->pad_mask;
-                scale_mask_softmax((float*) Ah,pad_mask,b,T,lookahead,scale);
+                const int* seg_mask = (const int*) l->seg_mask;
+                scale_mask_softmax((float*) Ah,pad_mask,seg_mask,
+                                   b,T,lookahead,scale);
 
                 if (training && l->training)
                     if (l->dropout != NULL && l->dropout[b * H + h]->rate > 0) {

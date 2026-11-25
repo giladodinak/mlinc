@@ -12,21 +12,22 @@
  * table, and/or an array of word tokens.
  *
  * Parameters:
- *   file_name  - Name of file to be processed.
- *   file_dir   - Directory prefix where the file is located (optional).
- *   hmap       - Hashmap that stores the word vocabulary (optional).
- *   add_new    - If non-zero, new words are added to the hashmap.
- *   max_vocab  - Maximum number of words to include in the vocabulary.
- *   word_cnt   - An output array of size max_vocab, where each entry is 
- *                incremented by the number of times the corresponding word
- *                appears in the text file (optional, requires hmap).
- *   file_words - An output array of size max_words, which stores the hashmap
- *                index for each word encountered in the file. If add_new is
- *                zero, words not in the vocabulary are ignored (skipped).
- *   max_words  - Size of file_words array
- *   flags      - Bitwise OR of optional token types (0 = words only):
- *                TOK_SPECIAL - "<name>" tokens, e.g. <bos>, <eos>, <sep>
- *                TOK_NUMBER  - numbers, e.g. 42, 3.14, 1,000
+ *   file_name    - Name of file to be processed.
+ *   file_dir     - Directory prefix where the file is located (optional).
+ *   hmap         - Hashmap that stores the word vocabulary (optional).
+ *   add_new      - If non-zero, new words are added to the hashmap.
+ *   max_vocab    - Maximum number of words to include in the vocabulary.
+ *   word_cnt     - An output array of size max_vocab, where each entry is 
+ *                  incremented by the number of times the corresponding word
+ *                  appears in the text file (optional, requires hmap).
+ *   file_words   - An output array of size max_words, which stores the hashmap
+ *                  index for each word encountered in the file. If add_new is
+ *                  zero, words not in the vocabulary are ignored (skipped).
+ *   max_words    - Size of file_words array
+ *   max_word_len - Words longer than this are skipped, ignored.
+ *   flags        - Bitwise OR of optional token types (0 = words only):
+ *                  TOK_SPECIAL - "<name>" tokens, e.g. <bos>, <eos>, <sep>
+ *                  TOK_NUMBER  - numbers, e.g. 42, 3.14, 1,000
  *
  * Returns:
  *  - If hmap is not NULL: Returns the number of words that were not skipped.
@@ -35,12 +36,15 @@
  *
  * Notes:
  *  - Tokens are formed by the rules in tokenizer.h.
+ *  - When OOV word is encountered, if <unk> exists in the vocabulary, then
+ *    the unknown word is replaced with <unk>.
  */
 int process_text_file(const char* file_name,
                       const char* file_dir,
                       HASHMAP* hmap, int add_new,
                       int max_vocab, WRDCNT* word_cnt,
-                      int *file_words, int max_words, int flags)
+                      int *file_words, int max_words, 
+                      int max_word_len, int flags)
 {
     int maxpath = 512;
     char filepath[2 * maxpath];
@@ -73,9 +77,9 @@ int process_text_file(const char* file_name,
 
     char buffer[20000];
     int file_word_cnt = 0; /* Number of words in the file */
-    const int max_word_len = 100;
-    char token[100 + 1]; /* Lowercased copy of current token */
+    char token[max_word_len + 1]; /* Lowercased copy of current token      */
     int skip = 0; /* Set when an over-long token continues past the buffer */
+    int unk_inx = -2; /* Set to <unk> id if one exists, otherwise to -1    */
     for (int cnt, off = 0;;) {
         cnt = fread(buffer + off,1,sizeof(buffer) - off - 1,fp) + off;
         buffer[cnt] = '\0';
@@ -121,7 +125,13 @@ int process_text_file(const char* file_name,
                 token[len] = '\0';
                 if (hmap != NULL) {
                     int inx = hashmap_str2inx(hmap,token,add_new);
-                    if (inx >= 0 && inx < max_vocab) {
+                    if (inx < 0) { /* Not found - OOV */
+                        if (unk_inx == -2) /* Not yet fetched */
+                            unk_inx = hashmap_str2inx(hmap,"<unk>",0);
+                        if (unk_inx >= 0) /* <unk> exists in vocab */
+                            inx = unk_inx;
+                    }
+                    if (inx >= 0 && inx < max_vocab) { /* word in vocab */
                         if (word_cnt != NULL) {
                             word_cnt[inx].inx = inx;
                             word_cnt[inx].cnt++;

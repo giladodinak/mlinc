@@ -52,14 +52,44 @@ static const char* usage =
 "  --dropout-rate=<f>   Sub-layer dropout rate (default 0.1)\n"
 "  --vocab-size=<n>     Limit vocabulary size (including PAD)\n"
 "  --vocab-coverage=<f> Vocabulary coverage fraction (default 0.99)\n"
+"  --tokens=<list>      Tokenizer features, comma-separated (default none):\n"
+"                         special - recognize <name> tokens (<bos> <sep> <eos>)\n"
+"                         num     - map numbers to <num>\n"
+"                         unk     - map unknown words to <unk>\n"
+"                       The setting is stored in the model and reused by lmgen.\n"
+"  --reset-at-bos       Confine attention within each <bos>..<eos> unit when\n"
+"                       several are packed in one window (needs --tokens=special).\n"
+"  --shuffle-batch      Reshuffle the order of the <bos>..<eos> units within\n"
+"                       each file every epoch (needs --reset-at-bos).\n"
 "  --data-dir=<dir>     Location of training data (default data/news/data)\n"
+"  --valid-list=<file>  Separate validation file list. When given, the whole\n"
+"                       -i list is used for training and validation runs on\n"
+"                       these files instead of a held-out fraction.\n"
+"  --valid-dir=<dir>    Location of the --valid-list files (default --data-dir)\n"
 "  --prompt=\"<prompt>\"  Seed prompt for text generation\n"
 "                       (default 'according to the')\n"
-"  --validation-frac=<f>  Fraction of files held out for validation\n"
-"                         (default 0.01)\n"
+"  --validation-frac=<f>  Fraction of files held out for validation when\n"
+"                         --valid-list is not given (default 0.01)\n"
 "  --print-vocab        Print vocabulary and exit\n"
 "  --cores=<list>       Specify cores for openblas use (def. 0,2,4,6)\n"
 ;
+
+/* Parse a comma-separated --tokens list into VOCAB_* feature flags.
+ * Recognized: special, num (numbers), unk. Unknown names are reported.
+ */
+static int parse_token_feats(const char* s)
+{
+    int f = 0;
+    char buf[128];
+    snprintf(buf,sizeof(buf),"%s",s);
+    for (char* t = strtok(buf,","); t != NULL; t = strtok(NULL,",")) {
+        if      (!strcmp(t,"special") || !strcmp(t,"spec")) f |= VOCAB_SPECIAL;
+        else if (!strcmp(t,"num") || !strcmp(t,"numbers"))  f |= VOCAB_NUM;
+        else if (!strcmp(t,"unk"))                          f |= VOCAB_UNK;
+        else fprintf(stderr,"lmtrain: unknown token feature '%s'\n",t);
+    }
+    return f;
+}
 
 static void shuffle_list(char** list, int cnt)
 {
@@ -68,6 +98,47 @@ static void shuffle_list(char** list, int cnt)
         int j = (int) urand(0,i + 1);
         char* tmp = list[i]; list[i] = list[j]; list[j] = tmp;
     }
+}
+
+/* Reshuffle, in place, the order of the <bos>..(next <bos>) units packed in
+ * fw[0..n). A unit runs from one <bos> to the token before the next <bos>;
+ * if first token is not <bos> do not shuffle.
+ */
+static void shuffle_units(int* fw, int n, int bos_id)
+{
+    if (n <= 1 || bos_id <= 0) return;
+    if (fw[0] != bos_id) return;
+
+    /* Unit start offsets: position 0, then each <bos>. */
+    int* start = allocmem(n + 1,1,int);
+    int u = 0;
+    start[u++] = 0;
+    for (int i = 1; i < n; i++)
+        if (fw[i] == bos_id)
+            start[u++] = i;
+    if (u <= 1) { freemem(start); return; } /* 0 or 1 unit: nothing to do */
+    start[u] = n;                           /* sentinel end of last unit */
+    int nunits = u;
+
+    /* Fisher-Yates permutation of the unit order. */
+    int* order = allocmem(nunits,1,int);
+    for (int i = 0; i < nunits; i++) order[i] = i;
+    for (int i = nunits - 1; i > 0; i--) {
+        int j = (int) urand(0,i + 1);
+        int t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+
+    /* Rebuild the stream in the shuffled unit order, then copy back. */
+    int* scr = allocmem(n,1,int);
+    int pos = 0;
+    for (int k = 0; k < nunits; k++) {
+        int uu = order[k];
+        for (int i = start[uu]; i < start[uu + 1]; i++)
+            scr[pos++] = fw[i];
+    }
+    for (int i = 0; i < n; i++) fw[i] = scr[i];
+
+    freemem(scr); freemem(order); freemem(start);
 }
 
 static LM* load_checkpoint(int argc, char** argv, char** load_file,
@@ -82,7 +153,7 @@ static LM* load_checkpoint(int argc, char** argv, char** load_file,
 {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i],"-l")) {
-            if (i + 1 < argc) 
+            if (i + 1 < argc)
                 *load_file = argv[i + 1];
             break;
         }
@@ -195,7 +266,8 @@ void validate(LM* m, const VOCAB* vocab, char** files, int nfiles,
     for (int fi = 0; fi < nfiles; fi++) {
         int fwcnt = process_text_file(files[fi],data_dir,
                                       vocab->hmap,0,vocab_size,NULL,
-                                      file_words,max_file_words,0);
+                                      file_words,max_file_words,
+                                      255,vocab->token_flags);
         if (fwcnt <= 1)
             continue;
 
@@ -241,7 +313,7 @@ void validate(LM* m, const VOCAB* vocab, char** files, int nfiles,
                 if (target > 0 && target < K)
                     positions++; /* PAD / OOV targets are not scored */
             }
-            if (current_time() - last_report >= 1.0) {
+            if (current_time() - last_report >= 0.1) {
                 last_report = current_time();
                 print_validation_status(
                                     correct,positions,nll,fi,nfiles,val_start);
@@ -309,8 +381,13 @@ int main(int argc, char** argv)
     int   vocab_size     = 0; /* 0 -> from coverage */
     float vocab_coverage = 0.99;
     char* data_dir       = "data/news/data";
+    char* valid_dir      = NULL; /* --valid-dir: dir for validation files   */
+    char* valid_file     = NULL; /* --valid-list: separate validation list  */
     char* prompt         = "according to the";
     int   print_vocab    = 0;
+    int   tok_feat_flags = 0; /* VOCAB_SPECIAL|VOCAB_NUM|VOCAB_UNK from --tokens */
+    int   reset_at_bos   = 0; /* 1 -> intra-document attention masking */
+    int   shuffle_batch  = 0; /* 1 -> reshuffle packed units within a file   */
     char* blas_cores     = "0,2,4,6";
 
     const int max_vocab  =    10000000; /* Can be represented in a float */
@@ -358,7 +435,12 @@ int main(int argc, char** argv)
                 else if (!strncmp(optarg,"dropout-rate=",13))    { if (m == NULL) dropout = atof(optarg + 13); }
                 else if (!strncmp(optarg,"vocab-size=",11))      { if (m == NULL) vocab_size = atoi(optarg + 11); }
                 else if (!strncmp(optarg,"vocab-coverage=",15))  { if (m == NULL) vocab_coverage = atof(optarg + 15); }
+                else if (!strncmp(optarg,"tokens=",7))           { if (m == NULL) tok_feat_flags = parse_token_feats(optarg + 7); }
+                else if (!strncmp(optarg,"reset-at-bos",12))     reset_at_bos = 1;
+                else if (!strncmp(optarg,"shuffle-batch",13))    shuffle_batch = 1;
                 else if (!strncmp(optarg,"data-dir=",9))         data_dir = optarg + 9;
+                else if (!strncmp(optarg,"valid-dir=",10))       valid_dir = optarg + 10;
+                else if (!strncmp(optarg,"valid-list=",11))      valid_file = optarg + 11;
                 else if (!strncmp(optarg,"prompt=",7))           prompt = optarg + 7;
                 else if (!strncmp(optarg,"validation-frac=",16)) validation_frac = atof(optarg + 16);
                 else if (!strncmp(optarg,"print-vocab",11))      print_vocab = 1;
@@ -409,7 +491,7 @@ int main(int argc, char** argv)
         if (*p == ',') p++;
     }
     openblas_use_cpus(cores,core_cnt);
-    
+
     float initial_lr = learning_rate;
 
     printf("\nDecoder-only LM trainer\n");
@@ -417,8 +499,13 @@ int main(int argc, char** argv)
            model_dim,heads,layers,ffn_dim,seq_len,batch_size);
     printf("epochs=%d lr=%g rd=%g wd=%g dropout=%g neg=%d\n",
            num_epochs,initial_lr,lr_decay,weight_decay,dropout,neg_samples);
+    if (load_file == NULL)
+        printf("tokens: special=%d num=%d unk=%d\n",
+               (tok_feat_flags & VOCAB_SPECIAL) != 0,
+               (tok_feat_flags & VOCAB_NUM) != 0,
+               (tok_feat_flags & VOCAB_UNK) != 0);
     fflush(stdout);
-    
+
     int num_files = 0;
     char** file_list = read_text_file_list(tr_file,data_dir,&num_files);
     if (file_list == NULL || num_files == 0) {
@@ -427,14 +514,40 @@ int main(int argc, char** argv)
     }
 
     shuffle_list(file_list,num_files);
-    
-    int num_valid = (int) (num_files * validation_frac);
-    int num_train = num_files - num_valid;
-    char** valid_list = file_list + num_train;
-    if (num_train < 1) {
-        fprintf(stderr,"lmtrain: validation_frac %g leaves no training files\n",
-                validation_frac);
-        return -1;
+
+    /* Validation files come from either a separate --valid-list (all -i files
+     * are then used for training) or a held-out fraction of the -i list. A
+     * separate list is loaded from --valid-dir (default --data-dir) and must
+     * be freed on exit; the fractional slice points into file_list. */
+    const char* valid_data_dir = (valid_dir != NULL) ? valid_dir : data_dir;
+    char** valid_own  = NULL; /* separately allocated list (needs freeing)   */
+    int    num_valid  = 0;
+    int    num_train  = 0;
+    char** valid_list = NULL;
+
+    if (valid_file != NULL) {
+        valid_own = read_text_file_list(valid_file,valid_data_dir,&num_valid);
+        if (valid_own == NULL || num_valid == 0) {
+            fprintf(stderr,"Failed to read validation files list from '%s'\n",
+                    valid_file);
+            free_text_file_list(file_list,num_files);
+            return -1;
+        }
+        num_train  = num_files;
+        valid_list = valid_own;
+    } else {
+        num_valid = (int) (num_files * validation_frac);
+        if (num_valid == 0 && validation_frac > 0 && num_files > 1)
+            num_valid = 1; /* round up so a nonzero fraction holds out a file */
+        num_train  = num_files - num_valid;
+        valid_list = file_list + num_train;
+        if (num_train < 1) {
+            fprintf(stderr,
+                    "lmtrain: validation_frac %g leaves no training files\n",
+                    validation_frac);
+            free_text_file_list(file_list,num_files);
+            return -1;
+        }
     }
     printf("Split: %d training files, %d validation files\n",
            num_train,num_valid);
@@ -445,10 +558,12 @@ int main(int argc, char** argv)
         fflush(stdout);
         vocab = vocab_build(file_list,num_files,data_dir,
                             vocab_size,vocab_coverage,max_vocab,
-                            VOCAB_FREQ | VOCAB_DIST | VOCAB_VERBOSE);
+                            VOCAB_FREQ | VOCAB_DIST | VOCAB_VERBOSE
+                                | tok_feat_flags,255,NULL);
         if (vocab == NULL) {
             fprintf(stderr,"Failed to create vocabulary\n");
             free_text_file_list(file_list,num_files);
+            if (valid_own != NULL) free_text_file_list(valid_own,num_valid);
             return -1;
         }
         vocab_size = vocab->size;
@@ -461,6 +576,7 @@ int main(int argc, char** argv)
                        i,vocab_freq(vocab,i),vocab_word(vocab,i));
             vocab_free(vocab);
             free_text_file_list(file_list,num_files);
+            if (valid_own != NULL) free_text_file_list(valid_own,num_valid);
             return 0;
         }
 
@@ -474,33 +590,63 @@ int main(int argc, char** argv)
         st.num_epochs   = num_epochs;
     }
 
+    /* Reset-at-bos: confine attention within each packed <bos>..<eos> unit.
+     * The setting is stored in the model (st.reset_at_bos), so a resumed run
+     * keeps it even without the flag; the command-line --reset-at-bos can also
+     * turn it on. The <bos> id is derived from the vocabulary each run.
+     */
+    int use_reset = reset_at_bos || (load_file != NULL && st.reset_at_bos);
+    if (use_reset) {
+        int bos = hashmap_str2inx(vocab->hmap,"<bos>",0);
+        if (bos > 0) {
+            m->bos_id = bos;
+            printf("Attention does not cross <bos> (%d) within a window\n",bos);
+        } else
+            m->bos_id = 0;
+        fflush(stdout);
+    } else {
+        m->bos_id = 0;
+    }
+    st.reset_at_bos = (m->bos_id > 0); /* persisted with every checkpoint */
+
+    /* Shuffle-batch: reorder the packed <bos>..<eos> units within each file
+     * every epoch. Stored in the model (st.shuffle_batch) and restored on
+     * resume, like reset-at-bos. It only makes sense alongside reset-at-bos
+     * (units share a window and must stay attention-isolated), so it is
+     * gated on m->bos_id > 0 and ignored otherwise.
+     */
+    int use_shuffle = shuffle_batch || (load_file != NULL && st.shuffle_batch);
+    if (use_shuffle && m->bos_id <= 0) {
+        fprintf(stderr,"lmtrain: shuffle-batch ignored: needs reset-at-bos\n");
+        use_shuffle = 0;
+    }
+    if (use_shuffle)
+        printf("Packed units are reshuffled within each file every epoch\n");
+    st.shuffle_batch = use_shuffle ? 1 : 0; /* persisted with every checkpoint */
+    fflush(stdout);
+
     int* file_words = allocmem(1,max_file_words,int);
     const int BT = m->BT;
 
     char prompt_buf[256];
     int max_prompt_tokens = 8;
     int prompt_tokens[max_prompt_tokens];
-    int prompt_token_count = 0;
-    snprintf(prompt_buf,sizeof(prompt_buf),"%s",prompt);
-    char *token = strtok(prompt_buf," ");
-    while (token != NULL && prompt_token_count < max_prompt_tokens) {
-        char *p = token;
-        for (; *p != '\0'; p++)
-            *p = tolower((unsigned char) *p);
-        int id = vocab_lookup(vocab,token);
-        if (id > 0)
-            prompt_tokens[prompt_token_count++] = id;
-        else {
-            fprintf(stderr,"'%s' is not in the vocabulary - exiting\n",token);
-            lm_free(m);
-            vocab_free(vocab);
-            free_text_file_list(file_list,num_files);
-            return 1;
-        }            
-        token = strtok(NULL," ");
+    int prompt_token_count = vocab_tokenize(vocab,prompt,
+                                            prompt_tokens,max_prompt_tokens);
+    if (prompt_token_count <= 0) {
+        fprintf(stderr,"Seed prompt has no in-vocabulary tokens - exiting\n");
+        lm_free(m);
+        vocab_free(vocab);
+        free_text_file_list(file_list,num_files);
+        if (valid_own != NULL) free_text_file_list(valid_own,num_valid);
+        return 1;
     }
-    printf("Training (sampling %g of %d training files each epoch)\n",
-           sample_frac,num_train);
+    (void) prompt_buf;
+    if (sample_frac < 1.0)
+        printf("Training (sampling %d of %d training files each epoch)\n",
+               (int) (sample_frac * num_train),num_train);
+    else
+        printf("Training\n");
     printf("\n\n");
     fflush(stdout);
     double start_time = current_time();
@@ -515,15 +661,23 @@ int main(int argc, char** argv)
          * RS2: Okanovic et al. https://arxiv.org/pdf/2305.18424
          */
         int act_num_files = (int) (num_train * sample_frac);
-        if (act_num_files < 1) 
+        if (act_num_files < 1)
             act_num_files = 1;
         double last_report = current_time();
         for (int fi = 0; fi < act_num_files; fi++) {
             int fwcnt = process_text_file(file_list[fi],data_dir,
                                           vocab->hmap,0,vocab_size,NULL,
-                                          file_words,max_file_words,0);
+                                          file_words,max_file_words,
+                                          255,vocab->token_flags);
             if (fwcnt <= 1)
                 continue;
+
+            /* Reorder the packed units within this file (reset-at-bos keeps
+             * them attention-isolated, so a different packing order each epoch
+             * is safe and varies which units share a window).
+             */
+            if (use_shuffle && m->bos_id > 0)
+                shuffle_units(file_words,fwcnt,m->bos_id);
 
             /* Slide over the token stream in windows of T, B windows/batch.
              * Each batch fills ids[BT], labels[BT] (next token), pad_mask[BT].
@@ -576,7 +730,7 @@ int main(int argc, char** argv)
 
                 ep_loss += loss; ep_positions += filled; ep_correct += correct;
 
-                if (current_time() - last_report >= 1.0) {
+                if (current_time() - last_report >= 0.1) {
                     last_report = current_time();
                     print_training_status(epoch,learning_rate,
                                           ep_loss,ep_positions,
@@ -592,14 +746,20 @@ int main(int argc, char** argv)
             printf("Validating...");
             fflush(stdout);
             double val_top1 = 0.0, val_ppl = 0.0;
-            validate(m,vocab,valid_list,num_valid,data_dir,vocab_size,
+            validate(m,vocab,valid_list,num_valid,valid_data_dir,vocab_size,
                      file_words,max_file_words,&val_top1,&val_ppl);
         }
 
-        char output[1024];
-        lm_generate(m,vocab->hmap,prompt_tokens,prompt_token_count,
-                    20,output,sizeof(output),0.8,40,3.7,32);
-        printf("%s\n",output);
+        /* Per-epoch preview: continue the fixed --prompt. */
+        {
+            char output[1024];
+            lm_generate(m,vocab->hmap,prompt_tokens,prompt_token_count,
+                        20,output,sizeof(output),0.8,40,3.7,32);
+            /* lm_generate returns the continuation only; print the prompt first */
+            for (int i = 0; i < prompt_token_count; i++)
+                printf("%s%s",i ? " " : "",vocab_word(vocab,prompt_tokens[i]));
+            printf("%s%s\n",output[0] ? " " : "",output);
+        }
         fflush(stdout);
 
         learning_rate *= lr_decay;
@@ -643,5 +803,7 @@ int main(int argc, char** argv)
     vocab_free(vocab);
     freemem(file_words);
     free_text_file_list(file_list,num_files);
+    if (valid_own != NULL)
+        free_text_file_list(valid_own,num_valid);
     return 0;
 }

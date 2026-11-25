@@ -1,7 +1,7 @@
 /* Copyright (c) 2026 Gilad Odinak      */
 /* Multi-Head Attention layer functions */
 /* References:
- * Attention Is All You Need, 2023. https://arxiv.org/pdf/1706.03762v7 
+ * Attention Is All You Need, 2023. https://arxiv.org/pdf/1706.03762v7
  * Roformer: Enhanced transformer with Rotary Position Embedding, 2023.
  * https://arxiv.org/pdf/2104.09864
  */
@@ -100,7 +100,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
     l->training = training;
     l->dropout_rate = dropout_rate;
-    
+
     MHA_STATE* s = allocmem(1,1,MHA_STATE);
     l->state = s;
 
@@ -131,13 +131,13 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 
     s->Scores = allocmem(l->T,l->T,float);
     s->Oh = allocmem(l->T,l->Dh,float);
-    
+
     l->Out = allocmem(l->BT,l->D,float);
 
     int D2 = l->D * l->D;
     float sd = sqrtf(1.0 / l->D);
     float *w;
-    
+
     w = (float*) l->Wq;
     for (int i = 0; i < D2; i++) w[i] = nrand(0,sd);
     w = (float*) l->Wk;
@@ -168,7 +168,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
     l->gWq = allocmem(l->D,l->D,float);
     l->gWk = allocmem(l->D,l->D,float);
     l->gWv = allocmem(l->D,l->D,float);
-    l->gWo = allocmem(l->D,l->D,float);    
+    l->gWo = allocmem(l->D,l->D,float);
 }
 
 /* Sets a padding mask
@@ -186,6 +186,14 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
 void mha_set_pad_mask(MHA* l, const iVec pad_mask)
 {
     l->pad_mask = pad_mask;
+}
+
+/* Sets a segment mask for intra-document ("reset at <bos>") attention.
+ * See mha.h. Passing NULL disables segment masking.
+ */
+void mha_set_seg_mask(MHA* l, const iVec seg_mask)
+{
+    l->seg_mask = seg_mask;
 }
 
 /* Releases all memory owned by an MHA layer.
@@ -225,7 +233,7 @@ void mha_free(MHA* l)
 
     freemem(s->Scores);
     freemem(s->Oh);
-    
+
     freemem(l->Out);
 
     /* backward buffers */
@@ -268,6 +276,7 @@ static inline void scale_scores(fArr2D restrict x_, int M, int T, float scale)
 /* Multiplies all elemensts of x by scale, then apply masks */
 static inline void scale_and_mask_scores(fArr2D Scores_/*[T][T]*/,
                                          const iVec pad_mask/*[BT]*/,
+                                         const iVec seg_mask/*[BT]*/,
                                          int b, int T,
                                          int lookahead, float scale)
 {
@@ -288,11 +297,28 @@ static inline void scale_and_mask_scores(fArr2D Scores_/*[T][T]*/,
                 Scores[i][j] = -1e9f;
     }
 
+    /* Padding masking: a padded key position is never attended, so real
+     * tokens ignore the trailing pad that fills a window out to length T.
+     * Only trailing padding is supported (none at the start of a sequence).
+     */
     if (pad_mask != NULL) {
         for (int i = 0; i < T; i++)
             if (!pad_mask[b * T + i])
                 for (int j = 0; j < T; j++)
                     Scores[j][i] = -1e9f;
+    }
+
+    /* Intra-document ("reset at <bos>") masking: a query attends to a key
+     * only when both carry the same segment id. This confines attention to
+     * within one <bos>..<eos> unit when several are packed in a window.
+     */
+    if (seg_mask != NULL) {
+        for (int i = 0; i < T; i++) {
+            int si = seg_mask[b * T + i];
+            for (int j = 0; j < T; j++)
+                if (seg_mask[b * T + j] != si)
+                    Scores[i][j] = -1e9f;
+        }
     }
 }
 
@@ -340,7 +366,7 @@ static inline void scale_and_mask_scores(fArr2D Scores_/*[T][T]*/,
  *     Out = Concat(Oh_0, ..., Oh_{H-1})
  *     Y   = Out @ Wo if Y != NULL
  *
- * Notes: 
+ * Notes:
  *  1. Padding is not allowed at the beginning of a sequence;
  *     only trailing (right-aligned) padding is supported.
  *  2. Offset is used when training overlapping windows:
@@ -435,7 +461,8 @@ void mha_forward(MHA* restrict l,
             matmulT(Scores,&Qh[base],&Kh[base],T,Dh,T);
 
             const iVec pad_mask = (const iVec) l->pad_mask;
-            scale_and_mask_scores(Scores,pad_mask,b,T,lookahead,scale);
+            const iVec seg_mask = (const iVec) l->seg_mask;
+            scale_and_mask_scores(Scores,pad_mask,seg_mask,b,T,lookahead,scale);
 
             /* Compute attention probabilities - Softmax - in Eq. 1 */
             softmax(Scores,T,T);

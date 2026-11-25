@@ -23,22 +23,36 @@ static int qsort_compare_word_cnt(const void* a, const void* b)
     return 0;
 }
 
+/* True if the token with id i starts with prefix pfx (NULL/"": never) */
+static int has_prefix(HASHMAP* h, int i, const char* pfx)
+{
+    return pfx != NULL && *pfx != '\0' &&
+           strncmp(hashmap_inx2str(h,i),pfx,strlen(pfx)) == 0;
+}
+
 /* vocab_build - Builds a vocabulary by scanning a corpus
  *
  * Parameters:
- *   file_list  - list of text files
- *   num_files  - number of files in file_list
- *   data_dir   - location of files
- *   vocab_size - Number of vocabulary words; 0 - derive from coverage
- *   coverage   - Target corpus-coverage fraction when vocab_size == 0
- *   max_vocab  - Maximum number of distinct words (typ. 3 x vocab_size)
- *   flags      - Bitwise OR of optional flags
- *       VOCAB_UNK     - unknown words mapped to <unk>; otherwise ignored
- *       VOCAB_NUM     - numbers mapped to <num>; otherwise unknown words
- *       VOCAB_SPECIAL - recognize <name> special tokens
- *       VOCAB_FREQ    - calculate and store word frequencies
- *       VOCAB_DIST    - calculate and store negative sampling distribution
- *       VOCAB_VERBOSE - print progress to stdout
+ *   file_list    - list of text files
+ *   num_files    - number of files in file_list
+ *   data_dir     - location of files
+ *   vocab_size   - Number of vocabulary words; 0 - derive from coverage
+ *   coverage     - Target corpus-coverage fraction when vocab_size == 0
+ *   max_vocab    - Maximum number of distinct words (typ. 3 x vocab_size)
+ *   max_word_len - words longer then this are skipped
+ *   flags        - Bitwise OR of optional flags (see below)
+ *   excpfx       - Tokens starting with this prefix (e.g. input-only tokens
+ *                  such as "<_" for <_aa>) are excluded from the negative
+ *                  sampling distribution; NULL or "" - none excluded
+ *
+ * Flags:
+ *   VOCAB_UNK     - unknown words mapped to <unk>; otherwise ignored
+ *   VOCAB_NUM     - numbers mapped to <num>; otherwise unknown words
+ *   VOCAB_SPECIAL - recognize <name> special tokens
+ *   VOCAB_FREQ    - calculate and store word frequencies
+ *   VOCAB_DIST    - calculate and store negative sampling distribution
+ *   VOCAB_VERBOSE - print progress to stdout
+ *
  *
  * Notes:
  *   - With VOCAB_SPECIAL, special tokens (<name>, e.g. <bos> <eos> <sep>)
@@ -54,7 +68,8 @@ static int qsort_compare_word_cnt(const void* a, const void* b)
  *   A VOCAB; returns NULL on failure.
  */
 VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
-                   int vocab_size, float coverage, int max_vocab, int flags)
+                   int vocab_size, float coverage, int max_vocab, int flags,
+                   int max_word_len, const char* excpfx)
 {
     if (file_list == NULL || num_files <= 0 || max_vocab < 1)
         return NULL;
@@ -65,9 +80,9 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     int calc_dist = flags & VOCAB_DIST;
     int verbose = flags & VOCAB_VERBOSE;
 
-    int tok_flags = 0;
-    if (flags & VOCAB_NUM) tok_flags |= TOK_NUMBER;
-    if (flags & VOCAB_SPECIAL) tok_flags |= TOK_SPECIAL;
+    int token_flags = 0;
+    if (flags & VOCAB_NUM) token_flags |= TOK_NUMBER;
+    if (flags & VOCAB_SPECIAL) token_flags |= TOK_SPECIAL;
 
     int stdout_is_tty = isatty(fileno(stdout));
 
@@ -82,7 +97,7 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     for (int i = 0; i < num_files; i++) {
         tot_word_cnt += process_text_file(file_list[i],data_dir,hmap,1,
                                           max_vocab,word_cnt,NULL,0,
-                                          tok_flags);
+                                          max_word_len,token_flags);
         if (verbose && stdout_is_tty) {
             printf("Processed file %d of %d, %lld words\r",
                    i + 1,num_files,tot_word_cnt);
@@ -190,9 +205,12 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
         const float dpow = 0.75;
         const int dscale = 10;
         for (int i = 1; i < vocab_size; i++)
-            dist_size += (int) (powf(cnt[i],dpow) / dscale) + 1;
+            if (!has_prefix(hmap,i,excpfx))
+                dist_size += (int) (powf(cnt[i],dpow) / dscale) + 1;
         dist = allocmem(dist_size,1,int);
         for (int i = 1, j = 0; i < vocab_size; i++) {
+            if (has_prefix(hmap,i,excpfx))
+                continue;
             int rpt = (int)(powf(cnt[i],dpow) / dscale) + 1;
             for (int k = 0; j < dist_size && k < rpt; k++)
                 dist[j++] = i;
@@ -208,7 +226,8 @@ VOCAB* vocab_build(char** file_list, int num_files, const char* data_dir,
     v->coverage = coverage;
     v->unk_id = unk_id;
     v->num_id = num_id;
-    v->tok_flags = tok_flags;
+    v->token_flags = token_flags;
+    v->max_word_len = max_word_len;
     v->freq = freq;
     v->dist = dist;
     v->dist_size = dist_size;
@@ -224,19 +243,20 @@ void vocab_free(VOCAB* v)
     freemem(v);
 }
 
-int vocab_tokenize(const VOCAB* v, const char* text, int* out, int max)
+int vocab_tokenize(const VOCAB* v, const char* text, int* out, int maxids)
 {
-    char token[255];
+    int maxlen = v->max_word_len;
+    char token[maxlen + 1];
     int cnt = 0;
-    for (const char* p = text_next_token(text,v->tok_flags,token,255);
-         p != NULL; p = text_next_token(p,v->tok_flags,token,255)) {
+    for (const char* p = text_next_token(text,v->token_flags,token,maxlen + 1);
+         p != NULL; p = text_next_token(p,v->token_flags,token,maxlen + 1)) {
         int id = vocab_lookup(v,token); /* <unk>/<num> fallbacks */
         if (id > 0) {
-            if (cnt < max) {
+            if (cnt < maxids) {
                 out[cnt++] = id;
             }
             else {
-                fprintf(stderr, "(prompt truncated to %d tokens)\n", max);
+                fprintf(stderr, "(prompt truncated to %d tokens)\n",maxids);
                 break;
             }
         }

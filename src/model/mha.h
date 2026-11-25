@@ -23,7 +23,8 @@ typedef struct {
     float dropout_rate; /* Attention dropout rate        */
     DROPOUT** dropout;  /* [B * H] masks                 */
     fVec theta;         /* [Dh/2] RoPE frequency table   */
-    iVec pad_mask;      /* [BT]                          */
+    iVec pad_mask;      /* [BT] 1-value 0-pad            */
+    iVec seg_mask;      /* [BT] segment id per position  */
 
     fArr2D Wq;  /* [D][D]  */
     fArr2D Wk;  /* [D][D]  */
@@ -103,7 +104,7 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
  *
  * Parameters:
  *   l        - Pointer to the MHA layer from mha_create().
- *   pad_mask - An integer array of length [B*T];
+ *   pad_mask - An integer array of length [B*T], or NULL to disable;
  *              entries are 1 for real tokens, 0 for padding.
  *
  * Notes:
@@ -112,6 +113,19 @@ void mha_init(MHA* l, int input_dim, int batch_size, int training, float dropout
  *   - pad_mask content may be set before each invocation of mha_forward.
  */
 void mha_set_pad_mask(MHA* l, const iVec pad_mask);
+
+/* Sets a segment mask for intra-document ("reset at <bos>") attention.
+ *
+ * Parameters:
+ *   l        - Pointer to the MHA layer from mha_create().
+ *   seg_mask - An integer array of length [B*T], or NULL to disable.
+ *              A query attends to a key only when both share a segment id.
+ *
+ * Notes:
+ *   - May be set, changed, or cleared (NULL) before any mha_forward call.
+ *   - Not used by the single-token cached path mha_forward_step.
+ */
+void mha_set_seg_mask(MHA* l, const iVec seg_mask);
 
 /* Releases all memory owned by an MHA layer.
  *
@@ -143,7 +157,7 @@ void mha_free(MHA* l);
  *               during inference/generation (no dropout, deterministic).
  *   lyr       : Layer index.
  *
- * Notes: 
+ * Notes:
  *  1. Padding is not allowed at the beginning of a sequence;
  *     only trailing (right-aligned) padding is supported.
  *  2. Offset is used when training overlapping windows:

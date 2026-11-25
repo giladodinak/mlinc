@@ -100,13 +100,6 @@ static inline int token_is_special(const char* token)
  *   Position past the token in str; NULL when there are no more tokens.
  *   Writes the token into token buffer (null terminated).
  *   Tokens longer than tlen - 1 are skipped.
- *
- * Example:
- *   char tok[101];
- *   for (const char* p = text_next_token(text,flags,tok,101);
- *        p != NULL;
- *        p = text_next_token(p,flags,tok,101))
- *       ... use tok ...
  */
 const char* text_next_token(const char* str, int flags, char* token, int tlen);
 

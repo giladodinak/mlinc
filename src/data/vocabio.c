@@ -23,24 +23,35 @@
 VOCAB* read_vocab(FILE* fp)
 {
     int size, mem_size, has_freq, has_dist, dist_size;
+    int unk_id = 0, num_id = 0, token_flags = 0, max_word_len = 0;
     float coverage;
-    int cnt = fscanf(fp," VOCAB size %d coverage %g mem %d freq %d"
-                        " dist %d dist_size %d",
-                     &size,&coverage,&mem_size,&has_freq,&has_dist,&dist_size);
-    if (cnt < 6 || cnt == EOF) {
+    char line[256];
+    int c;
+    do { /* Skip leading white space, as fscanf did */
+        c = fgetc(fp);
+    } while (c == ' ' || c == '\t' || c == '\r' || c == '\n');
+    if (c == EOF || ungetc(c,fp) == EOF ||
+        fgets(line,sizeof(line),fp) == NULL ||
+        line[strcspn(line,"\n")] != '\n') {
         fprintf(stderr,"In read_vocab: failed to read header\n");
         return NULL;
     }
-    int c = fgetc(fp);
-    if (c == '\r') c = fgetc(fp);
-    if (c != '\n') {
+    int cnt = sscanf(line,"VOCAB size %d coverage %g mem %d freq %d"
+                          " dist %d dist_size %d unk %d num %d tok %d mwl %d",
+                     &size,&coverage,&mem_size,&has_freq,
+                     &has_dist,&dist_size,&unk_id,&num_id,
+                     &token_flags,&max_word_len);
+    if (cnt != 10) {
         fprintf(stderr,"In read_vocab: invalid header\n");
         return NULL;
     }
     if (size <= 0 || size > INT_MAX / 3 || mem_size <= 0 ||
         (has_freq != 0 && has_freq != 1) ||
         (has_dist != 0 && has_dist != 1) ||
-        dist_size < 0 || (!has_dist && dist_size != 0)) {
+        dist_size < 0 || (!has_dist && dist_size != 0) ||
+        unk_id < 0 || unk_id >= size ||
+        num_id < 0 || num_id >= size ||
+        token_flags < 0 || max_word_len < 1) {
         fprintf(stderr,"In read_vocab: invalid dimensions\n");
         return NULL;
     }
@@ -52,6 +63,10 @@ VOCAB* read_vocab(FILE* fp)
     v->freq = NULL;
     v->dist = NULL;
     v->dist_size = 0;
+    v->unk_id = unk_id;
+    v->num_id = num_id;
+    v->token_flags = token_flags;
+    v->max_word_len = max_word_len;
 
     v->hmap = hashmap_create(size * 3,mem_size);
     for (int i = 0; i < size; i++) {
@@ -126,8 +141,8 @@ err: /* error exit */
 int write_vocab(const VOCAB* v, FILE* fp)
 {
     if (v == NULL || v->hmap == NULL || v->size <= 0 ||
-        v->hmap->mem_used <= 0 || v->dist_size < 0 ||
-        (v->dist == NULL && v->dist_size != 0)) {
+        v->hmap->mem_size <= 0 || v->dist_size < 0 ||
+        (v->dist == NULL && v->dist_size != 0) || v->max_word_len < 1) {
         fprintf(stderr,"In write_vocab: invalid vocabulary\n");
         return 0;
     }
@@ -135,9 +150,10 @@ int write_vocab(const VOCAB* v, FILE* fp)
     int has_dist = (v->dist != NULL);
     int dist_size = has_dist ? v->dist_size : 0;
     int cnt = fprintf(fp,"VOCAB size %d coverage %.9g mem %d freq %d"
-                         " dist %d dist_size %d\n",
-                      v->size,v->coverage,v->hmap->mem_used,
-                      has_freq,has_dist,dist_size);
+                         " dist %d dist_size %d unk %d num %d tok %d mwl %d\n",
+                      v->size,v->coverage,v->hmap->mem_size,
+                      has_freq,has_dist,dist_size,
+                      v->unk_id,v->num_id,v->token_flags,v->max_word_len);
     if (cnt <= 0 || cnt == EOF) {
         fprintf(stderr,"In write_vocab: failed to write the header\n");
         return 0;

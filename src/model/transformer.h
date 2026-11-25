@@ -71,7 +71,7 @@ extern "C" { /* nvcc is a c++ compiler */
  * Returns:
  *   Pointer to a zero-initialised TRANSFORMER. Call transformer_init() next.
  */
-TRANSFORMER* transformer_create(int heads, int steps, 
+TRANSFORMER* transformer_create(int heads, int steps,
                                 int model_dim, int ffn_dim,
                                 int lookahead);
 
@@ -98,6 +98,19 @@ void transformer_init(TRANSFORMER* l, int batch_size, int training, float dropou
  *   - pad_mask content may be set before calling mha_forward.
  */
 void transformer_set_pad_mask(TRANSFORMER* l, const iVec pad_mask);
+
+/* Sets a segment mask for intra-document ("reset at <bos>") attention.
+ *
+ * Parameters:
+ *   l        - Pointer to the TRANSFORMER layer from transformer_create().
+ *   seg_mask - An integer array of length [B*T], or NULL to disable.
+ *              A query attends to a key only when both share a segment id.
+ *
+ * Notes:
+ *   - May be set, changed, or cleared (NULL) before any transformer_forward.
+ *   - Forwards to mha_set_seg_mask; not used by transformer_forward_step.
+ */
+void transformer_set_seg_mask(TRANSFORMER* l, const iVec seg_mask);
 
 /* transformer_free - releases all memory owned by the layer. */
 void transformer_free(TRANSFORMER* l);

@@ -26,6 +26,7 @@
 #include "blascpu.h"
 #include "array.h"
 #include "random.h"
+#include "hash.h"
 #include "vocab.h"
 #include "activation.h"
 #include "lmemb.h"
@@ -52,7 +53,7 @@ static const char* usage =
 "  --top-k=<int>\n"
 "  -w <int>               Repetition-penalty window size (default 32)\n"
 "  --repeat-window=<int>\n"
-"  -p <float>             Repetition penalty (default 1.3)\n"
+"  -p <float>             Repetition penalty (default 3.7)\n"
 "  --repeat-penalty=<float>\n"
 "  -s <int>               RNG seed for reproducible sampling (default: clock)\n"
 "  --seed=<int>\n"
@@ -60,14 +61,15 @@ static const char* usage =
 "  --cores=<list>\n"
 ;
 
-/* Generate a continuation for the given prompt tokens and print it.
- * Argument order matches lm_generate() as called in lmtrain.c:
- *   (m, vocab->hmap, tokens, n_tokens, max_new_tokens, out, out_size,
- *    temperature, top_k, repeat_window, repeat_penalty)
- * The 'repeat_window' argument (the int between top_k and the float penalty)
- * is inferred positionally from lmtrain.c; rename here if the header differs.
+/* Generate a continuation for the given seed tokens and print it.
+ * lm_generate() argument order (see lm.h):
+ *   (m, vocab->hmap, seed, seedlen, max_new_tokens, out, out_size,
+ *    temperature, top_k, rep_penalty, rep_win_len)
+ * lm_generate returns the continuation only (not the seed); the seed is echoed
+ * before it.
  */
-static void generate_and_print(LM* m, const VOCAB* vocab, int* toks, int n,
+static void generate_and_print(LM* m, const VOCAB* vocab,
+                               const int* seed, int n,
                                int max_new, float temperature, int top_k,
                                int repeat_window, float repeat_penalty)
 {
@@ -77,9 +79,12 @@ static void generate_and_print(LM* m, const VOCAB* vocab, int* toks, int n,
     }
     int out_size = (n + max_new + 8) * 32;
     char* out = allocmem(1,out_size,char);
-    lm_generate(m,vocab->hmap,toks,n,max_new,out,out_size,
+    lm_generate(m,vocab->hmap,seed,n,max_new,out,out_size,
                 temperature,top_k,repeat_penalty,repeat_window);
-    printf("%s\n",out);
+    /* Echo the prompt, then the generated text. */
+    for (int i = 0; i < n; i++)
+        printf("%s%s",i ? " " : "",vocab_word(vocab,seed[i]));
+    printf("%s%s\n",out[0] ? " " : "",out);
     fflush(stdout);
     freemem(out);
 }
@@ -92,7 +97,7 @@ int main(int argc, char** argv)
     int   top_k          = 40;
     int   repeat_window  = 32;
     float repeat_penalty = 3.7;
-    int   seed           = 0;     /* 0 -> derive from clock */
+    int   seed_val       = 0;     /* RNG seed; 0 -> derive from clock */
     int   seed_set       = 0;
     char* blas_cores     = "0,2,4,6";
 
@@ -123,7 +128,7 @@ int main(int argc, char** argv)
             case 'k': top_k          = atoi(optarg); break;
             case 'w': repeat_window  = atoi(optarg); break;
             case 'p': repeat_penalty = atof(optarg); break;
-            case 's': seed = atoi(optarg); seed_set = 1; break;
+            case 's': seed_val = atoi(optarg); seed_set = 1; break;
             case 'c': blas_cores     = optarg;       break;
             case 'h': printf("%s",usage); return 0;
             default:  fprintf(stderr,"%s",usage);    return -1;
@@ -155,11 +160,11 @@ int main(int argc, char** argv)
 
     /* Seed the sampler: fixed seed for reproducibility, else from the clock. */
     if (!seed_set)
-        seed = (int) (current_time() * 1000.0);
-    init_lrng(seed);
+        seed_val = (int) (current_time() * 1000.0);
+    init_lrng(seed_val);
 
     int max_prompt_tokens = (m->T > 0) ? m->T : 128;
-    int* prompt_tokens = allocmem(1,max_prompt_tokens,int);
+    int* seed_tokens = allocmem(1,max_prompt_tokens,int);
 
     printf("Loaded '%s': vocab %d, model_dim %d, context %d\n",
            model_file,m->V,m->E,m->T);
@@ -176,8 +181,8 @@ int main(int argc, char** argv)
                 prompt[len++] = ' ';
             len += snprintf(prompt + len,sizeof(prompt) - len,"%s",argv[i]);
         }
-        int n = vocab_tokenize(vocab,prompt,prompt_tokens,max_prompt_tokens);
-        generate_and_print(m,vocab,prompt_tokens,n,max_new_tokens,
+        int n = vocab_tokenize(vocab,prompt,seed_tokens,max_prompt_tokens);
+        generate_and_print(m,vocab,seed_tokens,n,max_new_tokens,
                            temperature,top_k,repeat_window,repeat_penalty);
     } else {
         /* Interactive mode: read a prompt, print a continuation, repeat. */
@@ -189,15 +194,15 @@ int main(int argc, char** argv)
                 printf("\nBye\n");
                 break;
             }
-            int n = vocab_tokenize(vocab,line,prompt_tokens,max_prompt_tokens);
+            int n = vocab_tokenize(vocab,line,seed_tokens,max_prompt_tokens);
             if (n <= 0)
                 continue; /* blank line or all-OOV: prompt again */
-            generate_and_print(m,vocab,prompt_tokens,n,max_new_tokens,
+            generate_and_print(m,vocab,seed_tokens,n,max_new_tokens,
                                temperature,top_k,repeat_window,repeat_penalty);
         }
     }
 
-    freemem(prompt_tokens);
+    freemem(seed_tokens);
     lm_free(m);
     vocab_free(vocab);
     return 0;
